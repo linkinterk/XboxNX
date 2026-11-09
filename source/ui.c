@@ -741,7 +741,37 @@ static void draw_run(const UiState *s)
         gfx_text_fit(60, y + 10, 20, UI_W - 120, pfg, d);
         y += 54;
     } else {
-        y += 10;
+        /* el bucle en el que está: las últimas direcciones y sus bytes (para
+         * ver qué espera un juego que no avanza) */
+        uint32_t lo = cpu->eip, hi = cpu->eip;
+        for (int i = 0; i < CPU_TRACE; i++) {
+            uint32_t e = cpu->trace[i];
+            if (e && e + 0x40 > cpu->eip && e < cpu->eip + 0x40) {
+                lo = e < lo ? e : lo;
+                hi = e > hi ? e : hi;
+            }
+        }
+        uint8_t code[40] = {0};
+        unsigned n = hi + 8 - lo > sizeof(code) ? (unsigned)sizeof(code) : hi + 8 - lo;
+        vm_read(cpu->vm, lo, code, n);
+        int o = snprintf(d, sizeof(d), "Bucle %08X-%08X:", (unsigned)lo, (unsigned)hi);
+        for (unsigned i = 0; i < n && o < (int)sizeof(d) - 4; i++) {
+            o += snprintf(d + o, sizeof(d) - (size_t)o, " %02X", code[i]);
+        }
+        gfx_rrect(40, y, UI_W - 80, 58, 14, C_SURF);
+        gfx_text_fit(60, y + 8, 16, UI_W - 120, C_ON_VAR, d);
+        /* lo que hay en la memoria a la que apuntan los registros */
+        static const int ri[5] = {R_EBX, R_ESI, R_EDI, R_EBP, R_ECX};
+        static const char *rn[5] = {"EBX", "ESI", "EDI", "EBP", "ECX"};
+        o = 0;
+        for (int i = 0; i < 5; i++) {
+            uint32_t m[2] = {0, 0};
+            bool ok = vm_read(cpu->vm, cpu->r[ri[i]], m, 8);
+            o += snprintf(d + o, sizeof(d) - (size_t)o, "%s[%s] %08X %08X", i ? "   " : "", rn[i],
+                          ok ? (unsigned)m[0] : 0, ok ? (unsigned)m[1] : 0);
+        }
+        gfx_text_fit(60, y + 31, 16, UI_W - 120, C_ON_VAR, d);
+        y += 68;
     }
 
     /* registro de llamadas */
