@@ -8,6 +8,7 @@
 #include "../source/cpu.h"
 #include "../source/kernel.h"
 #include "../source/disc.h"
+#include "../source/hw.h"
 #include "../source/runner.h"
 
 static int g_fail;
@@ -569,6 +570,24 @@ static void hw_tests(void)
     CHECK(k.now_ns >= 16000000u);
     printf("3e hardware: %u ISR, %u DPC, %.1f ms virtuales, fin: %s\n", k.isrs_run, k.dpcs_run, k.now_ns / 1e6,
            g_run.end);
+
+    /* AC97: el códec listo, el SigmaTel, y un descriptor de 480 muestras que se consume en 10 ms */
+    uint32_t v = 0;
+    CHECK(hw_mmio(&k, 0xFEC00130u, 4, false, &v) && (v & 0x100));
+    CHECK(hw_mmio(&k, 0xFEC0007Cu, 2, false, &v) && v == 0x8384);
+    uint32_t bd = vm_phys(&vm, SCRATCH + 0x700);
+    wr(SCRATCH + 0x700, 0x00100000u);
+    wr(SCRATCH + 0x704, 0x80000000u | 480);      /* IOC, 480 muestras de 16 bits */
+    v = bd;
+    hw_mmio(&k, 0xFEC00110u, 4, true, &v);       /* PO BDBAR */
+    v = 0;
+    hw_mmio(&k, 0xFEC00115u, 1, true, &v);       /* LVI 0 */
+    v = 0x11;
+    hw_mmio(&k, 0xFEC0011Bu, 1, true, &v);       /* CR: RPBM | IOCE */
+    k.now_ns += 10000000u;
+    hw_tick(&k);
+    CHECK(hw_mmio(&k, 0xFEC00116u, 2, false, &v) && (v & 0x08) && (v & 0x01)); /* BCIS y DCH */
+    CHECK(hw_irq_lines(&k) & (1u << HW_IRQ_ACI));
 }
 
 int main(int argc, char **argv)

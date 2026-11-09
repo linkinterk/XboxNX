@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "aci.h"
 #include "kernel.h"
 
 /* ---- ventanas ---- */
@@ -94,7 +95,6 @@ typedef struct Ohci {
 typedef struct Hw {
     uint8_t *nv;          /* 16 MB de registros del NV2A */
     uint8_t *apu;
-    uint8_t aci[ACI_SIZE];
     uint8_t nic[NIC_SIZE];
     Ohci usb[2];
     uint64_t next_vblank;
@@ -120,7 +120,6 @@ static void nv_st(uint32_t off, uint32_t v) { *(uint32_t *)(g_hw.nv + off) = v; 
 
 bool hw_init(Kernel *k)
 {
-    (void)k;
     if (!g_hw.nv) {
         g_hw.nv = calloc(1, NV2A_SIZE);
         g_hw.apu = calloc(1, APU_SIZE);
@@ -139,6 +138,7 @@ bool hw_init(Kernel *k)
     nv_st(NV_PFB_CSTATUS, 64u << 20);
     nv_st(NV_PGRAPH_FIFO, 1);
     g_hw.next_vblank = FRAME_NS;
+    aci_init(k);
     for (int i = 0; i < 2; i++) {
         Ohci *o = &g_hw.usb[i];
         o->r[0x00 / 4] = 0x10;                   /* HcRevision 1.0 */
@@ -174,6 +174,9 @@ uint32_t hw_irq_lines(const Kernel *k)
     uint32_t lines = 0;
     if ((nv_ld(NV_PMC_INTR_EN_0) & 1) && pmc_intr()) {
         lines |= 1u << HW_IRQ_NV2A;
+    }
+    if (aci_irq()) {
+        lines |= 1u << HW_IRQ_ACI;
     }
     return lines;
 }
@@ -586,9 +589,9 @@ bool hw_mmio(void *kernel, uint32_t addr, int size, bool write, uint32_t *value)
         }
     } else if (addr >= ACI_BASE && addr - ACI_BASE + (uint32_t)size <= ACI_SIZE) {
         if (write) {
-            buf_wr(g_hw.aci, addr - ACI_BASE, size, *value);
+            aci_write(k, addr - ACI_BASE, size, *value);
         } else {
-            *value = buf_rd(g_hw.aci, addr - ACI_BASE, size);
+            *value = aci_read(k, addr - ACI_BASE, size);
         }
     } else if (addr >= USB0_BASE && addr < USB1_BASE + USB_SIZE &&
                ((addr - USB0_BASE) & 0x7FFF) + (uint32_t)size <= USB_SIZE) {
@@ -660,6 +663,7 @@ void hw_tick(Kernel *k)
         nv_st(NV_PTIMER_INTR_0, nv_ld(NV_PTIMER_INTR_0) | 1);
         g_hw.alarm_due += 1ull << 32;
     }
+    aci_tick(k);
 }
 
 bool hw_next_event(const Kernel *k, uint64_t *ns)

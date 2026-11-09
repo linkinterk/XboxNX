@@ -534,8 +534,8 @@ bool kps_next_deadline(const Kernel *k, uint64_t *ns)
         }
     }
     uint64_t hw;
-    if (k->irq_obj[HW_IRQ_NV2A] && hw_next_event(k, &hw) && hw < best) {
-        best = hw; /* el vblank despierta al ISR de D3D */
+    if ((k->irq_obj[HW_IRQ_NV2A] || k->irq_obj[HW_IRQ_ACI]) && hw_next_event(k, &hw) && hw < best) {
+        best = hw; /* el vblank (o el audio que avanza) despierta a los ISR */
         any = true;
     }
     *ns = best;
