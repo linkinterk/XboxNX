@@ -85,6 +85,7 @@ bool kernel_init(Kernel *k, Vm *vm)
 {
     memset(k, 0, sizeof(*k));
     k->vm = vm;
+    k->ns_per_instr = K_NS_PER_INSTR;
     index_exports();
     if (!vm_claim_phys(vm, K_PA, K_SIZE)) {
         return false;

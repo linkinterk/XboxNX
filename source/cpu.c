@@ -601,7 +601,8 @@ static void two_byte(Cpu *c, const Dec *d, int osz)
         modrm_ea(c, d, fetch8(c));
         return;
     case 0x31: { /* rdtsc: el Pentium III a 733 MHz sobre el tiempo virtual */
-        uint64_t ns = c->clock_ns ? *c->clock_ns + (c->icount - c->clock_icount) : c->icount;
+        uint64_t per = c->ns_per_instr ? c->ns_per_instr : 1;
+        uint64_t ns = c->clock_ns ? *c->clock_ns + (c->icount - c->clock_icount) * per : c->icount * per;
         uint64_t t = ns * 733 / 1000;
         c->r[R_EAX] = (uint32_t)t;
         c->r[R_EDX] = (uint32_t)(t >> 32);

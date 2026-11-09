@@ -23,7 +23,7 @@
 #include "ui.h"
 #include "usb/usb.h"
 
-#define APP_VER   "0.14.0"
+#define APP_VER   "0.14.1"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -46,12 +46,18 @@ static Runner g_run;
 static void load_into_memory(void);
 
 /* Etapa 2c: memoria limpia y el hilo de arranque en el intérprete. */
+/* El tiempo virtual por instrucción (Y en el registro): 2 ns es un
+ * Pentium III de 733 MHz; más, y el juego avanza más por cada instrucción
+ * (sus esperas activas terminan antes) aunque crea tener una CPU lenta. */
+static unsigned g_nspi = 2;
+
 static void start_run(void)
 {
     load_into_memory();
     if (!g_load.ok) {
         return; /* se queda en la pantalla de memoria con el error */
     }
+    g_kernel.ns_per_instr = g_nspi;
     runner_boot(&g_run, &g_vm, &g_kernel, &g_load);
     g_ui.run = &g_run;
     g_ui.run_scroll = -1;
@@ -383,6 +389,11 @@ int main(int argc, char **argv)
                     g_ui.run_screen = true;
                     dirty = true;
                     k = 0;
+                }
+                if (k & HidNpadButton_Y) {
+                    g_nspi = g_nspi >= 8 ? 1 : g_nspi * 2;
+                    g_kernel.ns_per_instr = g_nspi;
+                    dirty = true;
                 }
             }
             if (g_run.state == RUN_ACTIVE) {

@@ -1100,8 +1100,10 @@ static void draw_run(const UiState *s)
     }
 
     if (r->state == RUN_ACTIVE) {
-        Hint h[] = {{"X", "Pantalla"}, {"B", "Detener"}, {"+", "Salir"}};
-        bottom_bar(h, 3);
+        char clk[32];
+        snprintf(clk, sizeof(clk), "Reloj %u ns", kn ? kn->ns_per_instr : 1);
+        Hint h[] = {{"Y", clk}, {"X", "Pantalla"}, {"B", "Detener"}, {"+", "Salir"}};
+        bottom_bar(h, 4);
     } else {
         Hint h[] = {{"X", "Pantalla"}, {"A", "Otra vez"}, {"B", "Volver"}, {"+", "Salir"}};
         bottom_bar(h, 4);

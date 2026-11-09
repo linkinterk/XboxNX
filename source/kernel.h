@@ -182,6 +182,7 @@ typedef struct Kernel {
     int cur;                     /* hilo que corre (índice), -1 ninguno */
     unsigned next_id;
     uint64_t now_ns;             /* tiempo virtual desde el arranque */
+    unsigned ns_per_instr;       /* cuánto tiempo virtual vale una instrucción */
     unsigned quantum_count;
     KTimerRec timers[K_MAX_TIMERS];
     unsigned ntimers;

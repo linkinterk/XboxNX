@@ -241,11 +241,12 @@ RunState runner_slice(Runner *r, uint64_t max)
         uint64_t n = max < r->quantum_left ? max : r->quantum_left;
         uint64_t before = r->cpu.icount;
         r->cpu.clock_icount = before; /* rdtsc: k->now_ns vale hasta aquí */
+        r->cpu.ns_per_instr = k->ns_per_instr ? k->ns_per_instr : 1;
         CpuStop st = cpu_run(&r->cpu, n);
         uint64_t done = r->cpu.icount - before;
         max = done + 1 >= max ? 0 : max - done - 1; /* al menos 1 por vuelta */
         r->quantum_left = done >= r->quantum_left ? 0 : r->quantum_left - done;
-        k->now_ns += done * K_NS_PER_INSTR;
+        k->now_ns += done * (k->ns_per_instr ? k->ns_per_instr : 1);
         if (k->cur >= 0 && !k->in_dpc) {
             k->threads[k->cur].instructions += done;
         }
