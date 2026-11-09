@@ -29,12 +29,12 @@ jobs:
           gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
             -o build-test/load_test tests/load_test.c source/disc.c source/xbe.c source/game.c source/xpr.c \
             source/vm.c source/kernel.c source/kmm.c source/kob.c source/kps.c source/kio.c source/ksys.c source/xc_crypto.c source/loader.c source/sha1.c \
-            source/cpu.c source/runner.c
+            source/cpu.c source/runner.c -lm
           ./build-test/load_test build-test/t.iso
           ./build-test/load_test build-test/bad.iso --bad-sha
           gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
             -o build-test/kernel_test tests/kernel_test.c source/vm.c source/kernel.c source/kmm.c source/kob.c \
-            source/kps.c source/kio.c source/ksys.c source/xc_crypto.c source/disc.c source/cpu.c source/runner.c
+            source/kps.c source/kio.c source/ksys.c source/xc_crypto.c source/disc.c source/cpu.c source/runner.c -lm
           ./build-test/kernel_test build-test/t.iso
 
   interprete:
@@ -45,9 +45,13 @@ jobs:
       - name: Comparar 60.000 instrucciones aleatorias
         run: |
           pip install unicorn
-          gcc -std=gnu11 -O2 -Wall -Wextra -Werror -o cpu_diff tests/cpu_diff.c source/cpu.c source/vm.c
+          gcc -std=gnu11 -O2 -ffp-contract=off -Wall -Wextra -Werror -o cpu_diff tests/cpu_diff.c source/cpu.c source/vm.c -lm
           python3 tests/cpu_diff.py ./cpu_diff 30000 1
           python3 tests/cpu_diff.py ./cpu_diff 30000 2
+      - name: Comparar x87, SSE y MMX (20.000 secuencias)
+        run: |
+          python3 tests/fp_diff.py ./cpu_diff 10000 1
+          python3 tests/fp_diff.py ./cpu_diff 10000 2
 
   switch:
     name: XboxNX.nro (Switch)

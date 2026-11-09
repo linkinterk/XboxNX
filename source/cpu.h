@@ -40,6 +40,22 @@ typedef enum {
 
 #define CPU_TRACE 16
 
+typedef union X128 {
+    float f[4];
+    uint32_t u[4];
+    uint64_t q[2];
+} X128;
+
+/* Estado de coma flotante: x87 (en double), MMX y SSE. */
+typedef struct CpuFp {
+    double st[8];        /* registros físicos del x87 */
+    uint8_t top;         /* ST(0) = st[top] */
+    uint8_t empty;       /* bit i: st[i] vacío */
+    bool mmx;            /* en modo MMX (hasta emms) */
+    uint64_t mm[8];
+    X128 xmm[8];
+} CpuFp;
+
 typedef struct Cpu {
     uint32_t r[8];
     uint32_t eip;
@@ -47,6 +63,7 @@ typedef struct Cpu {
     uint32_t fs_base;
     uint16_t fpu_cw, fpu_sw;
     uint32_t mxcsr;
+    CpuFp fp;
     uint64_t icount;
     Vm *vm;
 

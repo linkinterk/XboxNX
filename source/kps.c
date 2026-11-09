@@ -177,6 +177,7 @@ int kps_thread_create(Kernel *k, uint32_t stack_size, uint32_t tls_size, uint32_
     t->ctx.flags = 0x202;
     t->ctx.fpu_cw = 0x027F;
     t->ctx.mxcsr = 0x1F80;
+    t->ctx.fp.empty = 0xFF;
     t->ctx.r[R_ESP] = ((tib - tls) & ~15u) - 16;
     wr(k, et + ET_UNIQUE_THREAD, t->id);
     return slot;
@@ -207,6 +208,7 @@ void kps_save(Kernel *k, Cpu *c)
     t->ctx.fpu_cw = c->fpu_cw;
     t->ctx.fpu_sw = c->fpu_sw;
     t->ctx.mxcsr = c->mxcsr;
+    t->ctx.fp = c->fp;
     t->exception_list = rd(k, K_KPCR_VA + PCR_EXCEPTION_LIST);
 }
 
@@ -222,6 +224,7 @@ void kps_load(Kernel *k, Cpu *c)
     c->fpu_cw = t->ctx.fpu_cw;
     c->fpu_sw = t->ctx.fpu_sw;
     c->mxcsr = t->ctx.mxcsr;
+    c->fp = t->ctx.fp;
     c->fs_base = K_KPCR_VA;
     wr(k, K_KPCR_VA + PCR_EXCEPTION_LIST, t->exception_list);
     wr(k, K_KPCR_VA + PCR_STACK_BASE, t->tib);

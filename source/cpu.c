@@ -7,6 +7,7 @@
  */
 #include "cpu.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -546,44 +547,9 @@ static void bit_op(Cpu *c, int op, const Ea *e, int sz, int32_t bit, bool reg_of
     ea_set(c, &t, sz, v);
 }
 
-/* ---- FPU mínima ---- */
+/* ---- coma flotante, MMX y SSE ---- */
 
-static void fpu(Cpu *c, const Dec *d, uint8_t op)
-{
-    uint8_t m = fetch8(c);
-    int reg = (m >> 3) & 7;
-    if (op == 0xDB && m == 0xE3) { /* fninit */
-        c->fpu_cw = 0x037F;
-        c->fpu_sw = 0;
-        return;
-    }
-    if (op == 0xDB && m == 0xE2) { /* fnclex */
-        c->fpu_sw &= 0x7F00;
-        return;
-    }
-    if (op == 0xDF && m == 0xE0) { /* fnstsw ax */
-        reg_set(c, R_EAX, 2, c->fpu_sw);
-        return;
-    }
-    if (m < 0xC0) {
-        Ea e = modrm_ea(c, d, m);
-        if (op == 0xD9 && reg == 7) { /* fnstcw */
-            mwr(c, e.addr, 2, c->fpu_cw);
-            return;
-        }
-        if (op == 0xD9 && reg == 5) { /* fldcw */
-            c->fpu_cw = (uint16_t)mrd(c, e.addr, 2);
-            return;
-        }
-        if (op == 0xDD && reg == 7) { /* fnstsw */
-            mwr(c, e.addr, 2, c->fpu_sw);
-            return;
-        }
-    }
-    char b[48];
-    snprintf(b, sizeof(b), "FPU x87 (%02X %02X)", op, m);
-    unimpl(c, d, b);
-}
+#include "cpu_fp.inc"
 
 /* ---- instrucciones de dos bytes (0F) ---- */
 
@@ -794,15 +760,9 @@ static void two_byte(Cpu *c, const Dec *d, int osz)
         }
         Ea e = modrm_ea(c, d, m);
         if (sub == 0) {
-            for (uint32_t i = 0; i < 512; i += 4) {
-                mwr(c, e.addr + i, 4, 0);
-            }
-            mwr(c, e.addr, 2, c->fpu_cw);
-            mwr(c, e.addr + 2, 2, c->fpu_sw);
-            mwr(c, e.addr + 24, 4, c->mxcsr);
+            fxsave(c, e.addr);
         } else if (sub == 1) {
-            c->fpu_cw = (uint16_t)mrd(c, e.addr, 2);
-            c->mxcsr = mrd(c, e.addr + 24, 4);
+            fxrstor(c, e.addr);
         } else if (sub == 2) {
             c->mxcsr = mrd(c, e.addr, 4);
         } else if (sub == 3) {
@@ -813,7 +773,10 @@ static void two_byte(Cpu *c, const Dec *d, int osz)
         return;
     }
     default:
-        snprintf(b, sizeof(b), "0F %02X", op);
+        if (sse_mmx(c, d, op)) {
+            return;
+        }
+        snprintf(b, sizeof(b), "%s0F %02X", d->rep == 0xF3 ? "F3 " : d->rep == 0xF2 ? "F2 " : d->opsize ? "66 " : "", op);
         unimpl(c, d, b);
         return;
     }
@@ -1278,6 +1241,7 @@ void cpu_init(Cpu *c, Vm *vm)
     c->flags = 0x2u | F_IF;
     c->fpu_cw = 0x027F;
     c->mxcsr = 0x1F80;
+    c->fp.empty = 0xFF;
 }
 
 const char *cpu_stop_text(CpuStop s)

@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "cpu.h"
 #include "vm.h"
 
 #define K_VA          0x80010000u
@@ -121,6 +122,7 @@ typedef struct KCtx {
     uint32_t r[8], eip, flags;
     uint16_t fpu_cw, fpu_sw;
     uint32_t mxcsr;
+    CpuFp fp;        /* x87, MMX y SSE */
 } KCtx;
 
 typedef struct KThread {

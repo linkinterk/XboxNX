@@ -40,7 +40,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET		:=	XboxNX
 APP_TITLE	:=	XboxNX
 APP_AUTHOR	:=	Jairo (basado en hakuX)
-APP_VERSION	:=	0.8.0
+APP_VERSION	:=	0.9.0
 BUILD		:=	build
 SOURCES		:=	source
 DATA		:=	data
@@ -52,7 +52,7 @@ INCLUDES	:=	include
 #---------------------------------------------------------------------------------
 ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
-CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
+CFLAGS	:=	-g -Wall -O2 -ffunction-sections -ffp-contract=off \
 			$(ARCH) $(DEFINES)
 
 CFLAGS	+=	$(INCLUDE) -D__SWITCH__

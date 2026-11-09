@@ -7,7 +7,7 @@ Port del emulador de Xbox original **hakuX** a Nintendo Switch, nativo (homebrew
 |---|---|---|
 | 1. Cargador | Biblioteca con la imagen de cada juego, lee la ISO, analiza `default.xbe` y prueba el hardware | Lista |
 | 2a. Memoria | 64 MB del Xbox, secciones del XBE en sus direcciones (verificadas con SHA-1), llamadas al kernel conectadas | Lista |
-| 2b. CPU (intérprete) | Intérprete x86 propio, probado contra Unicorn | Lista |
+| 2b. CPU (intérprete) | Intérprete x86 propio con x87, MMX y SSE del Pentium III, probado contra Unicorn | Lista |
 | 2c. Arranque | Hilo de arranque como el kernel del Xbox; registro de cada llamada al kernel | Lista |
 | 2d. CPU (FEX) | Traductor x86→ARM64 sobre el JIT de la Switch, para la velocidad | Pendiente |
 | 3a. Kernel: memoria y objetos | Memoria contigua y virtual, pool, pilas, handles, eventos, semáforos, mutex (44 funciones reales) | Lista |
