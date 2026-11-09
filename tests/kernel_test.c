@@ -678,6 +678,7 @@ static void hw_tests(void)
     CHECK(rd(SCRATCH + 0x500) >= 1 && k.isrs_run >= 1 && k.dpcs_run >= 1);
     CHECK(rd(SCRATCH + 0x50C) == 42);
     CHECK(rd(SCRATCH + 0x520) >= 5); /* el USB también se atendió */
+    CHECK(g_run.idle_skips >= 1 && k.idle_ns_skipped > 0); /* el bucle de espera saltó el tiempo */
     CHECK(rd(SCRATCH + 0x510) == 0x02A000A1u);
     CHECK(rd(SCRATCH + 0x514) > 50000);           /* > 15 ms a 3,375 MHz */
     CHECK(k.now_ns >= 16000000u);

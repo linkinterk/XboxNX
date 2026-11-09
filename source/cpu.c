@@ -1424,6 +1424,7 @@ typedef struct Block {
     uint32_t eip, ppage, gen;
     unsigned n;
     void *jit;            /* su traducción a ARM64 (2d.2), si la hay */
+    bool spin;            /* un bucle sobre sí mismo que solo lee y compara */
     uint32_t jit_epoch;   /* del búfer del JIT en que se tradujo */
     uint32_t hits;        /* veces que corrió sin traducción */
     Insn in[];
@@ -2300,6 +2301,32 @@ static bool ends_block(InsnFn f)
     return f == x_jcc || f == x_jmp || f == x_call || f == x_ret || f == x_call_e || f == x_jmp_e;
 }
 
+/* ¿Un bucle de espera? Salta a su propio principio y antes solo lee
+ * registros o memoria y compara: si los registros no cambian de una vuelta
+ * a otra, solo saldrá cuando otro (un ISR, el hardware, otro hilo) cambie
+ * la memoria. */
+static bool is_spin(const Block *b)
+{
+    if (b->n < 2 || b->n > 16) {
+        return false;
+    }
+    const Insn *last = &b->in[b->n - 1];
+    if (!((last->fn == x_jcc || last->fn == x_jmp) && last->imm == b->eip)) {
+        return false;
+    }
+    for (unsigned i = 0; i + 1 < b->n; i++) {
+        const Insn *in = &b->in[i];
+        InsnFn f = in->fn;
+        bool ok = f == x_nop || f == x_lea || f == x_test_eg || f == x_test_ei || f == x_mov_ge || f == x_movx ||
+                  f == x_alu_ge || (f == x_alu_ei && (in->is_reg || in->aop == OP_CMP)) ||
+                  ((f == x_mov_eg || f == x_mov_ei) && in->is_reg) || (f == x_alu_eg && (in->is_reg || in->aop == OP_CMP));
+        if (!ok || (in->aop == OP_ADC || in->aop == OP_SBB)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /* El bloque que empieza en eip (decodificado ahora si hace falta). */
 static Block *get_block(Cpu *c, uint32_t eip)
 {
@@ -2352,6 +2379,7 @@ static Block *get_block(Cpu *c, uint32_t eip)
     nb->jit_epoch = 0;
     nb->hits = 0;
     memcpy(nb->in, tmp, n * sizeof(Insn));
+    nb->spin = is_spin(nb);
     s->eip = eip;
     s->b = nb;
     return nb;
@@ -2379,6 +2407,21 @@ static CpuStop run_blocks(Cpu *c, uint64_t max)
             continue;
         }
         c->trace[c->trace_pos++ % CPU_TRACE] = b->eip;
+        if (b->spin) {
+            /* la misma vuelta con los mismos registros: espera algo de fuera */
+            if (c->spin_eip == b->eip && !memcmp(c->spin_r, c->r, sizeof(c->r))) {
+                if (++c->spin_n >= 8) {
+                    c->spin_n = 0;
+                    c->spin_eip = 0;
+                    c->idle = true;
+                    return CPU_LIMIT;
+                }
+            } else {
+                c->spin_eip = b->eip;
+                c->spin_n = 0;
+                memcpy(c->spin_r, c->r, sizeof(c->r));
+            }
+        }
 #ifdef HAVE_JIT
         if (c->jit_hot) {
             bool have = b->jit && b->jit_epoch == g_jit.epoch;

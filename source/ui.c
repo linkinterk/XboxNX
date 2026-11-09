@@ -809,9 +809,9 @@ static void draw_xbox_screen(const UiState *s)
         char irq[200];
         hw_irq_debug(irq, sizeof(irq));
         const uint8_t *pirql = vm_host(r->cpu.vm, K_KPCR_VA + 0x24);
-        snprintf(e, sizeof(e), "IRQL %u · DPC en cola %u · %s%s · %u ISR, %u DPC · %s", pirql ? *pirql : 0,
-                 kn->ndpc, kn->in_isr ? "en ISR" : "sin ISR", kn->in_dpc ? ", en DPC" : "", kn->isrs_run,
-                 kn->dpcs_run, irq);
+        snprintf(e, sizeof(e), "IRQL %u · DPC en cola %u · %s%s · %u ISR, %u DPC · esperas saltadas %llu (%.1f s) · %s",
+                 pirql ? *pirql : 0, kn->ndpc, kn->in_isr ? "en ISR" : "sin ISR", kn->in_dpc ? ", en DPC" : "",
+                 kn->isrs_run, kn->dpcs_run, (unsigned long long)r->idle_skips, kn->idle_ns_skipped / 1e9, irq);
         gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
     } else {
         snprintf(b, sizeof(b), "Pantalla del Xbox: el juego todavía no eligió un modo de video");

@@ -210,6 +210,7 @@ typedef struct Kernel {
     int isr_from;                /* hilo interrumpido a DISPATCH_LEVEL o más (+1; 0 ninguno) */
     bool in_isr;
     unsigned isrs_run;
+    uint64_t idle_ns_skipped;    /* tiempo virtual saltado en bucles de espera */
 } Kernel;
 
 bool kernel_init(Kernel *k, Vm *vm);
@@ -264,6 +265,9 @@ void kps_thread_start(Kernel *k, int t, uint32_t eip, const uint32_t *v, unsigne
 void kps_save(Kernel *k, struct Cpu *c);
 void kps_load(Kernel *k, struct Cpu *c);
 bool kps_interrupt(Kernel *k, struct Cpu *c);
+/* El hilo actual espera en un bucle: si nadie más puede correr, el tiempo
+ * virtual salta al siguiente evento (como mucho 20 ms). */
+void kps_idle_skip(Kernel *k);
 /* Avanza el tiempo, dispara temporizadores, despierta esperas y elige el
  * siguiente hilo (o un DPC). Devuelve false si no hay nada que correr. */
 bool kps_schedule(Kernel *k, struct Cpu *c, bool preempt);

@@ -90,7 +90,9 @@ typedef struct Cpu {
     uint32_t lf_a, lf_b, lf_res;
     bool use_blocks;            /* cpu_run por bloques decodificados (etapa 2d.1) */
     const volatile uint8_t *yield; /* si vale 1, cpu_run vuelve al terminar el bloque (una interrupción) */
-    uint8_t jit_hot;            /* JIT a ARM64 (2d.2): veces que corre un bloque antes de traducirlo; 0 sin JIT */
+    uint8_t jit_hot;
+    bool idle;                  /* cpu_run paró en un bucle que solo espera (lee y compara) */
+    uint32_t spin_eip, spin_n, spin_r[8];            /* JIT a ARM64 (2d.2): veces que corre un bloque antes de traducirlo; 0 sin JIT */
     void *blocks;               /* su tabla (cpu.c) */
     uint32_t fetch_page;        /* la página del código en curso (cpu.c) */
     const uint8_t *fetch_host;

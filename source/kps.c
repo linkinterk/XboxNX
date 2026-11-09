@@ -657,6 +657,24 @@ static void irq_dispatch(Kernel *k, Cpu *c)
     k->in_isr = true;
 }
 
+void kps_idle_skip(Kernel *k)
+{
+    if (k->in_isr || k->in_dpc) {
+        return;
+    }
+    for (int i = 0; i < K_MAX_THREADS; i++) {
+        if (i != k->cur && k->threads[i].state == KT_READY && !k->threads[i].suspend) {
+            return; /* otro hilo puede usar el tiempo */
+        }
+    }
+    uint64_t next, before = k->now_ns;
+    if (kps_next_deadline(k, &next) && next > k->now_ns) {
+        uint64_t cap = k->now_ns + 20000000u;
+        k->now_ns = next < cap ? next : cap;
+        k->idle_ns_skipped += k->now_ns - before;
+    }
+}
+
 /* El hilo actual corre a DISPATCH_LEVEL o más (no se cambia de hilo), pero
  * las interrupciones del hardware tienen más IRQL y sí deben atenderse: si
  * hay una, el hilo de los ISR la corre y luego se vuelve a este hilo. Sin

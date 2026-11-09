@@ -270,6 +270,15 @@ RunState runner_slice(Runner *r, uint64_t max)
                     r->cpu.stop = CPU_RUNNING;
                 }
             }
+            if (r->cpu.idle) {
+                /* un bucle que solo espera: en vez de dar vueltas millones de
+                 * veces, el tiempo salta al siguiente evento (vblank, USB,
+                 * temporizador) y se reparte el turno */
+                r->cpu.idle = false;
+                kps_idle_skip(k);
+                r->quantum_left = 0;
+                r->idle_skips++;
+            }
             if (!r->quantum_left) {
                 reschedule(r, true);
             }

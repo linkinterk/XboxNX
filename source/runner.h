@@ -49,6 +49,7 @@ typedef struct Runner {
     unsigned ncalls;         /* total de llamadas */
     unsigned distinct;
     unsigned simulated;      /* llamadas contestadas con un 0 simulado */
+    uint64_t idle_skips;     /* bucles de espera saltados */
     uint8_t seen[K_ORDINAL_MAX];
     uint64_t ns;             /* tiempo de CPU del intérprete */
     uint64_t quantum_left;   /* instrucciones hasta cambiar de hilo */
