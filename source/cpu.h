@@ -88,11 +88,15 @@ typedef struct Cpu {
     unsigned ns_per_instr;      /* el tiempo virtual de cada instrucción (0: 1 ns) */
     uint8_t lf_op, lf_sz, lf_cin; /* flags perezosos (cpu.c): la última operación */
     uint32_t lf_a, lf_b, lf_res;
+    bool use_blocks;            /* cpu_run por bloques decodificados (etapa 2d.1) */
+    void *blocks;               /* su tabla (cpu.c) */
     uint32_t fetch_page;        /* la página del código en curso (cpu.c) */
     const uint8_t *fetch_host;
 } Cpu;
 
 void cpu_init(Cpu *c, Vm *vm);
+/* Libera los bloques decodificados (antes de otro cpu_init). */
+void cpu_free(Cpu *c);
 /* Ejecuta hasta max instrucciones o hasta parar; devuelve el motivo. */
 CpuStop cpu_run(Cpu *c, uint64_t max);
 /* Un paso; para pruebas. */

@@ -9,6 +9,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ---- memoria ---- */
@@ -60,6 +61,7 @@ static void mwr(Cpu *c, uint32_t a, int sz, uint32_t v)
     uint8_t *h = hp(c, a);
     if (h && (a & (VM_PAGE - 1)) + (uint32_t)sz <= VM_PAGE) {
         memcpy(h, b, (size_t)sz);
+        vm_touch(c->vm, (uint32_t)((size_t)(h - c->vm->ram) >> 12)); /* código escrito: otra traducción */
         return;
     }
     if (!vm_write(c->vm, a, b, (size_t)sz)) {
@@ -1379,6 +1381,706 @@ done:
     return c->stop;
 }
 
+/* ================================================== bloques decodificados
+ *
+ * Etapa 2d.1: cada trozo de código se decodifica una sola vez en un bloque
+ * de instrucciones ya entendidas (operandos, modrm, inmediatos) y luego se
+ * ejecuta llamando a la función de cada una, sin volver a leer los bytes.
+ * Solo las instrucciones más comunes tienen función propia; la primera que
+ * no la tiene termina el bloque y la hace el intérprete (step), así nada se
+ * pierde. Un bloque vive en una página física: si alguien escribe en ella
+ * (vm_touch), su gen sube y el bloque se vuelve a decodificar. */
+
+#define NOREG 8
+#define BLK_MAX 64
+#define BLK_HASH 16384
+
+typedef struct Insn Insn;
+typedef void (*InsnFn)(Cpu *c, const Insn *in);
+struct Insn {
+    InsnFn fn;
+    uint32_t start, next;   /* su EIP y el de la siguiente */
+    uint32_t imm;           /* inmediato (o el destino de un salto) */
+    uint32_t disp;          /* desplazamiento de la dirección */
+    uint8_t sz;             /* tamaño del operando: 1, 2, 4 */
+    uint8_t reg;            /* el campo reg del modrm (o el registro del opcode) */
+    uint8_t aop;            /* operación ALU, condición, tamaño fuente... */
+    uint8_t is_reg, rm;     /* el operando E es un registro (rm) */
+    uint8_t base, index, scale, fs;
+};
+
+typedef struct Block {
+    uint32_t eip, ppage, gen;
+    unsigned n;
+    Insn in[];
+} Block;
+
+typedef struct BlockSlot {
+    uint32_t eip;
+    Block *b;
+} BlockSlot;
+
+static inline uint32_t b_ea(Cpu *c, const Insn *in)
+{
+    uint32_t a = in->disp;
+    if (in->base != NOREG) {
+        a += c->r[in->base];
+    }
+    if (in->index != NOREG) {
+        a += c->r[in->index] << in->scale;
+    }
+    if (in->fs) {
+        a += c->fs_base;
+    }
+    return a;
+}
+
+static inline uint32_t e_get(Cpu *c, const Insn *in, int sz)
+{
+    return in->is_reg ? reg_get(c, in->rm, sz) : mrd(c, b_ea(c, in), sz);
+}
+
+static inline void e_set(Cpu *c, const Insn *in, int sz, uint32_t v)
+{
+    if (in->is_reg) {
+        reg_set(c, in->rm, sz, v);
+    } else {
+        mwr(c, b_ea(c, in), sz, v);
+    }
+}
+
+/* ---- las funciones de cada instrucción (c->eip ya es in->next) ---- */
+
+static void x_alu_eg(Cpu *c, const Insn *in)
+{
+    if (in->is_reg) {
+        uint32_t r = alu(c, in->aop, reg_get(c, in->rm, in->sz), reg_get(c, in->reg, in->sz), in->sz);
+        if (in->aop != OP_CMP) {
+            reg_set(c, in->rm, in->sz, r);
+        }
+        return;
+    }
+    uint32_t a = b_ea(c, in);
+    uint32_t v = mrd(c, a, in->sz);
+    uint32_t r = alu(c, in->aop, v, reg_get(c, in->reg, in->sz), in->sz);
+    if (in->aop != OP_CMP && c->stop == CPU_RUNNING) {
+        mwr(c, a, in->sz, r);
+    }
+}
+
+static void x_alu_ge(Cpu *c, const Insn *in)
+{
+    uint32_t r = alu(c, in->aop, reg_get(c, in->reg, in->sz), e_get(c, in, in->sz), in->sz);
+    if (in->aop != OP_CMP) {
+        reg_set(c, in->reg, in->sz, r);
+    }
+}
+
+static void x_alu_ei(Cpu *c, const Insn *in)
+{
+    if (in->is_reg) {
+        uint32_t r = alu(c, in->aop, reg_get(c, in->rm, in->sz), in->imm, in->sz);
+        if (in->aop != OP_CMP) {
+            reg_set(c, in->rm, in->sz, r);
+        }
+        return;
+    }
+    uint32_t a = b_ea(c, in);
+    uint32_t v = mrd(c, a, in->sz);
+    uint32_t r = alu(c, in->aop, v, in->imm, in->sz);
+    if (in->aop != OP_CMP && c->stop == CPU_RUNNING) {
+        mwr(c, a, in->sz, r);
+    }
+}
+
+static void x_test_eg(Cpu *c, const Insn *in)
+{
+    alu(c, OP_AND, e_get(c, in, in->sz), reg_get(c, in->reg, in->sz), in->sz);
+}
+
+static void x_test_ei(Cpu *c, const Insn *in) { alu(c, OP_AND, e_get(c, in, in->sz), in->imm, in->sz); }
+
+static void x_incdec(Cpu *c, const Insn *in)
+{
+    if (in->is_reg) {
+        reg_set(c, in->rm, in->sz, incdec(c, in->aop, reg_get(c, in->rm, in->sz), in->sz));
+        return;
+    }
+    uint32_t a = b_ea(c, in);
+    uint32_t v = mrd(c, a, in->sz);
+    if (c->stop == CPU_RUNNING) {
+        mwr(c, a, in->sz, incdec(c, in->aop, v, in->sz));
+    }
+}
+
+static void x_push_r(Cpu *c, const Insn *in) { push(c, in->sz, reg_get(c, in->reg, in->sz)); }
+
+static void x_pop_r(Cpu *c, const Insn *in)
+{
+    uint32_t v = pop(c, in->sz);
+    if (c->stop == CPU_RUNNING) {
+        reg_set(c, in->reg, in->sz, v);
+    }
+}
+
+static void x_push_i(Cpu *c, const Insn *in) { push(c, in->sz, in->imm); }
+
+static void x_push_e(Cpu *c, const Insn *in)
+{
+    uint32_t v = e_get(c, in, in->sz);
+    if (c->stop == CPU_RUNNING) {
+        push(c, in->sz, v);
+    }
+}
+
+static void x_mov_eg(Cpu *c, const Insn *in) { e_set(c, in, in->sz, reg_get(c, in->reg, in->sz)); }
+
+static void x_mov_ge(Cpu *c, const Insn *in)
+{
+    uint32_t v = e_get(c, in, in->sz);
+    if (c->stop == CPU_RUNNING) {
+        reg_set(c, in->reg, in->sz, v);
+    }
+}
+
+static void x_mov_ei(Cpu *c, const Insn *in) { e_set(c, in, in->sz, in->imm); }
+
+static void x_lea(Cpu *c, const Insn *in) { reg_set(c, in->reg, in->sz, b_ea(c, in)); }
+
+static void x_movx(Cpu *c, const Insn *in)
+{
+    /* aop: tamaño de la fuente; imm: 1 con signo */
+    uint32_t v = e_get(c, in, in->aop);
+    if (c->stop != CPU_RUNNING) {
+        return;
+    }
+    if (in->imm) {
+        v = (uint32_t)sext(v, in->aop);
+    }
+    reg_set(c, in->reg, in->sz, v);
+}
+
+static void x_jcc(Cpu *c, const Insn *in)
+{
+    if (cond(c, in->aop)) {
+        c->eip = in->imm;
+    }
+}
+
+static void x_jmp(Cpu *c, const Insn *in) { c->eip = in->imm; }
+
+static void x_call(Cpu *c, const Insn *in)
+{
+    push(c, 4, in->next);
+    c->eip = in->imm;
+}
+
+static void x_ret(Cpu *c, const Insn *in)
+{
+    uint32_t t = pop(c, 4);
+    if (c->stop == CPU_RUNNING) {
+        c->eip = t;
+        c->r[R_ESP] += in->imm;
+    }
+}
+
+static void x_call_e(Cpu *c, const Insn *in)
+{
+    uint32_t t = e_get(c, in, 4);
+    if (c->stop != CPU_RUNNING) {
+        return;
+    }
+    push(c, 4, in->next);
+    c->eip = t;
+}
+
+static void x_jmp_e(Cpu *c, const Insn *in)
+{
+    uint32_t t = e_get(c, in, 4);
+    if (c->stop == CPU_RUNNING) {
+        c->eip = t;
+    }
+}
+
+static void x_setcc(Cpu *c, const Insn *in) { e_set(c, in, 1, cond(c, in->aop) ? 1 : 0); }
+
+static void x_cmov(Cpu *c, const Insn *in)
+{
+    uint32_t v = e_get(c, in, in->sz); /* lee siempre (como el hardware) */
+    if (c->stop == CPU_RUNNING && cond(c, in->aop)) {
+        reg_set(c, in->reg, in->sz, v);
+    }
+}
+
+static void x_shift(Cpu *c, const Insn *in)
+{
+    /* imm: la cuenta (0xFF: CL) */
+    unsigned cnt = in->imm == 0xFF ? (c->r[R_ECX] & 0xFF) : in->imm;
+    uint32_t a = in->is_reg ? 0 : b_ea(c, in);
+    uint32_t v = in->is_reg ? reg_get(c, in->rm, in->sz) : mrd(c, a, in->sz);
+    if (c->stop != CPU_RUNNING || (cnt & 31) == 0) {
+        return;
+    }
+    uint32_t r = shift(c, in->aop, v, cnt, in->sz);
+    if (in->is_reg) {
+        reg_set(c, in->rm, in->sz, r);
+    } else {
+        mwr(c, a, in->sz, r);
+    }
+}
+
+static void x_imul(Cpu *c, const Insn *in)
+{
+    /* aop 1: Gv = Ev * imm; 0: Gv = Gv * Ev */
+    uint32_t e = e_get(c, in, in->sz);
+    if (c->stop != CPU_RUNNING) {
+        return;
+    }
+    int64_t other = in->aop ? (int64_t)(int32_t)in->imm : (int64_t)sext(reg_get(c, in->reg, in->sz), in->sz);
+    int64_t full = (int64_t)sext(e, in->sz) * other;
+    uint32_t res = (uint32_t)full & mask_of(in->sz);
+    bool over = full != (int64_t)sext(res, in->sz);
+    reg_set(c, in->reg, in->sz, res);
+    set_flag(c, F_CF, over);
+    set_flag(c, F_OF, over);
+    szp(c, res, in->sz);
+}
+
+static void x_cdq(Cpu *c, const Insn *in)
+{
+    if (in->sz == 4) {
+        c->r[R_EDX] = (c->r[R_EAX] & 0x80000000u) ? 0xFFFFFFFFu : 0;
+    } else {
+        reg_set(c, R_EDX, 2, (c->r[R_EAX] & 0x8000) ? 0xFFFF : 0);
+    }
+}
+
+static void x_leave(Cpu *c, const Insn *in)
+{
+    (void)in;
+    uint32_t esp = c->r[R_ESP];
+    c->r[R_ESP] = c->r[R_EBP];
+    uint32_t v = pop(c, 4);
+    if (c->stop == CPU_RUNNING) {
+        c->r[R_EBP] = v;
+    } else {
+        c->r[R_ESP] = esp;
+    }
+}
+
+static void x_nop(Cpu *c, const Insn *in)
+{
+    (void)c;
+    (void)in;
+}
+
+static void x_xchg(Cpu *c, const Insn *in)
+{
+    if (in->is_reg) {
+        uint32_t t = reg_get(c, in->rm, in->sz);
+        reg_set(c, in->rm, in->sz, reg_get(c, in->reg, in->sz));
+        reg_set(c, in->reg, in->sz, t);
+        return;
+    }
+    uint32_t a = b_ea(c, in);
+    uint32_t v = mrd(c, a, in->sz);
+    if (c->stop != CPU_RUNNING) {
+        return;
+    }
+    mwr(c, a, in->sz, reg_get(c, in->reg, in->sz));
+    if (c->stop == CPU_RUNNING) {
+        reg_set(c, in->reg, in->sz, v);
+    }
+}
+
+/* ---- decodificar ---- */
+
+typedef struct Rd {
+    const uint8_t *p;   /* el principio de la página */
+    uint32_t pos;       /* dentro de la página */
+    bool bad;           /* se pasó del final de la página */
+} Rd;
+
+static inline uint8_t rd8(Rd *r)
+{
+    if (r->pos >= VM_PAGE) {
+        r->bad = true;
+        return 0;
+    }
+    return r->p[r->pos++];
+}
+
+static inline uint32_t rdn(Rd *r, int n)
+{
+    uint32_t v = 0;
+    for (int i = 0; i < n; i++) {
+        v |= (uint32_t)rd8(r) << (8 * i);
+    }
+    return v;
+}
+
+static void dec_modrm(Rd *r, Insn *in, uint8_t m)
+{
+    int mod = m >> 6, rm = m & 7;
+    in->reg = (m >> 3) & 7;
+    in->base = in->index = NOREG;
+    in->scale = 0;
+    in->disp = 0;
+    if (mod == 3) {
+        in->is_reg = 1;
+        in->rm = (uint8_t)rm;
+        return;
+    }
+    in->is_reg = 0;
+    if (rm == 4) {
+        uint8_t sib = rd8(r);
+        int scale = sib >> 6, idx = (sib >> 3) & 7, base = sib & 7;
+        if (base == 5 && mod == 0) {
+            in->disp = rdn(r, 4);
+        } else {
+            in->base = (uint8_t)base;
+        }
+        if (idx != 4) {
+            in->index = (uint8_t)idx;
+            in->scale = (uint8_t)scale;
+        }
+    } else if (rm == 5 && mod == 0) {
+        in->disp = rdn(r, 4);
+    } else {
+        in->base = (uint8_t)rm;
+    }
+    if (mod == 1) {
+        in->disp += (uint32_t)(int32_t)(int8_t)rd8(r);
+    } else if (mod == 2) {
+        in->disp += rdn(r, 4);
+    }
+}
+
+/* Una instrucción con función propia; false: la hace el intérprete. */
+static bool decode(Rd *r, uint32_t page_va, Insn *in)
+{
+    uint32_t start = r->pos;
+    bool o16 = false, fs = false;
+    uint8_t op;
+    for (;;) {
+        op = rd8(r);
+        if (op == 0x66) {
+            o16 = true;
+        } else if (op == 0x64) {
+            fs = true;
+        } else if (op == 0x3E || op == 0x26 || op == 0x2E || op == 0x36) {
+            /* segmentos planos */
+        } else {
+            break;
+        }
+        if (r->pos - start > 4) {
+            return false;
+        }
+    }
+    int osz = o16 ? 2 : 4;
+    memset(in, 0, sizeof(*in));
+    in->start = page_va + start;
+    in->fs = fs;
+    in->base = in->index = NOREG;
+    if (op < 0x40 && (op & 7) < 6) { /* ALU 00-3D */
+        int form = op & 7;
+        in->aop = op >> 3;
+        in->sz = (uint8_t)((form & 1) ? osz : 1);
+        if (form < 4) {
+            dec_modrm(r, in, rd8(r));
+            in->fn = form < 2 ? x_alu_eg : x_alu_ge;
+        } else {
+            in->is_reg = 1;
+            in->rm = R_EAX;
+            in->imm = rdn(r, in->sz);
+            in->fn = x_alu_ei;
+        }
+    } else if (op >= 0x40 && op <= 0x4F) {
+        in->is_reg = 1;
+        in->rm = op & 7;
+        in->sz = (uint8_t)osz;
+        in->aop = op >= 0x48;
+        in->fn = x_incdec;
+    } else if (op >= 0x50 && op <= 0x57) {
+        in->reg = op & 7;
+        in->sz = (uint8_t)osz;
+        in->fn = x_push_r;
+    } else if (op >= 0x58 && op <= 0x5F) {
+        in->reg = op & 7;
+        in->sz = (uint8_t)osz;
+        in->fn = x_pop_r;
+    } else if (op == 0x68 || op == 0x6A) {
+        in->sz = (uint8_t)osz;
+        in->imm = op == 0x68 ? rdn(r, osz) : (uint32_t)(int32_t)(int8_t)rd8(r);
+        in->fn = x_push_i;
+    } else if (op == 0x69 || op == 0x6B) {
+        in->sz = (uint8_t)osz;
+        dec_modrm(r, in, rd8(r));
+        in->imm = op == 0x6B ? (uint32_t)(int32_t)(int8_t)rd8(r)
+                             : (osz == 2 ? (uint32_t)(int32_t)(int16_t)rdn(r, 2) : rdn(r, 4));
+        in->aop = 1;
+        in->fn = x_imul;
+    } else if (op >= 0x70 && op <= 0x7F) {
+        int8_t rel = (int8_t)rd8(r);
+        in->aop = op & 15;
+        in->imm = page_va + r->pos + (uint32_t)(int32_t)rel;
+        in->fn = x_jcc;
+    } else if (op == 0x80 || op == 0x81 || op == 0x83) {
+        in->sz = (uint8_t)(op == 0x80 ? 1 : osz);
+        dec_modrm(r, in, rd8(r));
+        in->aop = in->reg;
+        in->imm = op == 0x81 ? rdn(r, osz) : (op == 0x83 ? (uint32_t)(int32_t)(int8_t)rd8(r) : rd8(r));
+        in->fn = x_alu_ei;
+    } else if (op == 0x84 || op == 0x85) {
+        in->sz = (uint8_t)(op == 0x84 ? 1 : osz);
+        dec_modrm(r, in, rd8(r));
+        in->fn = x_test_eg;
+    } else if (op == 0x86 || op == 0x87) {
+        in->sz = (uint8_t)(op == 0x86 ? 1 : osz);
+        dec_modrm(r, in, rd8(r));
+        in->fn = x_xchg;
+    } else if (op >= 0x88 && op <= 0x8B) {
+        in->sz = (uint8_t)((op & 1) ? osz : 1);
+        dec_modrm(r, in, rd8(r));
+        in->fn = op <= 0x89 ? x_mov_eg : x_mov_ge;
+    } else if (op == 0x8D) {
+        in->sz = (uint8_t)osz;
+        dec_modrm(r, in, rd8(r));
+        if (in->is_reg) {
+            return false;
+        }
+        in->fs = 0; /* lea no suma el segmento */
+        in->fn = x_lea;
+    } else if (op == 0x90) {
+        in->fn = x_nop;
+    } else if (op == 0x99) {
+        in->sz = (uint8_t)osz;
+        in->fn = x_cdq;
+    } else if (op >= 0xA0 && op <= 0xA3) {
+        in->sz = (uint8_t)((op & 1) ? osz : 1);
+        in->disp = rdn(r, 4);
+        in->reg = R_EAX;
+        in->fn = op < 0xA2 ? x_mov_ge : x_mov_eg;
+    } else if (op == 0xA8 || op == 0xA9) {
+        in->sz = (uint8_t)(op == 0xA8 ? 1 : osz);
+        in->is_reg = 1;
+        in->rm = R_EAX;
+        in->imm = rdn(r, in->sz);
+        in->fn = x_test_ei;
+    } else if (op >= 0xB0 && op <= 0xBF) {
+        in->sz = (uint8_t)(op < 0xB8 ? 1 : osz);
+        in->is_reg = 1;
+        in->rm = op & 7;
+        in->imm = rdn(r, in->sz);
+        in->fn = x_mov_ei;
+    } else if (op == 0xC0 || op == 0xC1 || (op >= 0xD0 && op <= 0xD3)) {
+        in->sz = (uint8_t)((op & 1) ? osz : 1);
+        dec_modrm(r, in, rd8(r));
+        in->aop = in->reg;
+        in->imm = op <= 0xC1 ? rd8(r) : (op <= 0xD1 ? 1u : 0xFFu);
+        if (op <= 0xC1 && in->imm == 0xFF) {
+            return false; /* la cuenta 0xFF se confundiría con CL */
+        }
+        in->fn = x_shift;
+    } else if (op == 0xC2 || op == 0xC3) {
+        if (o16) {
+            return false;
+        }
+        in->imm = op == 0xC2 ? rdn(r, 2) : 0;
+        in->fn = x_ret;
+    } else if (op == 0xC6 || op == 0xC7) {
+        in->sz = (uint8_t)(op == 0xC6 ? 1 : osz);
+        dec_modrm(r, in, rd8(r));
+        if (in->reg != 0) {
+            return false;
+        }
+        in->imm = rdn(r, in->sz);
+        in->fn = x_mov_ei;
+    } else if (op == 0xC9) {
+        if (o16) {
+            return false;
+        }
+        in->fn = x_leave;
+    } else if (op == 0xE8 || op == 0xE9 || op == 0xEB) {
+        if (o16) {
+            return false;
+        }
+        int32_t rel = op == 0xEB ? (int8_t)rd8(r) : (int32_t)rdn(r, 4);
+        in->imm = page_va + r->pos + (uint32_t)rel;
+        in->fn = op == 0xE8 ? x_call : x_jmp;
+    } else if (op == 0xF6 || op == 0xF7) {
+        in->sz = (uint8_t)(op == 0xF6 ? 1 : osz);
+        dec_modrm(r, in, rd8(r));
+        if (in->reg != 0) {
+            return false; /* not, neg, mul, div: el intérprete */
+        }
+        in->imm = rdn(r, in->sz);
+        in->fn = x_test_ei;
+    } else if (op == 0xFE || op == 0xFF) {
+        in->sz = (uint8_t)(op == 0xFE ? 1 : osz);
+        dec_modrm(r, in, rd8(r));
+        int sub = in->reg;
+        if (sub <= 1) {
+            in->aop = (uint8_t)sub;
+            in->fn = x_incdec;
+        } else if (op == 0xFF && sub == 2 && !o16) {
+            in->fn = x_call_e;
+        } else if (op == 0xFF && sub == 4 && !o16) {
+            in->fn = x_jmp_e;
+        } else if (op == 0xFF && sub == 6) {
+            in->fn = x_push_e;
+        } else {
+            return false;
+        }
+    } else if (op == 0x0F) {
+        uint8_t op2 = rd8(r);
+        if (op2 >= 0x80 && op2 <= 0x8F) {
+            if (o16) {
+                return false;
+            }
+            int32_t rel = (int32_t)rdn(r, 4);
+            in->aop = op2 & 15;
+            in->imm = page_va + r->pos + (uint32_t)rel;
+            in->fn = x_jcc;
+        } else if (op2 >= 0x90 && op2 <= 0x9F) {
+            dec_modrm(r, in, rd8(r));
+            in->aop = op2 & 15;
+            in->fn = x_setcc;
+        } else if (op2 >= 0x40 && op2 <= 0x4F) {
+            in->sz = (uint8_t)osz;
+            dec_modrm(r, in, rd8(r));
+            in->aop = op2 & 15;
+            in->fn = x_cmov;
+        } else if (op2 == 0xB6 || op2 == 0xB7 || op2 == 0xBE || op2 == 0xBF) {
+            in->sz = (uint8_t)osz;
+            dec_modrm(r, in, rd8(r));
+            in->aop = (op2 == 0xB6 || op2 == 0xBE) ? 1 : 2;
+            in->imm = op2 >= 0xBE;
+            in->fn = x_movx;
+        } else if (op2 == 0xAF) {
+            in->sz = (uint8_t)osz;
+            dec_modrm(r, in, rd8(r));
+            in->aop = 0;
+            in->fn = x_imul;
+        } else {
+            return false;
+        }
+    } else {
+        return false;
+    }
+    if (r->bad) {
+        return false;
+    }
+    in->next = page_va + r->pos;
+    return true;
+}
+
+static bool ends_block(InsnFn f)
+{
+    return f == x_jcc || f == x_jmp || f == x_call || f == x_ret || f == x_call_e || f == x_jmp_e;
+}
+
+/* El bloque que empieza en eip (decodificado ahora si hace falta). */
+static Block *get_block(Cpu *c, uint32_t eip)
+{
+    BlockSlot *tab = c->blocks;
+    if (!tab) {
+        tab = c->blocks = calloc(BLK_HASH, sizeof(BlockSlot));
+        if (!tab) {
+            return NULL;
+        }
+    }
+    uint32_t e = c->vm->pt[eip >> 12];
+    if (!e) {
+        return NULL;
+    }
+    uint32_t pp = e - 1;
+    BlockSlot *s = &tab[(eip ^ (eip >> 14)) & (BLK_HASH - 1)];
+    Block *b = s->b;
+    if (b && s->eip == eip && b->ppage == pp && b->gen == c->vm->gen[pp] && c->vm->code[pp]) {
+        return b;
+    }
+    /* decodificar */
+    Insn tmp[BLK_MAX];
+    Rd r = {c->vm->ram + ((size_t)pp << 12), eip & 0xFFFu, false};
+    uint32_t page_va = eip & ~0xFFFu;
+    unsigned n = 0;
+    while (n < BLK_MAX) {
+        Rd save = r;
+        if (!decode(&r, page_va, &tmp[n])) {
+            r = save;
+            break;
+        }
+        n++;
+        if (ends_block(tmp[n - 1].fn)) {
+            break;
+        }
+    }
+    /* n == 0: la primera ya no tiene función (queda guardado: el intérprete) */
+    Block *nb = realloc(b, sizeof(Block) + n * sizeof(Insn));
+    if (!nb) {
+        return NULL;
+    }
+    nb->eip = eip;
+    nb->ppage = pp;
+    if (!c->vm->code[pp]) {
+        c->vm->code[pp] = 1;
+    }
+    nb->gen = c->vm->gen[pp];
+    nb->n = n;
+    memcpy(nb->in, tmp, n * sizeof(Insn));
+    s->eip = eip;
+    s->b = nb;
+    return nb;
+}
+
+/* Hasta max instrucciones por bloques; las demás, una a una en step(). */
+static CpuStop run_blocks(Cpu *c, uint64_t max)
+{
+    uint64_t done = 0;
+    while (done < max) {
+        Block *b = get_block(c, c->eip);
+        if (!b || !b->n) {
+            if (step(c) != CPU_RUNNING) {
+                return c->stop;
+            }
+            done++;
+            continue;
+        }
+        c->trace[c->trace_pos++ % CPU_TRACE] = b->eip;
+        unsigned i = 0;
+        for (; i < b->n && done < max; i++) {
+            const Insn *in = &b->in[i];
+            c->eip = in->next;
+            in->fn(c, in);
+            if (c->stop != CPU_RUNNING) {
+                c->stop_eip = in->start;
+                vm_read(c->vm, in->start, c->stop_bytes, sizeof(c->stop_bytes));
+                if (c->stop == CPU_FAULT || c->stop == CPU_UNIMPL || c->stop == CPU_DIVIDE) {
+                    c->eip = in->start;
+                }
+                return c->stop;
+            }
+            c->icount++;
+            done++;
+            if (c->eip != in->next) {
+                break; /* salto tomado */
+            }
+            if (b->gen != c->vm->gen[b->ppage]) {
+                break; /* se escribió en el código de este bloque */
+            }
+        }
+        if (i == b->n && done < max && !ends_block(b->in[b->n - 1].fn) && c->eip == b->in[b->n - 1].next) {
+            /* la siguiente no tenía función: el intérprete */
+            if (step(c) != CPU_RUNNING) {
+                return c->stop;
+            }
+            done++;
+        }
+    }
+    return CPU_LIMIT;
+}
+
 CpuStop cpu_step(Cpu *c)
 {
     CpuStop st = step(c);
@@ -1389,6 +2091,11 @@ CpuStop cpu_step(Cpu *c)
 CpuStop cpu_run(Cpu *c, uint64_t max)
 {
     c->fetch_host = NULL; /* el kernel pudo cambiar las páginas */
+    if (c->use_blocks) {
+        CpuStop st = run_blocks(c, max);
+        flags_sync(c);
+        return st;
+    }
     for (uint64_t i = 0; i < max; i++) {
         if (step(c) != CPU_RUNNING) {
             flags_sync(c);
@@ -1397,6 +2104,18 @@ CpuStop cpu_run(Cpu *c, uint64_t max)
     }
     flags_sync(c);
     return CPU_LIMIT;
+}
+
+void cpu_free(Cpu *c)
+{
+    BlockSlot *tab = c->blocks;
+    if (tab) {
+        for (unsigned i = 0; i < BLK_HASH; i++) {
+            free(tab[i].b);
+        }
+        free(tab);
+    }
+    c->blocks = NULL;
 }
 
 void cpu_init(Cpu *c, Vm *vm)

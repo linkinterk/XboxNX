@@ -27,7 +27,21 @@ typedef struct Vm {
     uint8_t *used;         /* páginas físicas ocupadas */
     uint32_t pages_used;
     uint32_t next_free;    /* pista para buscar páginas libres */
+    /* El código traducido (cpu.c, bloques): una página física con código
+     * marcado en code[]; escribirla sube su gen[] y los bloques de ella se
+     * vuelven a traducir. */
+    uint8_t *code;
+    uint32_t *gen;
 } Vm;
+
+/* Alguien escribió en la página física p. */
+static inline void vm_touch(Vm *vm, uint32_t p)
+{
+    if (vm->code && vm->code[p]) {
+        vm->code[p] = 0;
+        vm->gen[p]++;
+    }
+}
 
 bool vm_init(Vm *vm);
 void vm_free(Vm *vm);

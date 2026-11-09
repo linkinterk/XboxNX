@@ -64,6 +64,20 @@ jobs:
           python3 tests/flags_pair.py ./cpu_diff 20000 2
           gcc -std=gnu11 -O2 -ffp-contract=off -Wall -Wextra -Werror -Isource -o bench tests/bench.c source/cpu.c source/vm.c -lm
           ./bench 300
+          SIN_BLOQUES=1 ./bench 300
+      - name: Bloques decodificados (2d.1) contra Unicorn
+        run: |
+          CPU_BLOQUES=1 python3 tests/cpu_diff.py ./cpu_diff 30000 3
+          CPU_BLOQUES=1 python3 tests/fp_diff.py ./cpu_diff 5000 3
+          CPU_BLOQUES=1 CPU_BLOQUES_N=2 python3 tests/flags_pair.py ./cpu_diff 20000 3
+      - name: El mismo intérprete compilado para ARM64 (como en la Switch), con qemu
+        run: |
+          sudo apt-get install -y -q gcc-aarch64-linux-gnu qemu-user
+          aarch64-linux-gnu-gcc -std=gnu11 -O2 -ffp-contract=off -static -o cpu_diff_a64 tests/cpu_diff.c source/cpu.c source/vm.c -lm
+          printf '#!/bin/sh\nexec qemu-aarch64 ./cpu_diff_a64 "$@"\n' > cpu_diff_arm && chmod +x cpu_diff_arm
+          CPU_BLOQUES=1 python3 tests/cpu_diff.py ./cpu_diff_arm 4000 5
+          CPU_BLOQUES=1 python3 tests/fp_diff.py ./cpu_diff_arm 3000 5
+          python3 tests/fp_diff.py ./cpu_diff_arm 3000 6
 
   switch:
     name: XboxNX.nro (Switch)

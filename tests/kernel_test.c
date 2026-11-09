@@ -430,6 +430,56 @@ static void io_tests(const char *iso)
 }
 
 /* ---- etapa 3d: sistema ---- */
+/* Bloques decodificados: código que se modifica a sí mismo (la escritura
+ * en la página sube su gen y la instrucción siguiente se vuelve a leer) y
+ * un bucle con llamadas que da lo mismo que el intérprete. */
+static void block_tests(void)
+{
+    const uint32_t at = 0x00A00000;
+    CHECK(vm_alloc_at(&vm, at, 0x2000));
+    uint8_t code[] = {
+        0xC7, 0x05, 0, 0, 0, 0, 0x22, 0x22, 0x22, 0x22, /* mov dword [at+11], 0x22222222 */
+        0xB8, 0x11, 0x11, 0x11, 0x11,                   /* mov eax, 0x11111111 */
+        0xF4,                                           /* hlt */
+    };
+    uint32_t imm_at = at + 11;
+    memcpy(code + 2, &imm_at, 4);
+    vm_write(&vm, at, code, sizeof(code));
+    for (int pass = 0; pass < 2; pass++) {
+        Cpu c;
+        cpu_init(&c, &vm);
+        c.use_blocks = true;
+        c.eip = at;
+        c.r[R_ESP] = at + 0x1F00;
+        CHECK(cpu_run(&c, 100) == CPU_HLT);
+        CHECK(c.r[R_EAX] == 0x22222222u);
+        cpu_free(&c);
+        vm_write(&vm, at, code, sizeof(code)); /* otra vez el original */
+    }
+    /* un bucle con call/ret, push/pop, alu y saltos: bloques = intérprete */
+    static const uint8_t loop[] = {
+        0x8B, 0x06, 0x01, 0xD8, 0x89, 0x07, 0x8D, 0x76, 0x04, 0x81, 0xE6, 0xFC, 0x0F, 0xA0, 0x00, 0x50,
+        0xE8, 0x0A, 0x00, 0x00, 0x00, 0x5A, 0x39, 0xD0, 0x75, 0x00, 0x43, 0x49, 0x75, 0xE2, 0xF4,
+        0x6B, 0xC0, 0x03, 0x83, 0xF0, 0x55, 0xC3,
+    };
+    vm_write(&vm, at, loop, sizeof(loop));
+    uint32_t regs[2][8];
+    for (int mode = 0; mode < 2; mode++) {
+        Cpu c;
+        cpu_init(&c, &vm);
+        c.use_blocks = mode;
+        c.eip = at;
+        c.r[R_ECX] = 5000;
+        c.r[R_ESI] = c.r[R_EDI] = at + 0x1000;
+        c.r[R_ESP] = at + 0x1F00;
+        CHECK(cpu_run(&c, 1000000) == CPU_HLT);
+        memcpy(regs[mode], c.r, sizeof(c.r));
+        CHECK(c.icount == 5000u * 16);
+        cpu_free(&c);
+    }
+    CHECK(memcmp(regs[0], regs[1], sizeof(regs[0])) == 0);
+}
+
 static void sys_tests(void)
 {
     vm_free(&vm);
@@ -858,6 +908,7 @@ int main(int argc, char **argv)
     if (argc > 1) {
         io_tests(argv[1]);
     }
+    block_tests();
     sys_tests();
 
     vm_free(&vm);

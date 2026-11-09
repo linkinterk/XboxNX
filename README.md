@@ -21,7 +21,8 @@ Port del emulador de Xbox original **hakuX** a Nintendo Switch, nativo (homebrew
 | 3g. Controles | El USB del Xbox (OHCI con hub y control XID, de hakuX) a tiempo virtual; en la pantalla del Xbox los botones de la Switch son los del control (L3 + R3 vuelve al registro) | Lista |
 | 5a. Optimización 1 | Intérprete ~40% más rápido (página de código guardada), dibujo por software en 3 núcleos, menos redibujos de la pantalla, reloj virtual ajustable (Y) y la tabla de etapas en la app (botón − en la biblioteca) | Lista |
 | 5b. Optimización 2 | Flags perezosos (se calculan solo cuando una instrucción los lee), probados con 40.000 pares contra Unicorn: el intérprete pasó de 47 a ~80 millones de instrucciones por segundo en la PC | Lista |
-| 5c. Optimización 3 | El chip de audio en su propio hilo (núcleo 1), en paralelo al intérprete como el DSP real; la medida del tiempo real en el registro | **Esta versión** |
+| 5c. Optimización 3 | El chip de audio en su propio hilo (núcleo 1), en paralelo al intérprete como el DSP real; la medida del tiempo real en el registro | Lista |
+| 2d.1. Bloques decodificados | Cada trozo de código x86 se decodifica una vez en un bloque de instrucciones ya entendidas y se ejecuta sin volver a leer los bytes (las que no tienen función propia las hace el intérprete); escribir en una página de código la vuelve a decodificar. ~1,8x en la PC. Además, los NaN de x87 y SSE como en x86 también en ARM64 (probado con qemu) | **Esta versión** |
 | 3h. Sonido | El audio del Xbox por la Switch | Pendiente |
 | 4c. Gráficos | Lo mismo en el GPU de la Switch, rápido | Pendiente |
 | 5. Optimizar | Velocidad en el CPU de la Switch | Pendiente |

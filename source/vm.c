@@ -28,7 +28,9 @@ bool vm_init(Vm *vm)
     vm->ram = alloc_aligned(VM_PAGE, VM_RAM_SIZE);
     vm->pt = calloc(VPAGES, sizeof(uint32_t));
     vm->used = calloc(PPAGES, 1);
-    if (!vm->ram || !vm->pt || !vm->used) {
+    vm->code = calloc(PPAGES, 1);
+    vm->gen = calloc(PPAGES, sizeof(uint32_t));
+    if (!vm->ram || !vm->pt || !vm->used || !vm->code || !vm->gen) {
         vm_free(vm);
         return false;
     }
@@ -49,6 +51,8 @@ void vm_free(Vm *vm)
     free(vm->ram);
     free(vm->pt);
     free(vm->used);
+    free(vm->code);
+    free(vm->gen);
     memset(vm, 0, sizeof(*vm));
 }
 
@@ -82,6 +86,7 @@ static uint32_t take_page(Vm *vm)
             vm->pages_used++;
             vm->next_free = p;
             memset(vm->ram + (size_t)p * VM_PAGE, 0, VM_PAGE);
+            vm_touch(vm, p);
             return p;
         }
     }
@@ -95,6 +100,9 @@ static void mark(Vm *vm, uint32_t first, uint32_t n)
     }
     vm->pages_used += n;
     memset(vm->ram + (size_t)first * VM_PAGE, 0, (size_t)n * VM_PAGE);
+    for (uint32_t i = 0; i < n; i++) {
+        vm_touch(vm, first + i);
+    }
 }
 
 uint32_t vm_alloc_phys(Vm *vm, uint32_t size, uint32_t lo, uint32_t hi, uint32_t align)
@@ -153,6 +161,7 @@ void vm_free_phys(Vm *vm, uint32_t pa, uint32_t size)
         if (vm->used[first + i] && first + i != 0) {
             vm->used[first + i] = 0;
             vm->pages_used--;
+            vm_touch(vm, first + i);
         }
     }
 }
@@ -245,6 +254,7 @@ bool vm_write(Vm *vm, uint32_t va, const void *buf, size_t len)
             n = len;
         }
         memcpy(h, in, n);
+        vm_touch(vm, (uint32_t)((h - vm->ram) / VM_PAGE));
         in += n;
         va += (uint32_t)n;
         len -= n;

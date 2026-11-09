@@ -44,6 +44,7 @@ static KCallRec *log_new(Runner *r)
 
 bool runner_boot(Runner *r, Vm *vm, Kernel *k, const LoadReport *load)
 {
+    cpu_free(&r->cpu); /* los bloques de la ejecución anterior */
     memset(r, 0, sizeof(*r));
     r->k = k;
     r->entry = load->entry;
@@ -71,6 +72,7 @@ bool runner_boot(Runner *r, Vm *vm, Kernel *k, const LoadReport *load)
     *vm_host(vm, pcr + 0x24) = 0; /* PASSIVE_LEVEL */
 
     cpu_init(&r->cpu, vm);
+    r->cpu.use_blocks = true;
     r->cpu.mmio = hw_mmio;
     r->cpu.port_in = hw_port_in;
     r->cpu.port_out = hw_port_out;

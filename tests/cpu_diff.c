@@ -69,10 +69,23 @@ int main(void)
         }
         c.flags = r[8];
         c.eip = CODE_VA;
-        CpuStop st = cpu_step(&c);
-        for (int steps = 0; multi[0] == 'm' && st == CPU_RUNNING && c.eip != CODE_VA + n && steps < 256; steps++) {
-            st = cpu_step(&c);
+        /* CPU_BLOQUES=1: por los bloques decodificados (cpu_run de a una) */
+        static void *blocks;
+        c.use_blocks = getenv("CPU_BLOQUES") != NULL;
+        c.blocks = blocks;
+        /* CPU_BLOQUES_N=k: las k instrucciones de una vez (dentro de un bloque) */
+        const char *nk = getenv("CPU_BLOQUES_N");
+        CpuStop st = c.use_blocks ? cpu_run(&c, nk && multi[0] == 'm' ? (uint64_t)atoi(nk) : 1) : cpu_step(&c);
+        if (st == CPU_LIMIT) {
+            st = CPU_RUNNING;
         }
+        for (int steps = 0; multi[0] == 'm' && st == CPU_RUNNING && c.eip != CODE_VA + n && steps < 256; steps++) {
+            st = c.use_blocks ? cpu_run(&c, 1) : cpu_step(&c);
+            if (st == CPU_LIMIT) {
+                st = CPU_RUNNING;
+            }
+        }
+        blocks = c.blocks;
         vm_read(&vm, MEM_VA, mem, MEM_LEN);
         printf("%d %x", (int)st, c.eip);
         for (int i = 0; i < 8; i++) {

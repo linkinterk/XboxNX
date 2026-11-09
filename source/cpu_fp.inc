@@ -223,6 +223,51 @@ static void wrf80(Cpu *c, uint32_t a, double v)
     }
 }
 
+/* Los NaN como en x86, no como en ARM: el NaN de un operando sale (vuelto
+ * silencioso) y una operación inválida da el NaN "indefinido", negativo
+ * (0xFFF8...), cuando ARM daría 0x7FF8.... En x86 el hardware ya lo hace. */
+static double x86_nan_d(double r, double a, double b, bool unary)
+{
+    if (!isnan(r)) {
+        return r;
+    }
+    uint64_t ua, ub;
+    memcpy(&ua, &a, 8);
+    memcpy(&ub, &b, 8);
+    bool na = !unary && isnan(a), nb = isnan(b);
+    uint64_t o;
+    if (na && nb) { /* x87: el de mayor mantisa */
+        o = ((ua & 0x000FFFFFFFFFFFFFull) >= (ub & 0x000FFFFFFFFFFFFFull)) ? ua : ub;
+    } else if (na) {
+        o = ua;
+    } else if (nb) {
+        o = ub;
+    } else {
+        o = 0xFFF8000000000000ull;
+    }
+    o |= 0x0008000000000000ull;
+    memcpy(&r, &o, 8);
+    return r;
+}
+
+static float x86_nan_f(float r, float a, float b, bool unary)
+{
+    if (!isnan(r)) {
+        return r;
+    }
+    uint32_t o;
+    if (!unary && isnan(a)) { /* SSE: el primer operando */
+        memcpy(&o, &a, 4);
+    } else if (isnan(b)) {
+        memcpy(&o, &b, 4);
+    } else {
+        o = 0xFFC00000u;
+    }
+    o |= 0x00400000u;
+    memcpy(&r, &o, 4);
+    return r;
+}
+
 /* la aritmética de D8/DC/DA/DE: dst = dst op src (o al revés en los r) */
 static double farith(Cpu *c, int op, double a, double b)
 {
@@ -237,6 +282,7 @@ static double farith(Cpu *c, int op, double a, double b)
     case 6: r = va / vb; break;
     default: r = vb / va; break; /* 7 */
     }
+    r = (op == 5 || op == 7) ? x86_nan_d(r, b, a, false) : x86_nan_d(r, a, b, false);
     r = fp_round(c, r);
     rc_leave(rc);
     return r;
@@ -255,7 +301,7 @@ static double fsqrt_rc(Cpu *c, double v)
 {
     volatile double vv = v;
     int rc = rc_enter(c->fpu_cw >> 10);
-    double r = fp_round(c, sqrt(vv));
+    double r = fp_round(c, x86_nan_d(sqrt(vv), 0, v, true));
     rc_leave(rc);
     return r;
 }
@@ -708,15 +754,15 @@ static void xmm_store(Cpu *c, const Dec *d, uint8_t m, const X128 *v, int bytes)
 static float sse_op(int op, float a, float b)
 {
     switch (op) {
-    case 0x58: return a + b;
-    case 0x59: return a * b;
-    case 0x5C: return a - b;
-    case 0x5E: return a / b;
+    case 0x58: return x86_nan_f(a + b, a, b, false);
+    case 0x59: return x86_nan_f(a * b, a, b, false);
+    case 0x5C: return x86_nan_f(a - b, a, b, false);
+    case 0x5E: return x86_nan_f(a / b, a, b, false);
     case 0x5D: return a < b ? a : b; /* min: si no, el segundo */
     case 0x5F: return a > b ? a : b; /* max */
-    case 0x51: return sqrtf(b);
-    case 0x52: return 1.0f / sqrtf(b);
-    default: return 1.0f / b; /* 0x53 rcp */
+    case 0x51: return x86_nan_f(sqrtf(b), a, b, true);
+    case 0x52: return x86_nan_f(1.0f / sqrtf(b), a, b, true);
+    default: return x86_nan_f(1.0f / b, a, b, true); /* 0x53 rcp */
     }
 }
 

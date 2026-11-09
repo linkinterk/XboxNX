@@ -25,6 +25,7 @@ int main(int argc, char **argv)
     double mi = argc > 1 ? atof(argv[1]) : 200;
     Cpu c;
     cpu_init(&c, &vm);
+    c.use_blocks = getenv("SIN_BLOQUES") == NULL;
     c.eip = 0x1000;
     c.r[R_ECX] = (uint32_t)(mi * 1e6 / 16);
     c.r[R_ESI] = c.r[R_EDI] = 0x100000;
