@@ -97,7 +97,11 @@ static void reschedule(Runner *r, bool preempt)
 {
     r->quantum_left = QUANTUM;
     if (preempt && *vm_host(r->cpu.vm, K_KPCR_VA + 0x24) >= 2) {
-        return; /* a DISPATCH_LEVEL o más no se cambia de hilo */
+        /* a DISPATCH_LEVEL o más no se cambia de hilo; las interrupciones sí */
+        if (kps_interrupt(r->k, &r->cpu)) {
+            r->cpu.stop = CPU_RUNNING;
+        }
+        return;
     }
     if (kps_schedule(r->k, &r->cpu, preempt)) {
         r->cpu.stop = CPU_RUNNING;

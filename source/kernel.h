@@ -206,6 +206,7 @@ typedef struct Kernel {
     /* interrupciones (kps.c + hw.c) */
     uint32_t irq_obj[32];        /* KINTERRUPT conectado por nivel del bus */
     int isr_thread;              /* hilo del kernel que corre los ISR, -1 sin crear */
+    int isr_from;                /* hilo interrumpido a DISPATCH_LEVEL o más (+1; 0 ninguno) */
     bool in_isr;
     unsigned isrs_run;
 } Kernel;
@@ -261,6 +262,7 @@ void kps_thread_start(Kernel *k, int t, uint32_t eip, const uint32_t *v, unsigne
 /* Guarda/carga el contexto del CPU en/desde el hilo actual. */
 void kps_save(Kernel *k, struct Cpu *c);
 void kps_load(Kernel *k, struct Cpu *c);
+bool kps_interrupt(Kernel *k, struct Cpu *c);
 /* Avanza el tiempo, dispara temporizadores, despierta esperas y elige el
  * siguiente hilo (o un DPC). Devuelve false si no hay nada que correr. */
 bool kps_schedule(Kernel *k, struct Cpu *c, bool preempt);

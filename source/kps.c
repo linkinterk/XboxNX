@@ -643,6 +643,32 @@ static void irq_dispatch(Kernel *k, Cpu *c)
     }
 }
 
+/* El hilo actual corre a DISPATCH_LEVEL o más (no se cambia de hilo), pero
+ * las interrupciones del hardware tienen más IRQL y sí deben atenderse: si
+ * hay una, el hilo de los ISR la corre y luego se vuelve a este hilo. Sin
+ * esto, un hilo que espera al GPU a DISPATCH_LEVEL (D3D) nunca dejaba correr
+ * el ISR que libera la trampa del GPU. */
+bool kps_interrupt(Kernel *k, Cpu *c)
+{
+    KThread *t = cur(k);
+    if (!t || t->state != KT_RUNNING || k->in_isr || k->in_dpc || k->cur == k->isr_thread) {
+        return false;
+    }
+    kps_save(k, c);
+    hw_tick(k);
+    irq_dispatch(k, c);
+    if (!k->in_isr) {
+        return false;
+    }
+    t->state = KT_READY;
+    k->isr_from = k->cur + 1;
+    k->cur = k->isr_thread;
+    k->threads[k->cur].state = KT_RUNNING;
+    k->switches++;
+    kps_load(k, c);
+    return true;
+}
+
 void kps_isr_return(Kernel *k)
 {
     if (k->isr_thread >= 0) {
@@ -739,6 +765,19 @@ bool kps_schedule(Kernel *k, Cpu *c, bool preempt)
         kps_save(k, c);
         if (t->state == KT_RUNNING) {
             t->state = KT_READY;
+        }
+    }
+    if (k->isr_from && !k->in_isr) {
+        /* un ISR interrumpió un hilo a DISPATCH_LEVEL o más: se vuelve a él
+         * directo (sin DPC ni otro hilo hasta que baje el IRQL) */
+        int f = k->isr_from - 1;
+        k->isr_from = 0;
+        KThread *x = &k->threads[f];
+        if (x->state == KT_READY && !x->suspend) {
+            k->cur = f;
+            x->state = KT_RUNNING;
+            kps_load(k, c);
+            return true;
         }
     }
     for (int guard = 0; guard < 100000; guard++) {

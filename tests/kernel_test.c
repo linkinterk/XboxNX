@@ -633,6 +633,17 @@ static void hw_tests(void)
     push(41); push(sync); push(KI);
     kcall("KeSynchronizeExecution");
     store_eax(SCRATCH + 0x50C);
+    /* a DISPATCH_LEVEL, esperar en un bucle a que el ISR cuente otro vblank
+     * (como D3D esperando al GPU): el ISR debe correr igual */
+    kcall("KeRaiseIrqlToDpcLevel");
+    b1(0xA1); d4(SCRATCH + 0x500);               /* mov eax, [contador] */
+    b1(0x40);                                    /* inc eax */
+    store_eax(SCRATCH + 0x518);
+    b1(0xA1); d4(SCRATCH + 0x500);               /* bucle: mov eax, [contador] */
+    b1(0x3B); b1(0x05); d4(SCRATCH + 0x518);     /* cmp eax, [meta] */
+    b1(0x72); b1(0xF3);                          /* jb bucle */
+    b1(0xB9); d4(0);                             /* mov ecx, 0 */
+    kcall("KfLowerIrql");
     b1(0xA1); d4(0xFD000000u);                   /* mov eax, [PMC_BOOT_0] */
     store_eax(SCRATCH + 0x510);
     b1(0xBA); d4(0x8008);                        /* mov edx, 0x8008 */
@@ -641,7 +652,7 @@ static void hw_tests(void)
     push(7);
     kcall("HalReturnToFirmware");
     boot(main_va);
-    CHECK(runner_slice(&g_run, 1000000) == RUN_SYSTEM_STOP);
+    CHECK(runner_slice(&g_run, 100000000) == RUN_SYSTEM_STOP);
     CHECK(rd(SCRATCH + 0x504) == 1);
     CHECK(rd(SCRATCH + 0x508) == 0);
     CHECK(rd(SCRATCH + 0x500) >= 1 && k.isrs_run >= 1 && k.dpcs_run >= 1);
