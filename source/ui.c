@@ -774,12 +774,33 @@ static void draw_xbox_screen(const UiState *s)
                 o += snprintf(d2 + o, sizeof(d2) - (size_t)o, " %02X", dw->formats[i]);
             }
         }
-        const SwStats *sw = sw_stats();
-        if (o < (int)sizeof(d2) - 40) {
-            snprintf(d2 + o, sizeof(d2) - (size_t)o, " · dibujado: %llu triángulos, %u sin shader",
-                     (unsigned long long)sw->triangles, sw->skipped_ff);
-        }
         gfx_text_fit(20, BOTBAR_Y + 22, 15, 700, C_ON_VAR, d2);
+        /* el dibujo por software: el último dibujo con lo que dio */
+        const SwStats *sw = sw_stats();
+        const __typeof__(sw->last) *L = &sw->last;
+        char e[220];
+        int ly = 40;
+        snprintf(e, sizeof(e), "Software: %llu triángulos, %llu píxeles · sin shader %u · sin destino %u · shader con error %u · se muestra %08X",
+                 (unsigned long long)sw->triangles, (unsigned long long)sw->pixels, sw->skipped_ff, sw->no_target,
+                 sw->vs_errors, (unsigned)hw_scanout());
+        gfx_rrect(14, ly - 4, UI_W - 28, 100, 10, WITH_ALPHA(HEX(0x000000), 200));
+        gfx_text_fit(24, ly, 16, UI_W - 48, C_ON, e);
+        ly += 22;
+        snprintf(e, sizeof(e), "Último: prim %u, %u vértices, %llu tri, %llu px, %u ocultos, %u tras Z · destino %08X pitch %u fmt %X · Z %08X",
+                 (unsigned)L->prim, (unsigned)L->nverts, (unsigned long long)L->tris, (unsigned long long)L->pixels,
+                 L->culled, L->depth_fail, (unsigned)L->target_pa, (unsigned)L->target_pitch, (unsigned)L->target_fmt,
+                 (unsigned)L->zeta_pa);
+        gfx_text_fit(24, ly, 16, UI_W - 48, C_ON, e);
+        ly += 22;
+        snprintf(e, sizeof(e), "Textura 0: %s modo %u fmt %02X %ux%u en %08X · combiners %X final %08X %08X · 1er píxel %08X",
+                 L->tex_on ? "sí" : "no", L->tex_mode, (unsigned)L->tex_fmt, (unsigned)L->tex_w, (unsigned)L->tex_h,
+                 (unsigned)L->tex_pa, (unsigned)L->cctl, (unsigned)L->fcw0, (unsigned)L->fcw1, (unsigned)L->first_px);
+        gfx_text_fit(24, ly, 16, UI_W - 48, C_ON, e);
+        ly += 22;
+        snprintf(e, sizeof(e), "Vértice 0: pos %.1f %.1f %.1f %.2f · oD0 %.2f %.2f %.2f %.2f · oT0 %.2f %.2f %.2f %.2f",
+                 L->pos[0], L->pos[1], L->pos[2], L->pos[3], L->d0[0], L->d0[1], L->d0[2], L->d0[3], L->t0[0], L->t0[1],
+                 L->t0[2], L->t0[3]);
+        gfx_text_fit(24, ly, 16, UI_W - 48, C_ON, e);
     } else {
         snprintf(b, sizeof(b), "Pantalla del Xbox: el juego todavía no eligió un modo de video");
         gfx_text_center(0, UI_W, 330, 22, C_ON_VAR, "Todavía no hay imagen");

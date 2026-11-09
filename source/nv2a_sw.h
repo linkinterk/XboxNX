@@ -25,6 +25,17 @@ typedef struct SwStats {
     unsigned skipped_ff;   /* dibujos con función fija (todavía no) */
     unsigned vs_errors;    /* programas que no se pudieron leer */
     unsigned no_target;    /* sin superficie donde dibujar */
+    /* el último dibujo, para entender qué hace el juego */
+    struct {
+        uint32_t prim, nverts, target_pa, target_pitch, target_fmt, zeta_pa;
+        uint32_t tex_pa, tex_fmt, tex_w, tex_h, tex_mode;
+        bool tex_on;
+        float pos[4], d0[4], t0[4];   /* el primer vértice tras el shader */
+        uint32_t first_px;           /* el primer píxel escrito (ARGB) */
+        uint64_t pixels, tris;
+        uint32_t cctl, fcw0, fcw1;
+        unsigned culled, depth_fail;
+    } last;
 } SwStats;
 
 void sw_init(uint8_t *ram, uint32_t ram_size, SwDmaFn dma);

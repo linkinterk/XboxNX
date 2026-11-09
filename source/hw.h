@@ -68,6 +68,8 @@ typedef struct HwStats {
 void hw_set_display(struct Kernel *k, uint32_t format, uint32_t pitch, uint32_t fb);
 /* La imagen que el Xbox muestra, en RGBA (px con malloc, reutilizado). */
 bool hw_screen(const struct Kernel *k, XImage *out);
+/* La dirección física que se muestra (PCRTC_START). */
+uint32_t hw_scanout(void);
 
 /* Prepara el hardware para una ejecución nueva. */
 bool hw_init(struct Kernel *k);

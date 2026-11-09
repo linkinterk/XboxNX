@@ -910,3 +910,5 @@ bool hw_screen(const Kernel *k, XImage *out)
     }
     return true;
 }
+
+uint32_t hw_scanout(void) { return g_hw.nv ? nv_ld(NV_PCRTC_START) : 0; }

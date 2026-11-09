@@ -805,6 +805,7 @@ static void shade(const Target *t, int x, int y, const float l[3], const OutVert
             zv = (uint32_t)zc;
         }
         if (!cmp_func(S.dfunc, (float)zv, (float)old)) {
+            S.st.last.depth_fail++;
             return;
         }
     }
@@ -849,6 +850,10 @@ static void shade(const Target *t, int x, int y, const float l[3], const OutVert
     if (S.atest && !cmp_func(S.afunc, floorf(c[3] * 255 + 0.5f), (float)(S.aref & 0xFF))) {
         return;
     }
+    if (S.st.last.first_px == 0xFFFFFFFFu) {
+        S.st.last.first_px = (uint32_t)(clamp01(c[3]) * 255) << 24 | (uint32_t)(clamp01(c[0]) * 255) << 16 |
+                             (uint32_t)(clamp01(c[1]) * 255) << 8 | (uint32_t)(clamp01(c[2]) * 255);
+    }
     if (S.blend) {
         float d[4], o[4];
         read_px(t, cp, d);
@@ -892,6 +897,7 @@ static void raster(const Target *t, const OutVert *a, const OutVert *b, const Ou
         bool cw = area > 0; /* y hacia abajo */
         bool front = S.front_face == 0x900 ? cw : !cw;
         if (S.cull_face == 0x408 || (S.cull_face == 0x404 && front) || (S.cull_face == 0x405 && !front)) {
+            S.st.last.culled++;
             return;
         }
     }
@@ -1049,6 +1055,32 @@ static void draw(void)
     for (unsigned i = 0; i < S.nin; i++) {
         transform(S.in[i], &ov[i]);
     }
+    {
+        __typeof__(S.st.last) *L = &S.st.last;
+        memset(L, 0, sizeof(*L));
+        L->prim = S.prim;
+        L->nverts = S.nin;
+        L->target_pa = (uint32_t)(t.color - S.ram);
+        L->target_pitch = t.pitch;
+        L->target_fmt = S.surf_format;
+        L->zeta_pa = t.zeta ? (uint32_t)(t.zeta - S.ram) : 0;
+        L->tex_on = g_tex_on[0];
+        L->tex_mode = g_tex_mode[0];
+        L->tex_fmt = (S.t_fmt[0] >> 8) & 0xFF;
+        if (g_tex_on[0] && g_tex_mode[0] != 4) {
+            L->tex_pa = (uint32_t)(g_tex[0].base - S.ram);
+            L->tex_w = g_tex[0].w;
+            L->tex_h = g_tex[0].h;
+        }
+        memcpy(L->pos, ov[0].pos, sizeof(L->pos));
+        memcpy(L->d0, ov[0].col[0], sizeof(L->d0));
+        memcpy(L->t0, ov[0].tex[0], sizeof(L->t0));
+        L->cctl = S.cctl;
+        L->fcw0 = S.fcw0;
+        L->fcw1 = S.fcw1;
+        L->first_px = 0xFFFFFFFFu;
+    }
+    uint64_t px0 = S.st.pixels, tr0 = S.st.triangles;
     unsigned n = S.nin;
     switch (S.prim) {
     case 5: /* triángulos */
@@ -1087,6 +1119,8 @@ static void draw(void)
         break;
     }
     free(ov);
+    S.st.last.pixels = S.st.pixels - px0;
+    S.st.last.tris = S.st.triangles - tr0;
 }
 
 static void zclear(uint32_t flags)
