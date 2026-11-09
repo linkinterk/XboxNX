@@ -89,7 +89,7 @@ static void top_bar(const UiState *s, const char *subtitle)
         gfx_text(104, 52, 18, C_ON_VAR, subtitle);
     }
     char chip[48];
-    snprintf(chip, sizeof(chip), "Etapa 3a  ·  v%s", s->version);
+    snprintf(chip, sizeof(chip), "Etapa 3b  ·  v%s", s->version);
     int w = gfx_text_width(18, chip) + 32;
     gfx_rrect(UI_W - 40 - w, 26, w, 34, 17, C_GREEN_BG);
     gfx_text(UI_W - 40 - w + 16, 33, 18, C_GREEN, chip);
@@ -656,7 +656,8 @@ static const char *run_state_text(RunState st, uint32_t *bg, uint32_t *fg)
 {
     switch (st) {
     case RUN_ACTIVE: *bg = C_GREEN_BG; *fg = C_GREEN; return "Ejecutando";
-    case RUN_THREAD_END: *bg = C_GREEN_BG; *fg = C_GREEN; return "Hilo terminado";
+    case RUN_THREAD_END: *bg = C_GREEN_BG; *fg = C_GREEN; return "Hilos terminados";
+    case RUN_DEADLOCK: *bg = C_WARN_BG; *fg = C_WARN; return "Bloqueo";
     case RUN_CALL_LIMIT: *bg = C_WARN_BG; *fg = C_WARN; return "Límite de llamadas";
     case RUN_CPU_STOP: *bg = C_WARN_BG; *fg = C_WARN; return "Detenido";
     default: *bg = C_ERROR_BG; *fg = C_ERROR; return "Detenido por el juego";
@@ -696,24 +697,27 @@ static void draw_run(const UiState *s)
     gfx_text_fit(x + 22, y + 80, 16, tw - 44, C_ON_VAR, d);
     x += tw + 16;
     snprintf(v, sizeof(v), "%u", r->ncalls);
-    snprintf(d, sizeof(d), "%u reales  ·  %u simuladas", r->ncalls - r->simulated, r->simulated);
+    snprintf(d, sizeof(d), "%u reales  ·  %u simuladas  ·  %u distintas", r->ncalls - r->simulated, r->simulated,
+             r->distinct);
     gfx_rrect(x, y, tw, 110, 20, C_SURF);
     gfx_text(x + 22, y + 14, 18, C_ON_VAR, "Llamadas al kernel");
     gfx_text(x + 22, y + 40, 30, C_GREEN, v);
     gfx_text_fit(x + 22, y + 80, 16, tw - 44, C_ON_VAR, d);
     x += tw + 16;
-    snprintf(v, sizeof(v), "0x%08X", (unsigned)cpu->eip);
-    snprintf(d, sizeof(d), "entrada 0x%08X", (unsigned)r->entry);
+    const Kernel *kn = r->k;
+    snprintf(v, sizeof(v), "%u", kn ? kps_alive(kn) : 0);
+    snprintf(d, sizeof(d), "%.1f ms virtuales  ·  %u cambios", kn ? kn->now_ns / 1e6 : 0.0, kn ? kn->switches : 0);
     gfx_rrect(x, y, tw, 110, 20, C_SURF);
-    gfx_text(x + 22, y + 14, 18, C_ON_VAR, "Instrucción actual");
+    gfx_text(x + 22, y + 14, 18, C_ON_VAR, "Hilos vivos");
     gfx_text(x + 22, y + 40, 30, C_ON, v);
     gfx_text_fit(x + 22, y + 80, 16, tw - 44, C_ON_VAR, d);
 
     /* motivo de parada */
     y = 226;
     if (r->state != RUN_ACTIVE) {
-        uint32_t pbg = r->state == RUN_THREAD_END ? C_GREEN_BG : (r->state == RUN_CPU_STOP ? C_WARN_BG : C_ERROR_BG);
-        uint32_t pfg = r->state == RUN_THREAD_END ? C_GREEN : (r->state == RUN_CPU_STOP ? C_WARN : C_ERROR);
+        bool warn = r->state == RUN_CPU_STOP || r->state == RUN_DEADLOCK;
+        uint32_t pbg = r->state == RUN_THREAD_END ? C_GREEN_BG : (warn ? C_WARN_BG : C_ERROR_BG);
+        uint32_t pfg = r->state == RUN_THREAD_END ? C_GREEN : (warn ? C_WARN : C_ERROR);
         gfx_rrect(40, y, UI_W - 80, 44, 14, pbg);
         if (r->state == RUN_CPU_STOP) {
             snprintf(d, sizeof(d), "%s%s%s  en 0x%08X:  %02X %02X %02X %02X %02X %02X", r->end,
@@ -726,6 +730,9 @@ static void draw_run(const UiState *s)
                          (unsigned)cpu->fault_addr);
                 strncat(d, f, sizeof(d) - strlen(d) - 1);
             }
+        } else if (r->has_launch) {
+            snprintf(d, sizeof(d), "%s  ·  LaunchData tipo %u, título %08X, \"%s\"", r->end, (unsigned)r->launch_type,
+                     (unsigned)r->launch_title, r->launch_path);
         } else {
             snprintf(d, sizeof(d), "%s", r->end);
         }
@@ -746,21 +753,24 @@ static void draw_run(const UiState *s)
     gfx_text(px + 615, ly0 + 18, 17, C_ON_VAR, "Resultado");
     gfx_text(px + 760, ly0 + 18, 17, C_ON_VAR, "Desde");
     int rows = (ph - 60) / RUN_ROW_H;
-    int first = s->run_scroll >= 0 ? s->run_scroll : (int)r->ncalls - rows;
+    int nlog = (int)runner_log_len(r);
+    int first = s->run_scroll >= 0 ? s->run_scroll : nlog - rows;
     if (first < 0) {
         first = 0;
     }
     int ly = ly0 + 58;
-    for (int i = first; i < (int)r->ncalls && i < first + rows; i++) {
-        const KCallRec *k = &r->calls[i];
+    for (int i = first; i < nlog && i < first + rows; i++) {
+        unsigned num;
+        const KCallRec *k = runner_log_at(r, (unsigned)i, &num);
         if ((i - first) % 2) {
             gfx_rect(px, ly - 5, pw, RUN_ROW_H, HEX(0x232323));
         }
         char b[96];
-        snprintf(b, sizeof(b), "%d", i + 1);
-        gfx_text(px + 20, ly, 17, C_ON_VAR, b);
+        snprintf(b, sizeof(b), "%u", num + 1);
+        gfx_text_fit(px + 8, ly, 15, 48, C_ON_VAR, b);
         gfx_circle(px + 62, ly + 11, 5, k->real ? C_GREEN : C_WARN);
-        gfx_text_fit(px + 74, ly, 17, 296, C_ON, k->name);
+        snprintf(b, sizeof(b), "%s  · h%u", k->name, (unsigned)k->thread / 4);
+        gfx_text_fit(px + 74, ly, 17, 296, C_ON, b);
         snprintf(b, sizeof(b), "%X, %X, %X, %X", (unsigned)k->args[0], (unsigned)k->args[1], (unsigned)k->args[2],
                  (unsigned)k->args[3]);
         gfx_text_fit(px + 380, ly, 16, 225, C_ON_VAR, b);
@@ -778,27 +788,57 @@ static void draw_run(const UiState *s)
         gfx_text(px + 20, ly0 + 64, 18, C_ON_VAR, "Todavía ninguna llamada al kernel...");
     }
 
-    /* registros */
+    /* registros (compactos) e hilos */
     int rx = px + pw + 20, rw = UI_W - 40 - rx;
     gfx_rrect(rx, ly0, rw, ph, 20, C_SURF);
-    gfx_text(rx + 20, ly0 + 14, 19, C_ON, "Registros x86");
+    gfx_text(rx + 20, ly0 + 12, 18, C_ON, "Registros x86");
     static const char *names[8] = {"EAX", "ECX", "EDX", "EBX", "ESP", "EBP", "ESI", "EDI"};
-    int ry = ly0 + 46;
-    for (int i = 0; i < 8; i++) {
-        char b[32];
-        gfx_text(rx + 20, ry, 17, C_ON_VAR, names[i]);
-        snprintf(b, sizeof(b), "%08X", (unsigned)cpu->r[i]);
-        gfx_text(rx + 80, ry, 17, C_GREEN, b);
-        ry += 26;
+    int ry = ly0 + 40;
+    char b[96];
+    for (int i = 0; i < 8; i += 2) {
+        for (int j = 0; j < 2; j++) {
+            int cx = rx + 16 + j * 152;
+            gfx_text(cx, ry, 15, C_ON_VAR, names[i + j]);
+            snprintf(b, sizeof(b), "%08X", (unsigned)cpu->r[i + j]);
+            gfx_text(cx + 44, ry, 15, C_GREEN, b);
+        }
+        ry += 21;
     }
-    char b[48];
+    snprintf(b, sizeof(b), "%08X", (unsigned)cpu->eip);
+    gfx_text(rx + 16, ry, 15, C_ON_VAR, "EIP");
+    gfx_text(rx + 60, ry, 15, C_ON, b);
     snprintf(b, sizeof(b), "%08X", (unsigned)cpu->flags);
-    gfx_text(rx + 20, ry, 17, C_ON_VAR, "FLG");
-    gfx_text(rx + 80, ry, 17, C_ON, b);
-    ry += 26;
-    snprintf(b, sizeof(b), "%08X", (unsigned)cpu->fs_base);
-    gfx_text(rx + 20, ry, 17, C_ON_VAR, "FS");
-    gfx_text(rx + 80, ry, 17, C_ON, b);
+    gfx_text(rx + 168, ry, 15, C_ON_VAR, "FLG");
+    gfx_text(rx + 212, ry, 15, C_ON, b);
+    ry += 30;
+    gfx_rect(rx + 16, ry - 6, rw - 32, 1, C_SURF_HI);
+    gfx_text(rx + 20, ry, 18, C_ON, "Hilos");
+    ry += 28;
+    for (int i = 0; kn && i < K_MAX_THREADS && ry + 40 < ly0 + ph; i++) {
+        const KThread *t = &kn->threads[i];
+        if (t->state == KT_FREE) {
+            continue;
+        }
+        static const char *stn[] = {"", "Listo", "Corre", "Espera", "Terminó"};
+        uint32_t col = t->state == KT_RUNNING ? C_GREEN : (t->state == KT_WAITING ? C_WARN : C_ON_VAR);
+        if (t->state == KT_DEAD) {
+            col = C_ON_VAR;
+        }
+        gfx_circle(rx + 24, ry + 9, 5, col);
+        snprintf(b, sizeof(b), "h%u  %s%s  ·  %08X", (unsigned)t->id / 4, stn[t->state], t->suspend ? " (pausa)" : "",
+                 (unsigned)t->start);
+        gfx_text_fit(rx + 36, ry, 15, rw - 52, C_ON, b);
+        ry += 19;
+        if (t->state == KT_WAITING && t->wait_what) {
+            snprintf(b, sizeof(b), "%s", t->wait_what);
+        } else if (t->state == KT_DEAD) {
+            snprintf(b, sizeof(b), "salió con 0x%X", (unsigned)t->exit_status);
+        } else {
+            snprintf(b, sizeof(b), "%.2f M instr  ·  prioridad %d", t->instructions / 1e6, t->priority);
+        }
+        gfx_text_fit(rx + 36, ry, 14, rw - 52, C_ON_VAR, b);
+        ry += 23;
+    }
 
     if (r->state == RUN_ACTIVE) {
         Hint h[] = {{"B", "Detener"}, {"+", "Salir"}};

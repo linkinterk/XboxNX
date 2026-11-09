@@ -36,6 +36,8 @@ typedef struct KExport {
 #define K_STUB_HLT     (K_VA + 0x0F00u)  /* hlt */
 #define K_STUB_RETURN  (K_VA + 0x0F08u)  /* el hilo volvió de su rutina: int 0x3F, 0x3FF */
 #define K_ORD_THREAD_RETURN 0x3FFu
+#define K_STUB_DPC_RETURN  (K_VA + 0x0F10u)  /* un DPC volvió: int 0x3F, 0x3FE */
+#define K_ORD_DPC_RETURN    0x3FEu
 #define K_KPCR_VA      (K_VA + 0x10000u)
 #define K_ETHREAD_VA   (K_VA + 0x14000u)
 
@@ -60,6 +62,18 @@ unsigned kernel_pop_bytes(const KExport *e);
 #define ST_UNABLE_TO_FREE_VM      0xC000001Au
 #define ST_NOT_COMMITTED          0xC000002Du
 
+#define ST_TIMEOUT                0x00000102u
+#define ST_INVALID_DEVICE_STATE   0xC0000184u
+
+#define K_MAX_THREADS 64
+#define K_MAX_WAIT    64
+#define K_MAX_TIMERS  128
+#define K_MAX_DPCS    64
+
+/* Tiempo virtual: 1 ns por instrucción (el Pentium III de 733 MHz del Xbox
+ * hace ~1 por ciclo). Cuando todos esperan, salta al siguiente plazo. */
+#define K_NS_PER_INSTR 1u
+
 /* Tipos de objeto (su "Type" es el dato exportado del kernel con ese nombre). */
 typedef enum {
     OB_THREAD, OB_EVENT, OB_SEMAPHORE, OB_MUTANT, OB_TIMER, OB_FILE, OB_DEVICE, OB_SYMLINK, OB_DIRECTORY,
@@ -76,6 +90,9 @@ typedef struct KCall {
     Vm *vm;
     struct Cpu *cpu;
     uint32_t a[12];
+    bool block;      /* la llamada dejó al hilo esperando: EAX llega al despertar */
+    bool resched;    /* replanificar al volver (ceder, hilo nuevo, terminar) */
+    bool ended;      /* el hilo actual terminó */
 } KCall;
 typedef uint64_t (*KFn)(KCall *c);
 
@@ -96,6 +113,39 @@ typedef struct KHandle {
     uint32_t object;
     uint8_t type;
 } KHandle;
+
+typedef enum { KT_FREE, KT_READY, KT_RUNNING, KT_WAITING, KT_DEAD } KtState;
+
+typedef struct KCtx {
+    uint32_t r[8], eip, flags;
+    uint16_t fpu_cw, fpu_sw;
+    uint32_t mxcsr;
+} KCtx;
+
+typedef struct KThread {
+    KtState state;
+    uint32_t id;
+    uint32_t ethread, stack_base, stack_limit, tib, exception_list;
+    uint32_t start;            /* rutina de inicio (para mostrar) */
+    KCtx ctx;
+    int priority;
+    unsigned suspend;
+    uint32_t exit_status;
+    uint64_t instructions;     /* cuántas ejecutó */
+    /* espera */
+    uint32_t wait_obj[K_MAX_WAIT];
+    unsigned nwait;
+    bool wait_all;
+    bool has_deadline;
+    uint64_t deadline_ns;
+    uint32_t wait_cs;          /* sección crítica que tomará al despertar */
+    const char *wait_what;     /* qué llamada espera */
+} KThread;
+
+typedef struct KTimerRec {
+    uint32_t timer, dpc;
+    uint64_t due_ns, period_ns;
+} KTimerRec;
 
 typedef struct Kernel {
     uint32_t tramp_va[K_ORDINAL_MAX];
@@ -118,6 +168,20 @@ typedef struct Kernel {
     /* objetos (kob.c) */
     KHandle handles[K_MAX_HANDLES];
     unsigned nobjects;
+    /* hilos y tiempo (kps.c) */
+    KThread threads[K_MAX_THREADS];
+    int cur;                     /* hilo que corre (índice), -1 ninguno */
+    unsigned next_id;
+    uint64_t now_ns;             /* tiempo virtual desde el arranque */
+    unsigned quantum_count;
+    KTimerRec timers[K_MAX_TIMERS];
+    unsigned ntimers;
+    uint32_t dpc_queue[K_MAX_DPCS];
+    unsigned ndpc;
+    bool in_dpc;
+    KCtx dpc_saved;              /* contexto interrumpido por el DPC */
+    uint32_t dpc_stack_top;
+    unsigned dpcs_run, switches;
 } Kernel;
 
 bool kernel_init(Kernel *k, Vm *vm);
@@ -140,6 +204,31 @@ void kmm_add_image(Kernel *k, uint32_t base, uint32_t size);
 /* Una pila en el espacio del sistema (0xD0000000+): devuelve su base (lo más
  * bajo) o 0. */
 uint32_t kmm_stack_alloc(Kernel *k, uint32_t size);
+
+/* kps.c: hilos, esperas y tiempo */
+/* Un objeto quedó señalado: despierta a quien lo espera y, si es de más
+ * prioridad que el hilo actual, pide replanificar. */
+void kps_signaled(KCall *c);
+void kps_register(Kernel *k);
+/* Crea un hilo listo para correr en eip con la pila preparada por el que
+ * llama (kps_thread_push). Devuelve el índice o -1. */
+int kps_thread_create(Kernel *k, uint32_t stack_size, uint32_t tls_size, uint32_t ext_size);
+/* Pone en la pila del hilo los dwords v[0..n) (v[0] queda arriba) y su eip. */
+void kps_thread_start(Kernel *k, int t, uint32_t eip, const uint32_t *v, unsigned n);
+/* Guarda/carga el contexto del CPU en/desde el hilo actual. */
+void kps_save(Kernel *k, struct Cpu *c);
+void kps_load(Kernel *k, struct Cpu *c);
+/* Avanza el tiempo, dispara temporizadores, despierta esperas y elige el
+ * siguiente hilo (o un DPC). Devuelve false si no hay nada que correr. */
+bool kps_schedule(Kernel *k, struct Cpu *c, bool preempt);
+/* El hilo actual terminó con este estado. */
+void kps_exit(Kernel *k, uint32_t status);
+/* Vuelve de un DPC (stub 0x3FE). */
+void kps_dpc_return(Kernel *k, struct Cpu *c);
+unsigned kps_alive(const Kernel *k);
+/* Siguiente plazo (de espera o temporizador); false si no hay. */
+bool kps_next_deadline(const Kernel *k, uint64_t *ns);
+void kps_update_tick(Kernel *k);
 
 /* kob.c: objetos y handles */
 void kob_register(Kernel *k);

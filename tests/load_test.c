@@ -95,11 +95,12 @@ int main(int argc, char **argv)
     CHECK(runner_boot(&run, &vm, &k, &r));
     uint32_t esp0 = run.cpu.r[R_ESP];
     CHECK(vm_rd32(&vm, esp0) == K_STUB_RETURN);
-    CHECK(vm_rd32(&vm, K_KPCR_VA + 0x28) == K_ETHREAD_VA);
+    CHECK(k.cur >= 0 && vm_rd32(&vm, K_KPCR_VA + 0x28) == k.threads[k.cur].ethread);
+    CHECK(*vm_host(&vm, k.threads[k.cur].ethread) == 6);
     CHECK(runner_slice(&run, 1000) == RUN_SYSTEM_STOP);
     CHECK(run.ncalls == 2);
-    CHECK(run.calls[0].ordinal == 187 && run.calls[0].args[0] == 0x1234 && run.calls[0].caller == 0x1100B);
-    CHECK(run.calls[1].ordinal == 49 && run.calls[1].args[0] == 2);
+    CHECK(run.head[0].ordinal == 187 && run.head[0].args[0] == 0x1234 && run.head[0].caller == 0x1100B);
+    CHECK(run.head[1].ordinal == 49 && run.head[1].args[0] == 2);
     /* NtClose (stdcall, 4 bytes) dejó la pila como antes de su push; luego push 2 y la
      * dirección de retorno de HalReturnToFirmware, donde paró */
     CHECK(run.cpu.r[R_ESP] == esp0 - 8);

@@ -1,11 +1,13 @@
 /*
- * XboxNX — pruebas en PC del kernel de la etapa 3a (memoria y objetos).
+ * XboxNX — pruebas en PC del kernel: etapa 3a (memoria y objetos) y 3b
+ * (hilos, esperas, tiempo, temporizadores y DPC con código x86 de verdad).
  */
 #include <stdio.h>
 #include <string.h>
 
 #include "../source/cpu.h"
 #include "../source/kernel.h"
+#include "../source/runner.h"
 
 static int g_fail;
 #define CHECK(c)                                                 \
@@ -31,7 +33,7 @@ static uint64_t call(const char *name, uint32_t a0, uint32_t a1, uint32_t a2, ui
                 g_fail++;
                 return 0xDEAD;
             }
-            KCall c = {&k, &vm, NULL, {a0, a1, a2, a3, a4}};
+            KCall c = {&k, &vm, NULL, {a0, a1, a2, a3, a4}, false, false, false};
             return k.impl[o](&c);
         }
     }
@@ -42,6 +44,229 @@ static uint64_t call(const char *name, uint32_t a0, uint32_t a1, uint32_t a2, ui
 
 static uint32_t rd(uint32_t va) { return vm_rd32(&vm, va); }
 static void wr(uint32_t va, uint32_t v) { vm_wr32(&vm, va, v); }
+
+
+/* ---- ensamblador mínimo para las pruebas de hilos ---- */
+#define CODE 0x00020000u
+static uint8_t g_code[0x2000];
+static uint32_t g_pc;
+
+static uint32_t here(void) { return CODE + g_pc; }
+static void b1(uint8_t v) { g_code[g_pc++] = v; }
+static void d4(uint32_t v)
+{
+    for (int i = 0; i < 4; i++) {
+        b1((uint8_t)(v >> (8 * i)));
+    }
+}
+static void push(uint32_t v) { b1(0x68); d4(v); }
+static void push_mem(uint32_t va) { b1(0xFF); b1(0x35); d4(va); } /* push [va] */
+static void store_eax(uint32_t va) { b1(0xA3); d4(va); }           /* mov [va], eax */
+static void kcall(const char *name)
+{
+    for (unsigned o = 1; o < K_ORDINAL_MAX; o++) {
+        const KExport *e = kernel_export(o);
+        if (e && !strcmp(e->name, name)) {
+            b1(0xB8);
+            d4(k.tramp_va[o]); /* mov eax, trampolín */
+            b1(0xFF);
+            b1(0xD0); /* call eax */
+            return;
+        }
+    }
+    printf("FALLO: %s no existe\n", name);
+    g_fail++;
+}
+
+static Runner g_run;
+static LoadReport g_load;
+
+/* Reinicia el kernel, copia el código y arranca un hilo en entry. */
+static void boot(uint32_t entry)
+{
+    vm_free(&vm);
+    memset(&k, 0, sizeof(k));
+    CHECK(vm_init(&vm));
+    CHECK(kernel_init(&k, &vm));
+    CHECK(vm_alloc_at(&vm, SCRATCH, 0x1000));
+    CHECK(vm_alloc_at(&vm, CODE, sizeof(g_code)));
+    CHECK(vm_write(&vm, CODE, g_code, g_pc));
+    memset(&g_load, 0, sizeof(g_load));
+    g_load.entry = entry;
+    CHECK(runner_boot(&g_run, &vm, &k, &g_load));
+}
+
+static unsigned count_calls(const char *name)
+{
+    unsigned n = 0, num;
+    for (unsigned j = 0; j < runner_log_len(&g_run); j++) {
+        const KCallRec *r = runner_log_at(&g_run, j, &num);
+        n += r && !strcmp(r->name, name);
+    }
+    return n;
+}
+
+static void thread_tests(void)
+{
+    /* 1) dos hilos: el principal crea otro, que duerme 1 ms, escribe su
+     *    contexto y vuelve; el principal espera a que termine. */
+    g_pc = 0;
+    uint32_t worker = 0, main_va;
+    /* trabajador: KeDelayExecutionThread(0, 0, &-10000) */
+    worker = here();
+    push(SCRATCH + 0x100);
+    push(0);
+    push(0);
+    kcall("KeDelayExecutionThread");
+    b1(0x8B); b1(0x44); b1(0x24); b1(0x04); /* mov eax, [esp+4] */
+    store_eax(SCRATCH + 4);
+    b1(0xB8); d4(0x77); /* mov eax, 0x77 (estado de salida) */
+    b1(0xC2); b1(0x04); b1(0x00); /* ret 4 */
+    main_va = here();
+    /* PsCreateSystemThreadEx(&h, 0, 0x4000, 0, 0, worker, 0x55, 0, 0, 0) */
+    push(0); push(0); push(0); push(0x55); push(worker); push(0); push(0); push(0x4000); push(0);
+    push(SCRATCH);
+    kcall("PsCreateSystemThreadEx");
+    store_eax(SCRATCH + 0x10);
+    push(0); push(0); push_mem(SCRATCH);
+    kcall("NtWaitForSingleObject");
+    store_eax(SCRATCH + 8);
+    push(7);
+    kcall("HalReturnToFirmware");
+    b1(0xEB); b1(0xFE);
+    boot(main_va);
+    wr(SCRATCH + 0x100, (uint32_t)-10000); /* -1 ms en unidades de 100 ns */
+    wr(SCRATCH + 0x104, 0xFFFFFFFFu);
+    wr(SCRATCH + 4, 0);
+    wr(SCRATCH + 8, 0xFFFF);
+    RunState st = runner_slice(&g_run, 100000);
+    CHECK(st == RUN_SYSTEM_STOP);
+    CHECK(rd(SCRATCH + 0x10) == 0);
+    CHECK(rd(SCRATCH + 4) == 0x55);
+    CHECK(rd(SCRATCH + 8) == 0);
+    CHECK(k.now_ns >= 1000000u);       /* saltó el milisegundo */
+    CHECK(k.switches >= 2);
+    CHECK(kps_alive(&k) == 1);
+    CHECK(k.threads[1].state == KT_DEAD && k.threads[1].exit_status == 0x77);
+    printf("3b hilos: %u cambios, %llu ns virtuales, fin: %s\n", k.switches, (unsigned long long)k.now_ns,
+           g_run.end);
+
+    /* 2) evento: el trabajador espera un evento que el principal señala */
+    g_pc = 0;
+    worker = here();
+    push(0); push(0); push_mem(SCRATCH + 0x20);
+    kcall("NtWaitForSingleObject");
+    store_eax(SCRATCH + 0x24);
+    push(0); /* PsTerminateSystemThread(0) */
+    kcall("PsTerminateSystemThread");
+    main_va = here();
+    /* NtCreateEvent(&h, 0, NotificationEvent, FALSE) */
+    push(0); push(0); push(0); push(SCRATCH + 0x20);
+    kcall("NtCreateEvent");
+    push(0); push(0); push(0); push(0x0); push(worker); push(0); push(0); push(0x4000); push(0);
+    push(SCRATCH);
+    kcall("PsCreateSystemThreadEx");
+    kcall("NtYieldExecution"); /* el trabajador corre y se queda esperando */
+    push(0); push_mem(SCRATCH + 0x20);
+    kcall("NtSetEvent");
+    push(0); push(0); push_mem(SCRATCH);
+    kcall("NtWaitForSingleObject");
+    push(7);
+    kcall("HalReturnToFirmware");
+    boot(main_va);
+    wr(SCRATCH + 0x24, 0xFFFF);
+    CHECK(runner_slice(&g_run, 100000) == RUN_SYSTEM_STOP);
+    CHECK(rd(SCRATCH + 0x24) == 0);
+    CHECK(k.threads[1].state == KT_DEAD);
+
+    /* 3) temporizador con DPC: el DPC escribe su contexto */
+    g_pc = 0;
+    uint32_t dpc_fn = here();
+    b1(0x8B); b1(0x44); b1(0x24); b1(0x08); /* mov eax, [esp+8] (DeferredContext) */
+    store_eax(SCRATCH + 0x30);
+    b1(0xC2); b1(0x10); b1(0x00); /* ret 16 */
+    main_va = here();
+    push(SCRATCH + 0x60); push(dpc_fn); push(SCRATCH + 0x40);
+    kcall("KeInitializeDpc"); /* (Dpc, Routine, Context) */
+    push(0); push(SCRATCH + 0x80);
+    kcall("KeInitializeTimerEx");
+    /* KeSetTimer(Timer, DueTime = -5 ms por valor, Dpc) */
+    push(SCRATCH + 0x40); push(0xFFFFFFFFu); push((uint32_t)-50000); push(SCRATCH + 0x80);
+    kcall("KeSetTimer");
+    /* KeWaitForSingleObject(Timer, 0, 0, 0, NULL) */
+    push(0); push(0); push(0); push(0); push(SCRATCH + 0x80);
+    kcall("KeWaitForSingleObject");
+    store_eax(SCRATCH + 0x34);
+    push(7);
+    kcall("HalReturnToFirmware");
+    boot(main_va);
+    wr(SCRATCH + 0x34, 0xFFFF);
+    CHECK(runner_slice(&g_run, 100000) == RUN_SYSTEM_STOP);
+    CHECK(rd(SCRATCH + 0x30) == SCRATCH + 0x60);
+    CHECK(rd(SCRATCH + 0x34) == 0);
+    CHECK(k.now_ns >= 5000000u && k.dpcs_run == 1);
+
+    /* 4) sección crítica disputada entre dos hilos */
+    g_pc = 0;
+    worker = here();
+    push(SCRATCH + 0x200);
+    kcall("RtlEnterCriticalSection"); /* espera: el principal la tiene */
+    b1(0xA1); d4(SCRATCH + 0x50);      /* mov eax, [x] */
+    b1(0x40);                          /* inc eax */
+    store_eax(SCRATCH + 0x50);
+    push(SCRATCH + 0x200);
+    kcall("RtlLeaveCriticalSection");
+    b1(0x31); b1(0xC0);                /* xor eax, eax */
+    b1(0xC2); b1(0x04); b1(0x00);
+    main_va = here();
+    push(SCRATCH + 0x200);
+    kcall("RtlInitializeCriticalSection");
+    push(SCRATCH + 0x200);
+    kcall("RtlEnterCriticalSection");
+    push(0); push(0); push(0); push(0); push(worker); push(0); push(0); push(0x4000); push(0);
+    push(SCRATCH);
+    kcall("PsCreateSystemThreadEx");
+    kcall("NtYieldExecution");         /* el trabajador se bloquea en la sección */
+    b1(0xC7); b1(0x05); d4(SCRATCH + 0x50); d4(100); /* mov dword [x], 100 */
+    push(SCRATCH + 0x200);
+    kcall("RtlLeaveCriticalSection");
+    push(0); push(0); push_mem(SCRATCH);
+    kcall("NtWaitForSingleObject");
+    push(7);
+    kcall("HalReturnToFirmware");
+    boot(main_va);
+    CHECK(runner_slice(&g_run, 100000) == RUN_SYSTEM_STOP);
+    CHECK(rd(SCRATCH + 0x50) == 101);
+    CHECK((int32_t)rd(SCRATCH + 0x200 + 0x10) == -1 && rd(SCRATCH + 0x200 + 0x18) == 0);
+
+    /* 5) bloqueo: esperar para siempre un evento que nadie señala */
+    g_pc = 0;
+    main_va = here();
+    push(0); push(1); push(0); push(SCRATCH + 0x20);
+    kcall("NtCreateEvent"); /* sincronización, sin señalar */
+    push(0); push(0); push_mem(SCRATCH + 0x20);
+    kcall("NtWaitForSingleObject");
+    b1(0xEB); b1(0xFE);
+    boot(main_va);
+    CHECK(runner_slice(&g_run, 100000) == RUN_DEADLOCK);
+
+    /* 6) reparto: dos hilos que nunca ceden se turnan por cuanto */
+    g_pc = 0;
+    worker = here();
+    b1(0xFF); b1(0x05); d4(SCRATCH + 0x70); /* inc dword [y] */
+    b1(0xEB); b1(0xF8);                      /* jmp worker */
+    main_va = here();
+    push(0); push(0); push(0); push(0); push(worker); push(0); push(0); push(0x4000); push(0);
+    push(SCRATCH);
+    kcall("PsCreateSystemThreadEx");
+    uint32_t loop = here();
+    b1(0xFF); b1(0x05); d4(SCRATCH + 0x74); /* inc dword [z] */
+    b1(0xEB); b1((uint8_t)(loop - (here() + 1)));
+    boot(main_va);
+    CHECK(runner_slice(&g_run, 9000000) == RUN_ACTIVE);
+    CHECK(rd(SCRATCH + 0x70) > 1000000 && rd(SCRATCH + 0x74) > 1000000);
+    CHECK(count_calls("PsCreateSystemThreadEx") == 1);
+}
 
 int main(void)
 {
@@ -177,6 +402,8 @@ int main(void)
     /* ---- pila del sistema ---- */
     uint32_t st = kmm_stack_alloc(&k, 0x3000);
     CHECK(st >= 0xD0000000u && vm_phys(&vm, st) != VM_NO_PHYS && vm_phys(&vm, st - 1) == VM_NO_PHYS);
+
+    thread_tests();
 
     vm_free(&vm);
     printf(g_fail ? "%d fallos\n" : "todo bien\n", g_fail);

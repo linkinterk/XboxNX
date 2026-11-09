@@ -98,6 +98,10 @@ bool kernel_init(Kernel *k, Vm *vm)
     km[K_STUBS + 9] = K_CALL_VECTOR;
     km[K_STUBS + 10] = (uint8_t)K_ORD_THREAD_RETURN;
     km[K_STUBS + 11] = (uint8_t)(K_ORD_THREAD_RETURN >> 8);
+    km[K_STUBS + 16] = 0xCD;
+    km[K_STUBS + 17] = K_CALL_VECTOR;
+    km[K_STUBS + 18] = (uint8_t)K_ORD_DPC_RETURN;
+    km[K_STUBS + 19] = (uint8_t)(K_ORD_DPC_RETURN >> 8);
 
     for (size_t i = 0; i < sizeof(k_exports) / sizeof(k_exports[0]); i++) {
         const KExport *e = &k_exports[i];
@@ -181,6 +185,8 @@ bool kernel_init(Kernel *k, Vm *vm)
     }
     kmm_register(k);
     kob_register(k);
+    kps_register(k);
+    k->cur = -1;
     return true;
 }
 

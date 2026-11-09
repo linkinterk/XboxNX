@@ -22,7 +22,7 @@
 #include "probe.h"
 #include "ui.h"
 
-#define APP_VER   "0.5.1"
+#define APP_VER   "0.6.0"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -331,10 +331,13 @@ int main(int argc, char **argv)
         }
         case UI_RUN: {
             if (g_run.state == RUN_ACTIVE) {
-                /* ~1/30 s de intérprete por cuadro */
-                u64 t0 = armGetSystemTick();
-                runner_slice(&g_run, 300000);
-                g_run.ns += armTicksToNs(armGetSystemTick() - t0);
+                /* ~25 ms de intérprete por cuadro, en tramos de 100.000 */
+                u64 t0 = armGetSystemTick(), spent = 0;
+                do {
+                    runner_slice(&g_run, 100000);
+                    spent = armTicksToNs(armGetSystemTick() - t0);
+                } while (g_run.state == RUN_ACTIVE && spent < 25000000ull);
+                g_run.ns += spent;
                 dirty = true;
                 if (k & HidNpadButton_B) {
                     g_run.state = RUN_CPU_STOP;
@@ -348,7 +351,7 @@ int main(int argc, char **argv)
                 dirty = true;
             }
             int rows = ui_run_rows();
-            int max = (int)g_run.ncalls - rows;
+            int max = (int)runner_log_len(&g_run) - rows;
             int cur = g_ui.run_scroll >= 0 ? g_ui.run_scroll : (max > 0 ? max : 0);
             if (k & (HidNpadButton_AnyUp | HidNpadButton_L | HidNpadButton_ZL)) {
                 int step = (k & HidNpadButton_AnyUp) ? 1 : rows;

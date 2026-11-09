@@ -209,6 +209,9 @@ static uint64_t set_event_state(KCall *c, int32_t value)
     if (c->a[1] && value >= 0) {
         vm_wr32(c->vm, c->a[1], (uint32_t)prev);
     }
+    if (value) {
+        kps_signaled(c);
+    }
     return ST_SUCCESS;
 }
 
@@ -220,14 +223,23 @@ static uint64_t NtClearEvent(KCall *c)
     c->a[1] = 0;
     return set_event_state(c, 0);
 }
-/* NtPulseEvent(Handle, *PreviousState): sin esperas todavía, queda en 0 */
-static uint64_t NtPulseEvent(KCall *c) { return set_event_state(c, 0); }
+/* NtPulseEvent(Handle, *PreviousState): despierta a los que esperan y queda en 0 */
+static uint64_t NtPulseEvent(KCall *c)
+{
+    uint64_t st = set_event_state(c, 1);
+    if (st == ST_SUCCESS) {
+        uint32_t o = kob_lookup(c->k, c->a[0], NULL);
+        vm_wr32(c->vm, o + DH_SIGNAL, 0);
+    }
+    return st;
+}
 
 /* KeInitializeEvent no es exportación; KeSetEvent(Event, Increment, Wait) -> estado previo */
 static uint64_t KeSetEvent(KCall *c)
 {
     int32_t prev = (int32_t)vm_rd32(c->vm, c->a[0] + DH_SIGNAL);
     vm_wr32(c->vm, c->a[0] + DH_SIGNAL, 1);
+    kps_signaled(c);
     return (uint32_t)prev;
 }
 
@@ -300,6 +312,7 @@ static uint64_t NtReleaseSemaphore(KCall *c)
     if (c->a[2]) {
         vm_wr32(c->vm, c->a[2], (uint32_t)prev);
     }
+    kps_signaled(c);
     return ST_SUCCESS;
 }
 
@@ -339,6 +352,7 @@ static uint64_t NtReleaseMutant(KCall *c)
     vm_wr32(c->vm, o + DH_SIGNAL, (uint32_t)now);
     if (now == 1) {
         vm_wr32(c->vm, o + MUT_OWNER, 0);
+        kps_signaled(c);
     }
     if (c->a[1]) {
         vm_wr32(c->vm, c->a[1], (uint32_t)prev);

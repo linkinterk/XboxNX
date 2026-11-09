@@ -10,8 +10,9 @@ Port del emulador de Xbox original **hakuX** a Nintendo Switch, nativo (homebrew
 | 2b. CPU (intérprete) | Intérprete x86 propio, probado contra Unicorn | Lista |
 | 2c. Arranque | Hilo de arranque como el kernel del Xbox; registro de cada llamada al kernel | Lista |
 | 2d. CPU (FEX) | Traductor x86→ARM64 sobre el JIT de la Switch, para la velocidad | Pendiente |
-| 3a. Kernel: memoria y objetos | Memoria contigua y virtual, pool, pilas, handles, eventos, semáforos, mutex (44 funciones reales) | **Esta versión** |
-| 3b–3g | Hilos y tiempo, archivos, sistema, hardware simulado, audio, controles | Pendiente |
+| 3a. Kernel: memoria y objetos | Memoria contigua y virtual, pool, pilas, handles, eventos, semáforos, mutex (44 funciones reales) | Lista |
+| 3b. Kernel: hilos y tiempo | Varios hilos con prioridades y turnos, esperas, secciones críticas, temporizadores, DPC, tiempo virtual (97 funciones reales) | **Esta versión** |
+| 3c–3g | Archivos, sistema, hardware simulado, audio, controles | Pendiente |
 | 4. Gráficos | Renderizador NV2A de Vulkan a deko3d | Pendiente |
 | 5. Optimizar | Velocidad en el CPU de la Switch | Pendiente |
 

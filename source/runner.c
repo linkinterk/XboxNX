@@ -1,34 +1,42 @@
 /*
- * XboxNX — arranque del juego en el intérprete.
+ * XboxNX — ejecución del juego en el intérprete, con varios hilos (etapa 3b).
  */
 #include "runner.h"
 
 #include <stdio.h>
 #include <string.h>
 
-/* Pila del hilo (KiInitializeContextThread; distribución de hakuX ps.c). */
+/* Pila del hilo de arranque */
 #define MAIN_STACK_SIZE  (256u * 1024u)
-#define FX_SAVE_AREA     0x210u
-#define ETHREAD_SIZE     0x140u
-#define KT_TYPE          0x00
-#define KT_SIZE          0x02
-#define KT_WAIT_LIST     0x08
-#define KT_MUTANT_LIST   0x10
-#define KT_STACK_BASE    0x1C
-#define KT_STACK_LIMIT   0x20
-#define KT_KERNEL_STACK  0x24
-#define KT_TLS_DATA      0x28
-#define KT_NPX_STATE     0x30
-#define KT_PRIORITY      0x32
-#define KT_APC_LISTS     0x34
-#define KT_QUANTUM       0x6C
-#define KT_BASE_PRIORITY 0x70
-#define ET_START_ADDRESS 0x130
+#define QUANTUM          2000000u   /* instrucciones por turno (~2 ms virtuales) */
 
-static void list_init(Vm *vm, uint32_t va)
+unsigned runner_log_len(const Runner *r)
 {
-    vm_wr32(vm, va, va);
-    vm_wr32(vm, va + 4, va);
+    unsigned cap = RUN_LOG_HEAD + RUN_LOG_TAIL;
+    return r->ncalls < cap ? r->ncalls : cap;
+}
+
+const KCallRec *runner_log_at(const Runner *r, unsigned j, unsigned *number)
+{
+    unsigned len = runner_log_len(r);
+    if (j >= len) {
+        return NULL;
+    }
+    if (j < RUN_LOG_HEAD) {
+        *number = j;
+        return &r->head[j];
+    }
+    unsigned n = r->ncalls - (len - j);
+    *number = n;
+    return &r->tail[(n - RUN_LOG_HEAD) % RUN_LOG_TAIL];
+}
+
+static KCallRec *log_new(Runner *r)
+{
+    unsigned n = r->ncalls++;
+    KCallRec *rec = n < RUN_LOG_HEAD ? &r->head[n] : &r->tail[(n - RUN_LOG_HEAD) % RUN_LOG_TAIL];
+    memset(rec, 0, sizeof(*rec));
+    return rec;
 }
 
 bool runner_boot(Runner *r, Vm *vm, Kernel *k, const LoadReport *load)
@@ -40,59 +48,30 @@ bool runner_boot(Runner *r, Vm *vm, Kernel *k, const LoadReport *load)
     if (load->stack_commit > size) {
         size = (load->stack_commit + VM_PAGE - 1) & ~(VM_PAGE - 1);
     }
-    size = (size + FX_SAVE_AREA + 16 + VM_PAGE - 1) & ~(VM_PAGE - 1);
-    uint32_t base = kmm_stack_alloc(k, size);
-    if (!base) {
-        snprintf(r->end, sizeof(r->end), "Sin memoria para la pila del hilo");
+    int ti = kps_thread_create(k, size, 0, 0);
+    if (ti < 0) {
+        snprintf(r->end, sizeof(r->end), "Sin memoria para el hilo de arranque");
         r->state = RUN_SYSTEM_STOP;
         return false;
     }
-    uint32_t top = base + size, tib = top - FX_SAVE_AREA;
-    r->stack_base = top;
-    r->stack_limit = base;
+    uint32_t v[1] = {K_STUB_RETURN};
+    kps_thread_start(k, ti, load->entry, v, 1);
+    KThread *t = &k->threads[ti];
+    r->stack_base = t->stack_base;
+    r->stack_limit = t->stack_limit;
 
-    /* área FX: control word 0x27F, MXCSR 0x1F80, NPX sin cargar */
-    vm_write(vm, tib, (uint8_t[2]){0x7F, 0x02}, 2);
-    vm_wr32(vm, tib + 0x18, 0x1F80);
-    vm_wr32(vm, tib + 0x200, 0x0A);
-
-    /* ETHREAD (KTHREAD al principio) */
-    uint32_t et = K_ETHREAD_VA;
-    uint8_t *kt = vm_host(vm, et);
-    memset(kt, 0, ETHREAD_SIZE);
-    kt[KT_TYPE] = 6; /* THREAD_OBJECT */
-    kt[KT_SIZE] = 0x110 / 4;
-    kt[KT_NPX_STATE] = 0x0A;
-    list_init(vm, et + KT_WAIT_LIST);
-    list_init(vm, et + KT_MUTANT_LIST);
-    list_init(vm, et + KT_APC_LISTS);
-    list_init(vm, et + KT_APC_LISTS + 8);
-    vm_wr32(vm, et + KT_STACK_BASE, top);
-    vm_wr32(vm, et + KT_STACK_LIMIT, base);
-    vm_wr32(vm, et + KT_KERNEL_STACK, tib & ~15u);
-    vm_wr32(vm, et + KT_TLS_DATA, 0);
-    kt[KT_PRIORITY] = 8;
-    kt[KT_BASE_PRIORITY] = 8;
-    vm_wr32(vm, et + KT_QUANTUM, 36);
-    vm_wr32(vm, et + ET_START_ADDRESS, load->entry);
-    k->current_thread = et;
-
-    /* KPCR en fs: NT_TIB, SelfPcr, Prcb, Irql, CurrentThread */
+    /* KPCR en fs: NT_TIB, SelfPcr, Prcb, Irql */
     uint32_t pcr = K_KPCR_VA;
     vm_wr32(vm, pcr + 0x00, 0xFFFFFFFFu);
-    vm_wr32(vm, pcr + 0x04, tib);
-    vm_wr32(vm, pcr + 0x08, base);
     vm_wr32(vm, pcr + 0x1C, pcr);
     vm_wr32(vm, pcr + 0x20, pcr + 0x28);
     *vm_host(vm, pcr + 0x24) = 0; /* PASSIVE_LEVEL */
-    vm_wr32(vm, pcr + 0x28, et);
 
     cpu_init(&r->cpu, vm);
-    r->cpu.fs_base = pcr;
-    uint32_t esp = (tib & ~15u) - 16 - 4;
-    vm_wr32(vm, esp, K_STUB_RETURN);
-    r->cpu.r[R_ESP] = esp;
-    r->cpu.eip = load->entry;
+    k->cur = ti;
+    t->state = KT_RUNNING;
+    kps_load(k, &r->cpu);
+    r->quantum_left = QUANTUM;
     r->state = RUN_ACTIVE;
     return true;
 }
@@ -103,87 +82,119 @@ static void finish(Runner *r, RunState st, const char *fmt, const char *a, uint3
     snprintf(r->end, sizeof(r->end), fmt, a, b);
 }
 
-/* Una llamada al kernel: se registra y se "contesta" con 0. */
+/* Elige el siguiente hilo; si no queda ninguno, termina la ejecución. */
+static void reschedule(Runner *r, bool preempt)
+{
+    r->quantum_left = QUANTUM;
+    if (kps_schedule(r->k, &r->cpu, preempt)) {
+        r->cpu.stop = CPU_RUNNING;
+        return;
+    }
+    unsigned alive = kps_alive(r->k);
+    if (!alive) {
+        finish(r, RUN_THREAD_END, "Todos los hilos del juego terminaron%s (%u)", "", 0);
+    } else {
+        finish(r, RUN_DEADLOCK, "Bloqueo: los %s%u hilos esperan algo que nunca llegará", "", alive);
+    }
+}
+
+/* Lo que el juego dejó para el reinicio (LAUNCH_DATA_HEADER: tipo, título, ruta). */
+static void read_launch(Runner *r)
+{
+    uint32_t slot = kernel_data_va(r->k, "LaunchDataPage");
+    uint32_t page = slot ? vm_rd32(r->cpu.vm, slot) : 0;
+    if (!page || !vm_host(r->cpu.vm, page)) {
+        return;
+    }
+    r->has_launch = true;
+    r->launch_type = vm_rd32(r->cpu.vm, page);
+    r->launch_title = vm_rd32(r->cpu.vm, page + 4);
+    unsigned i = 0;
+    for (; i + 1 < sizeof(r->launch_path); i++) {
+        uint8_t ch = *vm_host(r->cpu.vm, page + 8 + i);
+        if (!ch) {
+            break;
+        }
+        r->launch_path[i] = (ch >= 32 && ch < 127) ? (char)ch : '?';
+    }
+    r->launch_path[i] = 0;
+}
+
 static void kernel_call(Runner *r)
 {
     Cpu *c = &r->cpu;
+    Kernel *k = r->k;
     unsigned ord = c->kcall_ordinal;
     uint32_t esp = c->r[R_ESP];
-    if (ord == K_ORD_THREAD_RETURN) {
-        finish(r, RUN_THREAD_END, "La rutina del hilo volvió (eax 0x%s%08X)", "", c->r[R_EAX]);
+    if (ord == K_ORD_THREAD_RETURN) { /* la rutina del hilo volvió */
+        kps_exit(k, c->r[R_EAX]);
+        reschedule(r, false);
+        return;
+    }
+    if (ord == K_ORD_DPC_RETURN) {
+        kps_dpc_return(k, c);
+        reschedule(r, false);
         return;
     }
     const KExport *e = kernel_export(ord);
-    KCallRec *rec = NULL;
-    if (r->ncalls < RUN_MAX_CALLS) {
-        rec = &r->calls[r->ncalls];
-        rec->ordinal = ord;
-        rec->name = e ? e->name : "?";
-        rec->kind = e ? e->kind : KX_TODO;
-        rec->caller = vm_rd32(c->vm, esp);
-        rec->icount = c->icount;
-        if (e && e->conv == KC_FAST) {
-            rec->args[0] = c->r[R_ECX];
-            rec->args[1] = c->r[R_EDX];
-            rec->args[2] = vm_rd32(c->vm, esp + 4);
-            rec->args[3] = vm_rd32(c->vm, esp + 8);
-        } else {
-            for (int i = 0; i < 4; i++) {
-                rec->args[i] = vm_rd32(c->vm, esp + 4 + 4 * (uint32_t)i);
-            }
+    KCallRec *rec = log_new(r);
+    rec->ordinal = ord;
+    rec->name = e ? e->name : "?";
+    rec->kind = e ? e->kind : KX_TODO;
+    rec->caller = vm_rd32(c->vm, esp);
+    rec->icount = c->icount;
+    rec->thread = k->cur >= 0 ? k->threads[k->cur].id : 0;
+    if (e && e->conv == KC_FAST) {
+        rec->args[0] = c->r[R_ECX];
+        rec->args[1] = c->r[R_EDX];
+        rec->args[2] = vm_rd32(c->vm, esp + 4);
+        rec->args[3] = vm_rd32(c->vm, esp + 8);
+    } else {
+        for (int i = 0; i < 4; i++) {
+            rec->args[i] = vm_rd32(c->vm, esp + 4 + 4 * (uint32_t)i);
         }
-        bool seen = false;
-        for (unsigned i = 0; i < r->ncalls; i++) {
-            seen = seen || r->calls[i].ordinal == ord;
-        }
-        r->distinct += seen ? 0 : 1;
-        r->ncalls++;
+    }
+    if (ord < K_ORDINAL_MAX && !r->seen[ord]) {
+        r->seen[ord] = 1;
+        r->distinct++;
     }
     if (!e) {
         finish(r, RUN_SYSTEM_STOP, "Llamada a un ordinal del kernel desconocido%s (%u)", "", ord);
         return;
     }
-    if (rec && (ord == 258 || ord == 49 || ord == 95)) {
-        rec->real = true; /* el ejecutor las atiende: terminan la ejecución */
-    }
-    if (ord == 258) { /* PsTerminateSystemThread */
-        finish(r, RUN_THREAD_END, "El juego terminó este hilo (PsTerminateSystemThread%s, estado 0x%X)", "",
-               vm_rd32(c->vm, esp + 4));
-        return;
-    }
     if (ord == 49) { /* HalReturnToFirmware */
+        rec->real = true;
+        read_launch(r);
         finish(r, RUN_SYSTEM_STOP, "El juego pidió volver al menú del Xbox (HalReturnToFirmware%s %u)", "",
                vm_rd32(c->vm, esp + 4));
         return;
     }
     if (ord == 95) { /* KeBugCheck */
+        rec->real = true;
         finish(r, RUN_SYSTEM_STOP, "Error fatal del juego (KeBugCheck%s 0x%X)", "", vm_rd32(c->vm, esp + 4));
         return;
     }
     /* la implementación real, o un 0 simulado */
     uint64_t ret = 0;
-    KFn fn = r->k->impl[ord];
+    KFn fn = k->impl[ord];
+    KCall kc = {k, c->vm, c, {0}, false, false, false};
     if (fn) {
-        KCall kc = {r->k, c->vm, c, {0}};
-        unsigned stack_args = 12;
         unsigned at = 0;
         if (e->conv == KC_FAST) {
             kc.a[at++] = c->r[R_ECX];
             kc.a[at++] = c->r[R_EDX];
         }
-        for (unsigned i = 0; at < stack_args; i++) {
+        for (unsigned i = 0; at < 12; i++) {
             kc.a[at++] = vm_rd32(c->vm, esp + 4 + 4 * i);
         }
         ret = fn(&kc);
     } else {
         r->simulated++;
     }
-    if (rec) {
-        rec->real = fn != NULL;
-        rec->ret = (uint32_t)ret;
-    }
-    if (r->ncalls >= RUN_MAX_CALLS) {
-        finish(r, RUN_CALL_LIMIT, "Se registraron %s%u llamadas: alto", "", RUN_MAX_CALLS);
+    rec->real = fn != NULL;
+    rec->ret = (uint32_t)ret;
+    if (kc.ended) { /* el hilo terminó: no vuelve */
+        reschedule(r, false);
         return;
     }
     /* volver al que llamó */
@@ -192,17 +203,30 @@ static void kernel_call(Runner *r)
     c->eip = vm_rd32(c->vm, esp);
     c->r[R_ESP] = esp + 4 + kernel_pop_bytes(e);
     c->stop = CPU_RUNNING;
+    if (kc.block || kc.resched) {
+        reschedule(r, false);
+    }
 }
 
 RunState runner_slice(Runner *r, uint64_t max)
 {
+    Kernel *k = r->k;
     while (r->state == RUN_ACTIVE && max) {
+        uint64_t n = max < r->quantum_left ? max : r->quantum_left;
         uint64_t before = r->cpu.icount;
-        CpuStop st = cpu_run(&r->cpu, max);
+        CpuStop st = cpu_run(&r->cpu, n);
         uint64_t done = r->cpu.icount - before;
-        max = done >= max ? 0 : max - done - 1;
+        max = done + 1 >= max ? 0 : max - done - 1; /* al menos 1 por vuelta */
+        r->quantum_left = done >= r->quantum_left ? 0 : r->quantum_left - done;
+        k->now_ns += done * K_NS_PER_INSTR;
+        if (k->cur >= 0 && !k->in_dpc) {
+            k->threads[k->cur].instructions += done;
+        }
         if (st == CPU_LIMIT) {
-            break;
+            if (!r->quantum_left) {
+                reschedule(r, true);
+            }
+            continue;
         }
         if (st == CPU_KCALL) {
             kernel_call(r);
