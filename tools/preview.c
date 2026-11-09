@@ -97,7 +97,7 @@ int main(int argc, char **argv)
     }
 
     UiState s = {0};
-    s.version = "0.15.2";
+    s.version = "0.16.0";
     s.cards = cards;
 
     s.screen = UI_LOADING;

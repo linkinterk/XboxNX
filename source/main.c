@@ -23,8 +23,9 @@
 #include "ui.h"
 #include "usb/usb.h"
 #include "prof.h"
+#include "apu/apu.h"
 
-#define APP_VER   "0.15.2"
+#define APP_VER   "0.16.0"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -247,6 +248,7 @@ int main(int argc, char **argv)
     PadState pad;
     padInitializeDefault(&pad);
     hidInitializeTouchScreen();
+    apu_set_threaded(true); /* el audio en el núcleo 1 */
     s32 prev_touches = 0;
 
     g_ui.version = APP_VER;

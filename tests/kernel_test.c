@@ -11,6 +11,7 @@
 #include "../source/disc.h"
 #include "../source/hw.h"
 #include "../source/nv2a_sw.h"
+#include "../source/apu/apu.h"
 #include "../source/runner.h"
 
 static int g_fail;
@@ -716,6 +717,9 @@ static void hw_tests(void)
 
 int main(int argc, char **argv)
 {
+    if (getenv("APU_HILO")) {
+        apu_set_threaded(true); /* el audio en su hilo, como en la Switch */
+    }
     CHECK(vm_init(&vm));
     CHECK(kernel_init(&k, &vm));
     CHECK(vm_alloc_at(&vm, SCRATCH, 0x1000));

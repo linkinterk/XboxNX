@@ -33,6 +33,15 @@ static ApuStats g_stats;
 static ApuOutFn g_out;
 static void *g_out_ctx;
 
+/* Los cuadros corren en su propio hilo (otro núcleo de la Switch), como el
+ * DSP real corre junto a la CPU: el intérprete solo publica hasta dónde
+ * llegó el tiempo virtual (g_target_ns). g_mx protege el estado del APU
+ * entre ese hilo y los registros que toca la CPU. */
+static pthread_mutex_t g_mx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
+static uint64_t g_target_ns; /* con __atomic */
+static bool g_thread_on;
+
 /* ---- lo que pide el código de hakuX ---- */
 
 void nc_log(const char *tag, const char *fmt, ...)
@@ -45,10 +54,10 @@ void nc_log(const char *tag, const char *fmt, ...)
 void nc_irq_set(int line, bool level)
 {
     (void)line;
-    g_irq = level;
+    __atomic_store_n(&g_irq, level, __ATOMIC_RELAXED);
 }
 
-uint64_t nc_ke_now_ns(void) { return g_k ? g_k->now_ns : 0; }
+uint64_t nc_ke_now_ns(void) { return g_k ? __atomic_load_n(&g_k->now_ns, __ATOMIC_RELAXED) : 0; }
 
 void hle_host_mem_set_dirty(uint32_t pa, uint32_t len)
 {
@@ -183,8 +192,10 @@ static void route(uint32_t *off, ApuRead *rd, ApuWrite *wr)
 
 uint32_t apu_read(Kernel *k, uint32_t off, int size)
 {
+    pthread_mutex_lock(&g_mx);
     MCPXAPUState *d = g_state;
     if (!d) {
+        pthread_mutex_unlock(&g_mx);
         return 0;
     }
     g_k = k;
@@ -194,13 +205,16 @@ uint32_t apu_read(Kernel *k, uint32_t off, int size)
     off &= ~3u;
     route(&off, &rd, &wr);
     uint32_t v = (uint32_t)rd(d, off, 4);
+    pthread_mutex_unlock(&g_mx);
     return size == 4 ? v : (v >> (8 * sub)) & (size == 1 ? 0xFFu : 0xFFFFu);
 }
 
 void apu_write(Kernel *k, uint32_t off, int size, uint32_t v)
 {
+    pthread_mutex_lock(&g_mx);
     MCPXAPUState *d = g_state;
     if (!d) {
+        pthread_mutex_unlock(&g_mx);
         return;
     }
     g_k = k;
@@ -217,6 +231,8 @@ void apu_write(Kernel *k, uint32_t off, int size, uint32_t v)
     route(&off, &rd, &wr);
     wr(d, off, v, 4);
     g_stats.writes++;
+    pthread_mutex_unlock(&g_mx);
+    pthread_cond_signal(&g_cv); /* quizá los cuadros siguen ahora */
 }
 
 /* ---- cuadros ---- */
@@ -252,22 +268,15 @@ static void se_frame(MCPXAPUState *d)
 
 static unsigned g_off_frames; /* cuadros parados con VOICE_OFF esperando */
 
-void apu_tick(Kernel *k)
+/* Los cuadros pendientes hasta now (con g_mx tomado). */
+static void run_frames(MCPXAPUState *d, uint64_t now)
 {
-    MCPXAPUState *d = g_state;
-    if (!d) {
-        return;
-    }
-    g_k = k;
-    if (k->now_ns < g_next_frame_ns) {
-        return;
-    }
     /* más de 100 ms atrasado (un salto del reloj): no se recupera todo */
-    if (k->now_ns - g_next_frame_ns > 100000000ull) {
-        g_next_frame_ns = k->now_ns - 100000000ull;
+    if (now > g_next_frame_ns && now - g_next_frame_ns > 100000000ull) {
+        __atomic_store_n(&g_next_frame_ns, now - 100000000ull, __ATOMIC_RELAXED);
     }
-    while (g_next_frame_ns <= k->now_ns) {
-        g_next_frame_ns += GP_FRAME_NS;
+    while (g_next_frame_ns <= now) {
+        __atomic_store_n(&g_next_frame_ns, g_next_frame_ns + GP_FRAME_NS, __ATOMIC_RELAXED);
         uint32_t fectl = d->regs[NV_PAPU_FECTL];
         if (GET_MASK(d->regs[NV_PAPU_SECTL], NV_PAPU_SECTL_XCNTMODE) == NV_PAPU_SECTL_XCNTMODE_OFF ||
             (fectl & NV_PAPU_FECTL_FEMETHMODE_TRAPPED) || (fectl & NV_PAPU_FECTL_FEMETHMODE_HALTED)) {
@@ -289,6 +298,91 @@ void apu_tick(Kernel *k)
         }
         g_off_frames = 0;
         se_frame(d);
+        if (g_thread_on && g_next_frame_ns <= __atomic_load_n(&g_target_ns, __ATOMIC_RELAXED)) {
+            /* entre cuadro y cuadro, la CPU puede tocar los registros */
+            pthread_mutex_unlock(&g_mx);
+            pthread_mutex_lock(&g_mx);
+            if (g_state != d) {
+                return;
+            }
+        }
+    }
+}
+
+static void *frame_thread(void *arg)
+{
+    (void)arg;
+    pthread_mutex_lock(&g_mx);
+    for (;;) {
+        MCPXAPUState *d = g_state;
+        uint64_t target = __atomic_load_n(&g_target_ns, __ATOMIC_RELAXED);
+        if (!d || target < g_next_frame_ns) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += 2000000; /* a lo más 2 ms dormido (un aviso perdido) */
+            if (ts.tv_nsec >= 1000000000L) {
+                ts.tv_nsec -= 1000000000L;
+                ts.tv_sec++;
+            }
+            pthread_cond_timedwait(&g_cv, &g_mx, &ts);
+            continue;
+        }
+        run_frames(d, target);
+    }
+    return NULL;
+}
+
+#ifdef __SWITCH__
+#include <switch.h>
+static Thread g_thr;
+static void frame_thread_nx(void *arg) { frame_thread(arg); }
+#endif
+
+static void start_thread(void)
+{
+    if (g_thread_on) {
+        return;
+    }
+#ifdef __SWITCH__
+    /* el núcleo 1 (el 0 es el del intérprete) */
+    if (R_SUCCEEDED(threadCreate(&g_thr, frame_thread_nx, NULL, NULL, 0x20000, 0x2C, 1)) &&
+        R_SUCCEEDED(threadStart(&g_thr))) {
+        g_thread_on = true;
+    }
+#else
+    pthread_t t;
+    if (pthread_create(&t, NULL, frame_thread, NULL) == 0) {
+        pthread_detach(t);
+        g_thread_on = true;
+    }
+#endif
+}
+
+void apu_tick(Kernel *k)
+{
+    g_k = k;
+    if (!g_state || k->now_ns < __atomic_load_n(&g_next_frame_ns, __ATOMIC_RELAXED)) {
+        return;
+    }
+    if (g_thread_on) {
+        __atomic_store_n(&g_target_ns, k->now_ns, __ATOMIC_RELAXED);
+        pthread_cond_signal(&g_cv);
+        return;
+    }
+    pthread_mutex_lock(&g_mx);
+    if (g_state) {
+        run_frames(g_state, k->now_ns);
+    }
+    pthread_mutex_unlock(&g_mx);
+}
+
+/* Las pruebas: los cuadros en el hilo de quien llama (deterministas). */
+void apu_set_threaded(bool on)
+{
+    if (on) {
+        start_thread();
+    } else {
+        g_thread_on = false;
     }
 }
 
@@ -297,11 +391,11 @@ bool apu_next_frame(uint64_t *ns)
     if (!g_state) {
         return false;
     }
-    *ns = g_next_frame_ns;
+    *ns = __atomic_load_n(&g_next_frame_ns, __ATOMIC_RELAXED);
     return true;
 }
 
-bool apu_irq(void) { return g_irq; }
+bool apu_irq(void) { return __atomic_load_n(&g_irq, __ATOMIC_RELAXED); }
 
 const ApuStats *apu_stats(void)
 {
@@ -316,7 +410,18 @@ void apu_set_output(ApuOutFn fn, void *ctx)
     g_out_ctx = ctx;
 }
 
+static bool apu_init_locked(Kernel *k);
+
 bool apu_init(Kernel *k)
+{
+    pthread_mutex_lock(&g_mx);
+    bool ok = apu_init_locked(k);
+    __atomic_store_n(&g_target_ns, 0, __ATOMIC_RELAXED);
+    pthread_mutex_unlock(&g_mx);
+    return ok;
+}
+
+static bool apu_init_locked(Kernel *k)
 {
     if (g_state) { /* una ejecución nueva: todo desde cero */
         MCPXAPUState *old = g_state;

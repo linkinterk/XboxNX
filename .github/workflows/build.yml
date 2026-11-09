@@ -41,6 +41,7 @@ jobs:
             -o build-test/kernel_test tests/kernel_test.c source/vm.c source/kernel.c source/kmm.c source/kob.c \
             source/kps.c source/kio.c source/ksys.c source/xc_crypto.c source/hw.c source/nv2a_sw.c source/workers.c source/prof.c source/aci.c build-test/apu/*.o source/disc.c source/cpu.c source/runner.c -lm -lpthread
           ./build-test/kernel_test build-test/t.iso
+          APU_HILO=1 ./build-test/kernel_test build-test/t.iso
 
   interprete:
     name: Intérprete x86 contra Unicorn

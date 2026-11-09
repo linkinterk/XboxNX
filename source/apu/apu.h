@@ -18,6 +18,8 @@ typedef struct ApuStats {
 /* La salida: cada cuadro del EP, n muestras estéreo de 16 bits a 48 kHz. */
 typedef void (*ApuOutFn)(void *ctx, const int16_t *stereo, unsigned n);
 
+/* Los cuadros en su propio hilo (true en la Switch) o en el del intérprete. */
+void apu_set_threaded(bool on);
 bool apu_init(struct Kernel *k);
 uint32_t apu_read(struct Kernel *k, uint32_t off, int size);
 void apu_write(struct Kernel *k, uint32_t off, int size, uint32_t v);
