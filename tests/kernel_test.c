@@ -484,6 +484,32 @@ static void block_tests(void)
         cpu_free(&c);
         vm_write(&vm, at, code, sizeof(code)); /* otra vez el original */
     }
+    /* escribir datos en la misma página que el código no lo invalida
+     * (antes cada escritura obligaba a decodificar y traducir otra vez) */
+    for (int pass = 0; pass < 2; pass++) {
+        uint8_t dc[] = {
+            0xB9, 100, 0, 0, 0,             /* mov ecx, 100 */
+            0xFF, 0x05, 0, 0, 0, 0,         /* bucle: inc dword [at+0x800] */
+            0x49,                           /* dec ecx */
+            0x75, 0xF7,                     /* jnz bucle */
+            0xF4,                           /* hlt */
+        };
+        uint32_t var = at + 0x800, zero = 0;
+        memcpy(dc + 7, &var, 4);
+        vm_write(&vm, at, dc, sizeof(dc));
+        vm_write(&vm, var, &zero, 4);
+        Cpu c;
+        cpu_init(&c, &vm);
+        c.use_blocks = true;
+        c.jit_hot = pass; /* JIT (solo en ARM64) */
+        c.eip = at;
+        c.r[R_ESP] = at + 0x1F00;
+        uint64_t rw0 = vm.rewrites;
+        CHECK(cpu_run(&c, 10000) == CPU_HLT);
+        CHECK(vm_rd32(&vm, var) == 100);
+        CHECK(vm.rewrites == rw0);
+        cpu_free(&c);
+    }
     /* un bucle con call/ret, push/pop, alu y saltos: bloques = intérprete */
     static const uint8_t loop[] = {
         0x8B, 0x06, 0x01, 0xD8, 0x89, 0x07, 0x8D, 0x76, 0x04, 0x81, 0xE6, 0xFC, 0x0F, 0xA0, 0x00, 0x50,

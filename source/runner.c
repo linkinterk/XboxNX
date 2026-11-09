@@ -73,7 +73,7 @@ bool runner_boot(Runner *r, Vm *vm, Kernel *k, const LoadReport *load)
 
     cpu_init(&r->cpu, vm);
     r->cpu.use_blocks = true;
-    r->cpu.jit_hot = 2; /* JIT a ARM64 (solo en aarch64): a la segunda vez */
+    r->cpu.jit_hot = 4; /* JIT a ARM64 (solo en aarch64): a la cuarta vez (lo que corre pocas veces no vale traducirlo) */
     r->cpu.yield = &r->k->irq_kick;
     r->cpu.mmio = hw_mmio;
     r->cpu.port_in = hw_port_in;

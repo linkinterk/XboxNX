@@ -113,6 +113,7 @@ typedef struct CpuJitStats {
     uint64_t compiled;
     size_t used, size;
     uint32_t flushes;
+    uint64_t decodes;  /* bloques decodificados (con o sin JIT) */
 } CpuJitStats;
 void cpu_jit_stats(CpuJitStats *s);
 

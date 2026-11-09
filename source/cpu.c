@@ -72,7 +72,8 @@ static void mwr(Cpu *c, uint32_t a, int sz, uint32_t v)
     uint8_t *h = hp(c, a);
     if (h && (a & (VM_PAGE - 1)) + (uint32_t)sz <= VM_PAGE) {
         memcpy(h, b, (size_t)sz);
-        vm_touch(c->vm, (uint32_t)((size_t)(h - c->vm->ram) >> 12)); /* código escrito: otra traducción */
+        /* código escrito: otra traducción (los datos de la misma página no) */
+        vm_touch_range(c->vm, (uint32_t)((size_t)(h - c->vm->ram) >> 12), a & 0xFFFu, (uint32_t)sz);
         return;
     }
     if (!vm_write(c->vm, a, b, (size_t)sz)) {
@@ -1404,7 +1405,7 @@ done:
 
 #define NOREG 8
 #define BLK_MAX 64
-#define BLK_HASH 16384
+#define BLK_HASH 65536 /* con 16384, bloques calientes se echaban unos a otros (y se volvían a traducir) */
 
 typedef struct Insn Insn;
 typedef void (*InsnFn)(Cpu *c, const Insn *in);
@@ -2301,6 +2302,14 @@ static bool ends_block(InsnFn f)
     return f == x_jcc || f == x_jmp || f == x_call || f == x_ret || f == x_call_e || f == x_jmp_e;
 }
 
+static uint64_t g_decodes; /* bloques decodificados (para la pantalla) */
+
+static inline uint32_t nb_end_off(const Insn *in, unsigned n)
+{
+    uint32_t e = in[n - 1].next & 0xFFFu;
+    return e ? e : 0x1000u; /* la última termina justo al final de la página */
+}
+
 /* ¿Un bucle de espera? Salta a su propio principio y antes solo lee
  * registros o memoria y compara: si los registros no cambian de una vuelta
  * a otra, solo saldrá cuando otro (un ISR, el hardware, otro hilo) cambie
@@ -2342,7 +2351,7 @@ static Block *get_block(Cpu *c, uint32_t eip)
         return NULL;
     }
     uint32_t pp = e - 1;
-    BlockSlot *s = &tab[(eip ^ (eip >> 14)) & (BLK_HASH - 1)];
+    BlockSlot *s = &tab[(eip ^ (eip >> 16)) & (BLK_HASH - 1)];
     Block *b = s->b;
     if (b && s->eip == eip && b->ppage == pp && b->gen == c->vm->gen[pp] && c->vm->code[pp]) {
         return b;
@@ -2375,6 +2384,10 @@ static Block *get_block(Cpu *c, uint32_t eip)
     }
     nb->gen = c->vm->gen[pp];
     nb->n = n;
+    if (n) {
+        vm_mark_code(c->vm, pp, eip & 0xFFFu, nb_end_off(tmp, n));
+    }
+    g_decodes++;
     nb->jit = NULL;
     nb->jit_epoch = 0;
     nb->hits = 0;
@@ -2400,6 +2413,7 @@ void cpu_jit_stats(CpuJitStats *s)
     s->size = g_jit.size;
     s->flushes = g_jit.epoch ? g_jit.epoch - 1 : 0;
 #endif
+    s->decodes = g_decodes;
 }
 
 /* Hasta max instrucciones por bloques; las demás, una a una en step(). */

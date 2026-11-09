@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #define VM_PAGE        4096u
 #define VM_RAM_SIZE    (64u * 1024 * 1024)
@@ -32,16 +33,50 @@ typedef struct Vm {
      * vuelven a traducir. */
     uint8_t *code;
     uint32_t *gen;
+    /* Qué bytes de cada página con código son instrucciones decodificadas
+     * (512 bytes, un bit por byte; solo las páginas que lo necesitan): una
+     * escritura en datos de la misma página no obliga a traducir otra vez. */
+    uint8_t **cbits;
+    uint64_t rewrites; /* veces que se escribió encima de código traducido */
 } Vm;
 
-/* Alguien escribió en la página física p. */
+/* Alguien escribió en la página física p (toda). */
 static inline void vm_touch(Vm *vm, uint32_t p)
 {
     if (vm->code && vm->code[p]) {
         vm->code[p] = 0;
         vm->gen[p]++;
+        vm->rewrites++;
+        if (vm->cbits && vm->cbits[p]) {
+            memset(vm->cbits[p], 0, 512);
+        }
     }
 }
+
+/* Se escribieron len bytes en off de la página p: solo cuenta si tocan código. */
+static inline void vm_touch_range(Vm *vm, uint32_t p, uint32_t off, uint32_t len)
+{
+    if (!vm->code || !vm->code[p]) {
+        return;
+    }
+    const uint8_t *bm = vm->cbits ? vm->cbits[p] : NULL;
+    if (bm) {
+        uint32_t end = off + len > 4096 ? 4096 : off + len;
+        uint32_t i = off;
+        for (; i < end; i++) {
+            if (bm[i >> 3] & (1u << (i & 7))) {
+                break;
+            }
+        }
+        if (i == end) {
+            return; /* solo datos */
+        }
+    }
+    vm_touch(vm, p);
+}
+
+/* Los bytes [off, end) de la página p son código decodificado. */
+void vm_mark_code(Vm *vm, uint32_t p, uint32_t off, uint32_t end);
 
 bool vm_init(Vm *vm);
 void vm_free(Vm *vm);

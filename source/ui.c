@@ -820,9 +820,10 @@ static void draw_xbox_screen(const UiState *s)
                  kn->bytes_read / 1048576.0, kn->writes, kn->files_open, kn->last_io[0] ? kn->last_io : "-");
         gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
         ly += 22;
-        snprintf(e, sizeof(e), "JIT %s: %llu bloques traducidos, búfer %.1f de %.0f MB, vaciado %u veces",
+        snprintf(e, sizeof(e), "JIT %s: %llu traducidos, búfer %.1f de %.0f MB, vaciado %u veces · %llu decodificados · código reescrito %llu veces",
                  js.on ? "activo" : "apagado", (unsigned long long)js.compiled, js.used / 1048576.0,
-                 js.size / 1048576.0, js.flushes);
+                 js.size / 1048576.0, js.flushes, (unsigned long long)js.decodes,
+                 (unsigned long long)r->cpu.vm->rewrites);
         gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
     } else {
         snprintf(b, sizeof(b), "Pantalla del Xbox: el juego todavía no eligió un modo de video");

@@ -30,7 +30,8 @@ bool vm_init(Vm *vm)
     vm->used = calloc(PPAGES, 1);
     vm->code = calloc(PPAGES, 1);
     vm->gen = calloc(PPAGES, sizeof(uint32_t));
-    if (!vm->ram || !vm->pt || !vm->used || !vm->code || !vm->gen) {
+    vm->cbits = calloc(PPAGES, sizeof(uint8_t *));
+    if (!vm->ram || !vm->pt || !vm->used || !vm->code || !vm->gen || !vm->cbits) {
         vm_free(vm);
         return false;
     }
@@ -53,7 +54,29 @@ void vm_free(Vm *vm)
     free(vm->used);
     free(vm->code);
     free(vm->gen);
+    if (vm->cbits) {
+        for (uint32_t p = 0; p < PPAGES; p++) {
+            free(vm->cbits[p]);
+        }
+        free(vm->cbits);
+    }
     memset(vm, 0, sizeof(*vm));
+}
+
+void vm_mark_code(Vm *vm, uint32_t p, uint32_t off, uint32_t end)
+{
+    if (!vm->cbits) {
+        return;
+    }
+    if (!vm->cbits[p]) {
+        vm->cbits[p] = calloc(512, 1);
+        if (!vm->cbits[p]) {
+            return; /* sin el mapa: cualquier escritura en la página cuenta */
+        }
+    }
+    for (uint32_t i = off; i < end && i < 4096; i++) {
+        vm->cbits[p][i >> 3] |= (uint8_t)(1u << (i & 7));
+    }
 }
 
 bool vm_claim_phys(Vm *vm, uint32_t pa, uint32_t len)
@@ -254,7 +277,7 @@ bool vm_write(Vm *vm, uint32_t va, const void *buf, size_t len)
             n = len;
         }
         memcpy(h, in, n);
-        vm_touch(vm, (uint32_t)((h - vm->ram) / VM_PAGE));
+        vm_touch_range(vm, (uint32_t)((h - vm->ram) / VM_PAGE), (uint32_t)(va % VM_PAGE), (uint32_t)n);
         in += n;
         va += (uint32_t)n;
         len -= n;
