@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "../source/loader.h"
+#include "../source/runner.h"
 #include "../source/sha1.h"
 
 static int g_fail;
@@ -80,8 +81,23 @@ int main(int argc, char **argv)
     /* la tabla quedó apuntando al kernel */
     CHECK(vm_rd32(&vm, 0x12000) == kernel_resolve(&k, 1));
     CHECK(vm_rd32(&vm, 0x1200C) == kernel_resolve(&k, 366));
-    /* las primeras instrucciones: jmp $ */
-    CHECK(r.entry_bytes[0] == 0xEB && r.entry_bytes[1] == 0xFE);
+    /* las primeras instrucciones: push 0x1234 */
+    CHECK(r.entry_bytes[0] == 0x68 && r.entry_bytes[1] == 0x34);
+
+    /* etapa 2c: arrancar el hilo y registrar las llamadas al kernel */
+    static Runner run;
+    CHECK(runner_boot(&run, &vm, &k, &r));
+    uint32_t esp0 = run.cpu.r[R_ESP];
+    CHECK(vm_rd32(&vm, esp0) == K_STUB_RETURN);
+    CHECK(vm_rd32(&vm, K_KPCR_VA + 0x28) == K_ETHREAD_VA);
+    CHECK(runner_slice(&run, 1000) == RUN_SYSTEM_STOP);
+    CHECK(run.ncalls == 2);
+    CHECK(run.calls[0].ordinal == 187 && run.calls[0].args[0] == 0x1234 && run.calls[0].caller == 0x1100B);
+    CHECK(run.calls[1].ordinal == 49 && run.calls[1].args[0] == 2);
+    /* NtClose (stdcall, 4 bytes) dejó la pila como antes de su push; luego push 2 y la
+     * dirección de retorno de HalReturnToFirmware, donde paró */
+    CHECK(run.cpu.r[R_ESP] == esp0 - 8);
+    printf("2c: %u llamadas, fin: %s\n", run.ncalls, run.end);
     /* el refcount de la sección cargada */
     CHECK(vm_rd32(&vm, 0x10000 + 0x400 + 0x18) == 1);
     CHECK(vm_rd32(&vm, 0x10000 + 0x400 + 2 * 56 + 0x18) == 0);

@@ -28,9 +28,21 @@ jobs:
           ./build-test/host_test build-test/full.iso "Disco completo XGD2"
           gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
             -o build-test/load_test tests/load_test.c source/disc.c source/xbe.c source/game.c source/xpr.c \
-            source/vm.c source/kernel.c source/loader.c source/sha1.c
+            source/vm.c source/kernel.c source/loader.c source/sha1.c source/cpu.c source/runner.c
           ./build-test/load_test build-test/t.iso
           ./build-test/load_test build-test/bad.iso --bad-sha
+
+  interprete:
+    name: Intérprete x86 contra Unicorn
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Comparar 60.000 instrucciones aleatorias
+        run: |
+          pip install unicorn
+          gcc -std=gnu11 -O2 -Wall -Wextra -Werror -o cpu_diff tests/cpu_diff.c source/cpu.c source/vm.c
+          python3 tests/cpu_diff.py ./cpu_diff 30000 1
+          python3 tests/cpu_diff.py ./cpu_diff 30000 2
 
   switch:
     name: XboxNX.nro (Switch)

@@ -6,9 +6,10 @@ Port del emulador de Xbox original **hakuX** a Nintendo Switch, nativo (homebrew
 | Etapa | Qué hace | Estado |
 |---|---|---|
 | 1. Cargador | Biblioteca con la imagen de cada juego, lee la ISO, analiza `default.xbe` y prueba el hardware | Lista |
-| 2a. Memoria | 64 MB del Xbox, secciones del XBE en sus direcciones (verificadas con SHA-1), llamadas al kernel conectadas | **Esta versión** |
-| 2b. CPU | Traductor x86→ARM64 (FEX) sobre el JIT de la Switch | Pendiente |
-| 2c. Arranque | Ejecutar las primeras instrucciones hasta la primera llamada al kernel | Pendiente |
+| 2a. Memoria | 64 MB del Xbox, secciones del XBE en sus direcciones (verificadas con SHA-1), llamadas al kernel conectadas | Lista |
+| 2b. CPU (intérprete) | Intérprete x86 propio, probado contra Unicorn | **Esta versión** |
+| 2c. Arranque | Hilo de arranque como el kernel del Xbox; registro de cada llamada al kernel | **Esta versión** |
+| 2d. CPU (FEX) | Traductor x86→ARM64 sobre el JIT de la Switch, para la velocidad | Pendiente |
 | 3. Kernel, audio, controles | Kernel de Xbox de hakuX, audio MCPX, controles | Pendiente |
 | 4. Gráficos | Renderizador NV2A de Vulkan a deko3d | Pendiente |
 | 5. Optimizar | Velocidad en el CPU de la Switch | Pendiente |
@@ -23,7 +24,8 @@ Port del emulador de Xbox original **hakuX** a Nintendo Switch, nativo (homebrew
 4. Abre el Homebrew Menu **manteniendo R sobre un juego** (modo aplicación,
    más RAM) y entra a XboxNX.
 
-En el detalle de un juego, **Y** lo carga en la memoria del Xbox (etapa 2a).
+En el detalle de un juego, **Y** lo carga en la memoria del Xbox (etapa 2a); ahí, **A**
+ejecuta su código en el intérprete y muestra cada llamada al kernel (etapa 2c).
 
 Controles: **A** o tocar la tarjeta: abrir · **L/R** cambiar pestaña · **X**
 pruebas de hardware · **Y** buscar juegos otra vez · **B** volver · **+** salir.

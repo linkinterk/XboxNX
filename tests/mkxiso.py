@@ -55,7 +55,9 @@ def make_xbe():
     struct.pack_into("<8sHHHH", h, 0x600, b"XAPILIB", 1, 0, 5849, 1)
     struct.pack_into("<8sHHHH", h, 0x610, b"D3D8", 1, 0, 5849, 0x8000)
     text = bytearray(0x1000)
-    text[0:2] = b"\xEB\xFE"                               # jmp $
+    # push 0x1234; call [NtClose]; push 2; call [HalReturnToFirmware]; jmp $
+    text[0:21] = (b"\x68\x34\x12\x00\x00" b"\xff\x15\x08\x20\x01\x00"
+                  b"\x6a\x02" b"\xff\x15\x04\x20\x01\x00" b"\xeb\xfe")
     rdata = bytearray(0x1000)
     for i, ordn in enumerate([1, 49, 187, 366]):           # 4 imports, termina en 0
         struct.pack_into("<I", rdata, i * 4, 0x80000000 | ordn)

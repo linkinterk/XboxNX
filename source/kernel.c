@@ -14,7 +14,7 @@
 #define K_DATA_BIG  0xA000u  /* datos más grandes que una casilla */
 
 static const KExport k_exports[] = {
-#define KX(o, n, kind) {o, n, kind},
+#define KX(o, n, kind, conv, bytes) {o, n, kind, conv, bytes},
 #include "kexports.h"
 #undef KX
 };
@@ -73,6 +73,11 @@ bool kernel_init(Kernel *k, Vm *vm)
     memset(km, 0, K_SIZE);
     memset(km + K_STUBS, 0xCC, K_DATA - K_STUBS);
     km[K_STUBS] = 0xF4; /* hlt: salir del JIT */
+    /* stub de vuelta de la rutina de un hilo: int 0x3F con el pseudo-ordinal 0x3FF */
+    km[K_STUBS + 8] = 0xCD;
+    km[K_STUBS + 9] = K_CALL_VECTOR;
+    km[K_STUBS + 10] = (uint8_t)K_ORD_THREAD_RETURN;
+    km[K_STUBS + 11] = (uint8_t)(K_ORD_THREAD_RETURN >> 8);
 
     for (size_t i = 0; i < sizeof(k_exports) / sizeof(k_exports[0]); i++) {
         const KExport *e = &k_exports[i];
@@ -114,7 +119,54 @@ bool kernel_init(Kernel *k, Vm *vm)
         uint32_t va = k->tramp_va[o] ? k->tramp_va[o] : k->data_va[o];
         wr32(km + 0x300 + 4 * (o - 1), va ? va - K_VA : 0);
     }
+    /* Datos exportados que se leen al arrancar (los mismos valores que hakuX). */
+    uint32_t va;
+    if ((va = kernel_data_va(k, "XboxKrnlVersion")) != 0) {
+        uint8_t *p = vm_host(vm, va);
+        const uint16_t v[4] = {1, 0, 5838, 1};
+        for (int i = 0; i < 4; i++) {
+            p[i * 2] = (uint8_t)v[i];
+            p[i * 2 + 1] = (uint8_t)(v[i] >> 8);
+        }
+    }
+    if ((va = kernel_data_va(k, "KeTimeIncrement")) != 0) {
+        wr32(vm_host(vm, va), 10000); /* 1 ms en unidades de 100 ns */
+    }
+    if ((va = kernel_data_va(k, "HalDiskCachePartitionCount")) != 0) {
+        wr32(vm_host(vm, va), 3);
+    }
+    if ((va = kernel_data_va(k, "IdexChannelObject")) != 0) {
+        /* cola de dispositivo vacía en +0x24 (KDEVICE_QUEUE) */
+        uint32_t q = va + 0x24;
+        uint8_t *p = vm_host(vm, q);
+        p[0] = 0x14;
+        p[2] = 0x0C;
+        wr32(p + 4, q + 4);
+        wr32(p + 8, q + 4);
+    }
+    if ((va = kernel_data_va(k, "KdDebuggerNotPresent")) != 0) {
+        *vm_host(vm, va) = 1;
+    }
     return true;
+}
+
+uint32_t kernel_data_va(const Kernel *k, const char *name)
+{
+    for (size_t i = 0; i < sizeof(k_exports) / sizeof(k_exports[0]); i++) {
+        if (k_exports[i].kind == KX_DATA && strcmp(k_exports[i].name, name) == 0) {
+            return k->data_va[k_exports[i].ordinal];
+        }
+    }
+    return 0;
+}
+
+unsigned kernel_pop_bytes(const KExport *e)
+{
+    switch (e->conv) {
+    case KC_STD: return e->arg_bytes;
+    case KC_FAST: return e->arg_bytes > 8 ? e->arg_bytes - 8 : 0;
+    default: return 0;
+    }
 }
 
 uint32_t kernel_resolve(const Kernel *k, unsigned ordinal)

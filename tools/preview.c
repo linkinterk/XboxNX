@@ -96,7 +96,7 @@ int main(int argc, char **argv)
     }
 
     UiState s = {0};
-    s.version = "0.3.0";
+    s.version = "0.4.0";
     s.cards = cards;
 
     s.screen = UI_LOADING;
@@ -150,6 +150,16 @@ int main(int argc, char **argv)
     s.load = &bad;
     ui_draw(&s);
     save(argv[3], "11_memoria_error");
+    /* etapa 2c */
+    static Runner run;
+    runner_boot(&run, &vm, &k, &lr);
+    runner_slice(&run, 100000);
+    run.ns = 1000000;
+    s.screen = UI_RUN;
+    s.run = &run;
+    s.run_scroll = -1;
+    ui_draw(&s);
+    save(argv[3], "12_ejecucion");
     vm_free(&vm);
 
     ProbeResult pr = {0};

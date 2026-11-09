@@ -8,6 +8,7 @@
 #include "game.h"
 #include "loader.h"
 #include "probe.h"
+#include "runner.h"
 
 #define UI_W 1280
 #define UI_H 720
@@ -27,7 +28,7 @@ typedef struct UiCard {
     char error[128];
 } UiCard;
 
-typedef enum { UI_LOADING, UI_LIBRARY, UI_DETAIL, UI_PROBE, UI_MEMORY } UiScreen;
+typedef enum { UI_LOADING, UI_LIBRARY, UI_DETAIL, UI_PROBE, UI_MEMORY, UI_RUN } UiScreen;
 
 typedef struct UiState {
     UiScreen screen;
@@ -47,6 +48,9 @@ typedef struct UiState {
     /* etapa 2a: el juego en la memoria del Xbox */
     const LoadReport *load;
     int load_scroll;
+    /* etapa 2c: ejecución en el intérprete */
+    const Runner *run;
+    int run_scroll;          /* -1: seguir la última llamada */
     /* pruebas */
     const ProbeResult *probe;
     bool exc_tried, exc_ok;
@@ -61,6 +65,8 @@ void ui_draw(const UiState *s);
 int ui_detail_rows(void);
 /* Filas visibles de la lista de importaciones de la etapa 2a. */
 int ui_memory_rows(void);
+/* Filas visibles del registro de llamadas de la etapa 2c. */
+int ui_run_rows(void);
 /* Índice de la tarjeta bajo (x, y) en la biblioteca, o -1 (pantalla táctil). */
 int ui_card_at(const UiState *s, int x, int y);
 

@@ -89,7 +89,7 @@ static void top_bar(const UiState *s, const char *subtitle)
         gfx_text(104, 52, 18, C_ON_VAR, subtitle);
     }
     char chip[48];
-    snprintf(chip, sizeof(chip), "Etapa 2a  ·  v%s", s->version);
+    snprintf(chip, sizeof(chip), "Etapa 2c  ·  v%s", s->version);
     int w = gfx_text_width(18, chip) + 32;
     gfx_rrect(UI_W - 40 - w, 26, w, 34, 17, C_GREEN_BG);
     gfx_text(UI_W - 40 - w + 16, 33, 18, C_GREEN, chip);
@@ -637,12 +637,170 @@ static void draw_memory(const UiState *s)
         gfx_text(rx + 22, MEM_LIST_Y + 80 + row * 28, 20, C_GREEN, hex);
     }
     gfx_rect(rx + 22, MEM_LIST_Y + 200, rw - 44, 1, C_OUTLINE);
-    gfx_text(rx + 22, MEM_LIST_Y + 214, 18, C_ON, "Siguiente: etapa 2b");
-    gfx_text_fit(rx + 22, MEM_LIST_Y + 242, 16, rw - 44, C_ON_VAR, "Traducir y ejecutar este");
-    gfx_text_fit(rx + 22, MEM_LIST_Y + 264, 16, rw - 44, C_ON_VAR, "código x86 en la Switch.");
+    gfx_text(rx + 22, MEM_LIST_Y + 214, 18, C_ON, "Etapa 2c");
+    gfx_text_fit(rx + 22, MEM_LIST_Y + 242, 16, rw - 44, C_ON_VAR, "A: ejecutar este código x86");
+    gfx_text_fit(rx + 22, MEM_LIST_Y + 264, 16, rw - 44, C_ON_VAR, "en el intérprete.");
 
-    Hint h[] = {{"B", "Volver"}, {"+", "Salir"}};
-    bottom_bar(h, 2);
+    Hint h[] = {{"A", "Ejecutar"}, {"B", "Volver"}, {"+", "Salir"}};
+    bottom_bar(h, 3);
+}
+
+/* ---- etapa 2c: ejecución ---- */
+
+#define RUN_LIST_Y 236
+#define RUN_ROW_H  34
+
+int ui_run_rows(void) { return (BOTBAR_Y - 20 - (RUN_LIST_Y + 56)) / RUN_ROW_H; }
+
+static const char *run_state_text(RunState st, uint32_t *bg, uint32_t *fg)
+{
+    switch (st) {
+    case RUN_ACTIVE: *bg = C_GREEN_BG; *fg = C_GREEN; return "Ejecutando";
+    case RUN_THREAD_END: *bg = C_GREEN_BG; *fg = C_GREEN; return "Hilo terminado";
+    case RUN_CALL_LIMIT: *bg = C_WARN_BG; *fg = C_WARN; return "Límite de llamadas";
+    case RUN_CPU_STOP: *bg = C_WARN_BG; *fg = C_WARN; return "Detenido";
+    default: *bg = C_ERROR_BG; *fg = C_ERROR; return "Detenido por el juego";
+    }
+}
+
+static void draw_run(const UiState *s)
+{
+    const UiCard *c = &s->cards[s->sel];
+    const Runner *r = s->run;
+    char sub[320];
+    snprintf(sub, sizeof(sub), "%s en el intérprete x86", c->title[0] ? c->title : c->file);
+    top_bar(s, sub);
+    if (!r) {
+        return;
+    }
+    const Cpu *cpu = &r->cpu;
+    char v[64], d[320];
+    int tw = (UI_W - 80 - 3 * 16) / 4, x = 40, y = 104;
+    uint32_t bg, fg;
+    const char *st = run_state_text(r->state, &bg, &fg);
+    gfx_rrect(x, y, tw, 110, 20, C_SURF);
+    gfx_text(x + 22, y + 14, 18, C_ON_VAR, "Estado");
+    gfx_rrect(x + 22, y + 46, gfx_text_width(24, st) + 32, 40, 20, bg);
+    gfx_text(x + 38, y + 52, 24, fg, st);
+    x += tw + 16;
+    if (cpu->icount >= 1000000) {
+        snprintf(v, sizeof(v), "%.2f M", cpu->icount / 1e6);
+    } else {
+        snprintf(v, sizeof(v), "%llu", (unsigned long long)cpu->icount);
+    }
+    double mips = r->ns ? cpu->icount * 1000.0 / (double)r->ns : 0;
+    snprintf(d, sizeof(d), "%.1f millones por segundo", mips);
+    gfx_rrect(x, y, tw, 110, 20, C_SURF);
+    gfx_text(x + 22, y + 14, 18, C_ON_VAR, "Instrucciones x86");
+    gfx_text(x + 22, y + 40, 30, C_ON, v);
+    gfx_text_fit(x + 22, y + 80, 16, tw - 44, C_ON_VAR, d);
+    x += tw + 16;
+    snprintf(v, sizeof(v), "%u", r->ncalls);
+    snprintf(d, sizeof(d), "%u funciones distintas", r->distinct);
+    gfx_rrect(x, y, tw, 110, 20, C_SURF);
+    gfx_text(x + 22, y + 14, 18, C_ON_VAR, "Llamadas al kernel");
+    gfx_text(x + 22, y + 40, 30, C_GREEN, v);
+    gfx_text_fit(x + 22, y + 80, 16, tw - 44, C_ON_VAR, d);
+    x += tw + 16;
+    snprintf(v, sizeof(v), "0x%08X", (unsigned)cpu->eip);
+    snprintf(d, sizeof(d), "entrada 0x%08X", (unsigned)r->entry);
+    gfx_rrect(x, y, tw, 110, 20, C_SURF);
+    gfx_text(x + 22, y + 14, 18, C_ON_VAR, "Instrucción actual");
+    gfx_text(x + 22, y + 40, 30, C_ON, v);
+    gfx_text_fit(x + 22, y + 80, 16, tw - 44, C_ON_VAR, d);
+
+    /* motivo de parada */
+    y = 226;
+    if (r->state != RUN_ACTIVE) {
+        uint32_t pbg = r->state == RUN_THREAD_END ? C_GREEN_BG : (r->state == RUN_CPU_STOP ? C_WARN_BG : C_ERROR_BG);
+        uint32_t pfg = r->state == RUN_THREAD_END ? C_GREEN : (r->state == RUN_CPU_STOP ? C_WARN : C_ERROR);
+        gfx_rrect(40, y, UI_W - 80, 44, 14, pbg);
+        if (r->state == RUN_CPU_STOP) {
+            snprintf(d, sizeof(d), "%s%s%s  en 0x%08X:  %02X %02X %02X %02X %02X %02X", r->end,
+                     cpu->why[0] ? ": " : "", cpu->why, (unsigned)cpu->stop_eip, cpu->stop_bytes[0],
+                     cpu->stop_bytes[1], cpu->stop_bytes[2], cpu->stop_bytes[3], cpu->stop_bytes[4],
+                     cpu->stop_bytes[5]);
+            if (cpu->stop == CPU_FAULT) {
+                char f[64];
+                snprintf(f, sizeof(f), "  (%s 0x%08X)", cpu->fault_write ? "escritura en" : "lectura de",
+                         (unsigned)cpu->fault_addr);
+                strncat(d, f, sizeof(d) - strlen(d) - 1);
+            }
+        } else {
+            snprintf(d, sizeof(d), "%s", r->end);
+        }
+        gfx_text_fit(60, y + 10, 20, UI_W - 120, pfg, d);
+        y += 54;
+    } else {
+        y += 10;
+    }
+
+    /* registro de llamadas */
+    int px = 40, pw = 860, ly0 = y;
+    int ph = BOTBAR_Y - 20 - ly0;
+    gfx_rrect(px, ly0, pw, ph, 20, C_SURF);
+    gfx_rect(px, ly0 + 10, pw, 38, C_SURF_HI);
+    gfx_text(px + 20, ly0 + 18, 17, C_ON_VAR, "#");
+    gfx_text(px + 70, ly0 + 18, 17, C_ON_VAR, "Llamada al kernel");
+    gfx_text(px + 410, ly0 + 18, 17, C_ON_VAR, "Argumentos");
+    gfx_text(px + 735, ly0 + 18, 17, C_ON_VAR, "Desde");
+    int rows = (ph - 60) / RUN_ROW_H;
+    int first = s->run_scroll >= 0 ? s->run_scroll : (int)r->ncalls - rows;
+    if (first < 0) {
+        first = 0;
+    }
+    int ly = ly0 + 58;
+    for (int i = first; i < (int)r->ncalls && i < first + rows; i++) {
+        const KCallRec *k = &r->calls[i];
+        if ((i - first) % 2) {
+            gfx_rect(px, ly - 5, pw, RUN_ROW_H, HEX(0x232323));
+        }
+        char b[96];
+        snprintf(b, sizeof(b), "%d", i + 1);
+        gfx_text(px + 20, ly, 17, C_ON_VAR, b);
+        uint32_t dot = k->kind == KX_IMPL ? C_GREEN : k->kind == KX_DATA ? HEX(0x78909C) : C_WARN;
+        gfx_circle(px + 62, ly + 11, 5, dot);
+        gfx_text_fit(px + 74, ly, 17, 320, C_ON, k->name);
+        snprintf(b, sizeof(b), "%X, %X, %X, %X", (unsigned)k->args[0], (unsigned)k->args[1], (unsigned)k->args[2],
+                 (unsigned)k->args[3]);
+        gfx_text_fit(px + 410, ly, 16, 310, C_ON_VAR, b);
+        snprintf(b, sizeof(b), "%08X", (unsigned)k->caller);
+        gfx_text(px + 735, ly, 16, C_ON_VAR, b);
+        ly += RUN_ROW_H;
+    }
+    if (r->ncalls == 0) {
+        gfx_text(px + 20, ly0 + 64, 18, C_ON_VAR, "Todavía ninguna llamada al kernel...");
+    }
+
+    /* registros */
+    int rx = px + pw + 20, rw = UI_W - 40 - rx;
+    gfx_rrect(rx, ly0, rw, ph, 20, C_SURF);
+    gfx_text(rx + 20, ly0 + 14, 19, C_ON, "Registros x86");
+    static const char *names[8] = {"EAX", "ECX", "EDX", "EBX", "ESP", "EBP", "ESI", "EDI"};
+    int ry = ly0 + 46;
+    for (int i = 0; i < 8; i++) {
+        char b[32];
+        gfx_text(rx + 20, ry, 17, C_ON_VAR, names[i]);
+        snprintf(b, sizeof(b), "%08X", (unsigned)cpu->r[i]);
+        gfx_text(rx + 80, ry, 17, C_GREEN, b);
+        ry += 26;
+    }
+    char b[48];
+    snprintf(b, sizeof(b), "%08X", (unsigned)cpu->flags);
+    gfx_text(rx + 20, ry, 17, C_ON_VAR, "FLG");
+    gfx_text(rx + 80, ry, 17, C_ON, b);
+    ry += 26;
+    snprintf(b, sizeof(b), "%08X", (unsigned)cpu->fs_base);
+    gfx_text(rx + 20, ry, 17, C_ON_VAR, "FS");
+    gfx_text(rx + 80, ry, 17, C_ON, b);
+
+    if (r->state == RUN_ACTIVE) {
+        Hint h[] = {{"B", "Detener"}, {"+", "Salir"}};
+        bottom_bar(h, 2);
+    } else {
+        Hint h[] = {{"A", "Otra vez"}, {"B", "Volver"}, {"+", "Salir"}};
+        bottom_bar(h, 3);
+    }
 }
 
 /* ---- pruebas de hardware ---- */
@@ -710,6 +868,7 @@ void ui_draw(const UiState *s)
     case UI_DETAIL: draw_detail(s); break;
     case UI_PROBE: draw_probe(s); break;
     case UI_MEMORY: draw_memory(s); break;
+    case UI_RUN: draw_run(s); break;
     }
 }
 

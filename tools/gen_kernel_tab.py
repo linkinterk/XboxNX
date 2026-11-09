@@ -13,7 +13,9 @@ print('/*\n * XboxNX — exportaciones del kernel de Xbox: ordinal, nombre y est
 print(' * Generado por tools/gen_kernel_tab.py desde hakuX (native/kernel/kexports_table.h,')
 print(' * que viene de xboxkrnl.exe.def de nxdk, CC0-1.0) y las funciones que el kernel')
 print(' * de hakuX implementa (nc_kernel_impl). No editar a mano.\n */')
-print('/* { ordinal, nombre, tipo: KX_DATA dato, KX_IMPL función que hakuX ya tiene, KX_TODO función que falta } */')
-for o, n, abi, _ in exp:
+print('/* { ordinal, nombre, tipo: KX_DATA dato, KX_IMPL función que hakuX ya tiene, KX_TODO función que falta,')
+print(' *   convención: KC_STD stdcall, KC_FAST fastcall, KC_CDECL cdecl, KC_DATA dato; bytes de argumentos en la pila } */')
+for o, n, abi, b in exp:
     k = 'DATA' if abi == 'DATA' else ('IMPL' if n in impl else 'TODO')
-    print(f'KX({o}, "{n}", KX_{k})')
+    conv = {'STDCALL': 'KC_STD', 'FASTCALL': 'KC_FAST', 'CDECL': 'KC_CDECL', 'DATA': 'KC_DATA'}[abi]
+    print(f'KX({o}, "{n}", KX_{k}, {conv}, {b})')

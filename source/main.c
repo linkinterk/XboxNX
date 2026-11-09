@@ -18,10 +18,11 @@
 #include "gfx.h"
 #include "kernel.h"
 #include "loader.h"
+#include "runner.h"
 #include "probe.h"
 #include "ui.h"
 
-#define APP_VER   "0.3.0"
+#define APP_VER   "0.4.0"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -39,6 +40,22 @@ static Vm g_vm;
 static Kernel g_kernel;
 static void present(void);
 static LoadReport g_load;
+static Runner g_run;
+
+static void load_into_memory(void);
+
+/* Etapa 2c: memoria limpia y el hilo de arranque en el intérprete. */
+static void start_run(void)
+{
+    load_into_memory();
+    if (!g_load.ok) {
+        return; /* se queda en la pantalla de memoria con el error */
+    }
+    runner_boot(&g_run, &g_vm, &g_kernel, &g_load);
+    g_ui.run = &g_run;
+    g_ui.run_scroll = -1;
+    g_ui.screen = UI_RUN;
+}
 
 /* Etapa 2a: memoria del Xbox limpia, kernel y el juego cargado. */
 static void load_into_memory(void)
@@ -303,8 +320,44 @@ int main(int argc, char **argv)
                 g_ui.load_scroll = g_ui.load_scroll > ui_memory_rows() ? g_ui.load_scroll - ui_memory_rows() : 0;
                 dirty = true;
             }
-            if (k & HidNpadButton_B) {
+            if ((k & HidNpadButton_A) && g_load.ok) {
+                start_run();
+                dirty = true;
+            } else if (k & HidNpadButton_B) {
                 g_ui.screen = UI_DETAIL;
+                dirty = true;
+            }
+            break;
+        }
+        case UI_RUN: {
+            if (g_run.state == RUN_ACTIVE) {
+                /* ~1/30 s de intérprete por cuadro */
+                u64 t0 = armGetSystemTick();
+                runner_slice(&g_run, 300000);
+                g_run.ns += armTicksToNs(armGetSystemTick() - t0);
+                dirty = true;
+                if (k & HidNpadButton_B) {
+                    g_run.state = RUN_CPU_STOP;
+                    snprintf(g_run.end, sizeof(g_run.end), "Detenido por ti");
+                }
+            } else if (k & HidNpadButton_A) {
+                start_run();
+                dirty = true;
+            } else if (k & HidNpadButton_B) {
+                g_ui.screen = UI_MEMORY;
+                dirty = true;
+            }
+            int rows = ui_run_rows();
+            int max = (int)g_run.ncalls - rows;
+            int cur = g_ui.run_scroll >= 0 ? g_ui.run_scroll : (max > 0 ? max : 0);
+            if (k & (HidNpadButton_AnyUp | HidNpadButton_L | HidNpadButton_ZL)) {
+                int step = (k & HidNpadButton_AnyUp) ? 1 : rows;
+                g_ui.run_scroll = cur > step ? cur - step : 0;
+                dirty = true;
+            }
+            if (k & (HidNpadButton_AnyDown | HidNpadButton_R | HidNpadButton_ZR)) {
+                int step = (k & HidNpadButton_AnyDown) ? 1 : rows;
+                g_ui.run_scroll = cur + step >= max ? -1 : cur + step;
                 dirty = true;
             }
             break;
