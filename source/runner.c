@@ -177,7 +177,7 @@ static void kernel_call(Runner *r)
     /* la implementación real, o un 0 simulado */
     uint64_t ret = 0;
     KFn fn = k->impl[ord];
-    KCall kc = {k, c->vm, c, {0}, false, false, false};
+    KCall kc = {.k = k, .vm = c->vm, .cpu = c};
     if (fn) {
         unsigned at = 0;
         if (e->conv == KC_FAST) {
@@ -193,6 +193,7 @@ static void kernel_call(Runner *r)
     }
     rec->real = fn != NULL;
     rec->ret = (uint32_t)ret;
+    memcpy(rec->note, kc.note, sizeof(rec->note));
     if (kc.ended) { /* el hilo terminó: no vuelve */
         reschedule(r, false);
         return;

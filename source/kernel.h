@@ -93,6 +93,7 @@ typedef struct KCall {
     bool block;      /* la llamada dejó al hilo esperando: EAX llega al despertar */
     bool resched;    /* replanificar al volver (ceder, hilo nuevo, terminar) */
     bool ended;      /* el hilo actual terminó */
+    char note[64];   /* detalle para el registro (el archivo que abre...) */
 } KCall;
 typedef uint64_t (*KFn)(KCall *c);
 
@@ -182,6 +183,11 @@ typedef struct Kernel {
     KCtx dpc_saved;              /* contexto interrumpido por el DPC */
     uint32_t dpc_stack_top;
     unsigned dpcs_run, switches;
+    /* archivos (kio.c) */
+    const struct XDisc *disc;    /* el disco del juego (D:) */
+    char hdd_root[192];          /* carpeta del disco duro virtual */
+    unsigned files_open, reads, writes;
+    uint64_t bytes_read;
 } Kernel;
 
 bool kernel_init(Kernel *k, Vm *vm);
@@ -206,6 +212,15 @@ void kmm_add_image(Kernel *k, uint32_t base, uint32_t size);
 uint32_t kmm_stack_alloc(Kernel *k, uint32_t size);
 
 /* kps.c: hilos, esperas y tiempo */
+/* kio.c: archivos, discos, enlaces simbólicos y dispositivos (etapa 3c) */
+void kio_register(Kernel *k);
+/* El disco del juego y la carpeta del disco duro virtual (se crea si falta). */
+void kio_set_media(Kernel *k, const struct XDisc *disc, const char *hdd_root);
+/* Se cerró el último handle de un objeto archivo. */
+void kio_close(Kernel *k, uint32_t object);
+/* El evento del objeto archivo (para esperar sobre su handle). */
+#define K_FO_EVENT 0x38u
+
 /* Un objeto quedó señalado: despierta a quien lo espera y, si es de más
  * prioridad que el hilo actual, pide replanificar. */
 void kps_signaled(KCall *c);

@@ -75,12 +75,16 @@ bool kob_close(Kernel *k, uint32_t handle)
     if ((handle & 3) || !i || i >= K_MAX_HANDLES || !k->handles[i].object) {
         return false;
     }
-    uint32_t hdr = k->handles[i].object - OB_HEADER;
+    uint32_t obj = k->handles[i].object, hdr = obj - OB_HEADER;
     uint32_t count = vm_rd32(k->vm, hdr + 0x4);
     vm_wr32(k->vm, hdr + 0x4, count ? count - 1 : 0);
+    ObType type = (ObType)k->handles[i].type;
     k->handles[i].object = 0;
     /* los objetos se quedan: hilos, esperas y temporizadores guardan sus
-     * direcciones (como hakuX, salvo archivos: etapa 3c) */
+     * direcciones (como hakuX); un archivo suelta lo suyo con el último handle */
+    if (count <= 1 && (type == OB_FILE || type == OB_SYMLINK)) {
+        kio_close(k, obj);
+    }
     return true;
 }
 

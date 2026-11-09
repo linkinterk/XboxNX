@@ -7,6 +7,7 @@
 
 #include "../source/cpu.h"
 #include "../source/kernel.h"
+#include "../source/disc.h"
 #include "../source/runner.h"
 
 static int g_fail;
@@ -33,7 +34,7 @@ static uint64_t call(const char *name, uint32_t a0, uint32_t a1, uint32_t a2, ui
                 g_fail++;
                 return 0xDEAD;
             }
-            KCall c = {&k, &vm, NULL, {a0, a1, a2, a3, a4}, false, false, false};
+            KCall c = {.k = &k, .vm = &vm, .a = {a0, a1, a2, a3, a4}};
             return k.impl[o](&c);
         }
     }
@@ -268,7 +269,163 @@ static void thread_tests(void)
     CHECK(count_calls("PsCreateSystemThreadEx") == 1);
 }
 
-int main(void)
+/* ---- etapa 3c: archivos ---- */
+
+static uint64_t calln(const char *name, unsigned n, const uint32_t *a)
+{
+    for (unsigned o = 1; o < K_ORDINAL_MAX; o++) {
+        const KExport *e = kernel_export(o);
+        if (e && !strcmp(e->name, name) && k.impl[o]) {
+            KCall c = {.k = &k, .vm = &vm};
+            memcpy(c.a, a, n * 4);
+            return k.impl[o](&c);
+        }
+    }
+    printf("FALLO: %s no está implementada\n", name);
+    g_fail++;
+    return 0xDEAD;
+}
+
+#define OA   (SCRATCH + 0x390)
+#define STR  (SCRATCH + 0x380)
+#define IOSB (SCRATCH + 0x3A0)
+#define BUF  (SCRATCH + 0x800)
+
+/* OBJECT_ATTRIBUTES con el nombre */
+static uint32_t oa(const char *name, uint32_t root)
+{
+    uint16_t len = (uint16_t)strlen(name);
+    vm_write(&vm, SCRATCH + 0x400, name, len);
+    wr(STR, len | ((uint32_t)(len + 1) << 16));
+    wr(STR + 4, SCRATCH + 0x400);
+    wr(OA, root);
+    wr(OA + 4, STR);
+    wr(OA + 8, 0x40);
+    return OA;
+}
+
+/* NtCreateFile -> handle o 0 */
+static uint32_t create(const char *name, uint32_t access, uint32_t disposition, uint32_t options, uint32_t *st)
+{
+    uint32_t a[9] = {SCRATCH + 0x3B0, access, oa(name, 0), IOSB, 0, 0x80, 0, disposition, options};
+    *st = (uint32_t)calln("NtCreateFile", 9, a);
+    return *st == ST_SUCCESS ? rd(SCRATCH + 0x3B0) : 0;
+}
+
+static void io_tests(const char *iso)
+{
+    static XDisc disc;
+    vm_free(&vm);
+    memset(&k, 0, sizeof(k));
+    CHECK(vm_init(&vm));
+    CHECK(kernel_init(&k, &vm));
+    CHECK(vm_alloc_at(&vm, SCRATCH, 0x2000));
+    CHECK(xdisc_open(&disc, iso));
+    kio_set_media(&k, &disc, "build-test/hdd");
+    uint32_t st;
+
+    /* abrir y leer del disco por D: */
+    uint32_t h = create("\\??\\D:\\default.xbe", 0x80100000u, 1, 0x60, &st);
+    CHECK(st == ST_SUCCESS && h);
+    uint32_t r[8] = {h, 0, 0, 0, IOSB, BUF, 4, 0};
+    CHECK(calln("NtReadFile", 8, r) == ST_SUCCESS && rd(IOSB + 4) == 4);
+    char magic[5] = {0};
+    vm_read(&vm, BUF, magic, 4);
+    CHECK(!strcmp(magic, "XBEH"));
+    uint32_t q[5] = {h, IOSB, BUF, 0x18, 5};
+    CHECK(calln("NtQueryInformationFile", 5, q) == ST_SUCCESS && rd(BUF + 8) > 0x1000);
+    CHECK(calln("NtClose", 1, &h) == ST_SUCCESS);
+    CHECK(k.files_open == 0);
+    /* lo que no está, con su estado */
+    create("\\??\\D:\\nada.bin", 0x80000000u, 1, 0, &st);
+    CHECK(st == 0xC0000034u);
+    create("\\??\\Q:\\x", 0x80000000u, 1, 0, &st);
+    CHECK(st == 0xC000003Au);
+    /* escribir en el disco: protegido */
+    create("\\Device\\CdRom0\\x.txt", 0x40000000u, 2, 0, &st);
+    CHECK(st == 0xC00000A2u);
+
+    /* carpeta del disco: listar media\ */
+    h = create("\\??\\D:\\media", 0x80000000u, 1, 0x21, &st);
+    CHECK(st == ST_SUCCESS);
+    uint32_t d[10] = {h, 0, 0, 0, IOSB, BUF, 0x200, 1, 0, 1};
+    CHECK(calln("NtQueryDirectoryFile", 10, d) == ST_SUCCESS);
+    char name[16] = {0};
+    vm_read(&vm, BUF + 0x40, name, rd(BUF + 0x3C) < 15 ? rd(BUF + 0x3C) : 15);
+    CHECK(!strcmp(name, "leeme.txt") && rd(BUF + 0x28) == 28);
+    d[9] = 0;
+    CHECK(calln("NtQueryDirectoryFile", 10, d) == 0x80000006u);
+    calln("NtClose", 1, &h);
+
+    /* volumen del disco: GDFX */
+    h = create("\\Device\\CdRom0", 0x80000000u, 1, 0x20, &st);
+    CHECK(st == ST_SUCCESS);
+    uint32_t v[5] = {h, IOSB, BUF, 0x20, 5};
+    CHECK(calln("NtQueryVolumeInformationFile", 5, v) == ST_SUCCESS);
+    vm_read(&vm, BUF + 12, magic, 4);
+    CHECK(!strcmp(magic, "GDFX"));
+    calln("NtClose", 1, &h);
+
+    /* disco duro: carpeta, archivo, escribir, leer, renombrar, borrar */
+    h = create("\\Device\\Harddisk0\\Partition1\\TDATA", 0xC0000000u, 3, 0x21, &st);
+    CHECK(st == ST_SUCCESS);
+    calln("NtClose", 1, &h);
+    h = create("\\Device\\Harddisk0\\Partition1\\tdata\\prueba.bin", 0xC0000000u, 5, 0x60, &st);
+    CHECK(st == ST_SUCCESS && rd(IOSB + 4) != 1);
+    vm_write(&vm, BUF, "XboxNX", 6);
+    uint32_t w[8] = {h, 0, 0, 0, IOSB, BUF, 6, 0};
+    CHECK(calln("NtWriteFile", 8, w) == ST_SUCCESS && rd(IOSB + 4) == 6);
+    wr(SCRATCH + 0x3C0, 2);
+    wr(SCRATCH + 0x3C4, 0);
+    uint32_t r2[8] = {h, 0, 0, 0, IOSB, BUF + 0x100, 16, SCRATCH + 0x3C0};
+    CHECK(calln("NtReadFile", 8, r2) == ST_SUCCESS && rd(IOSB + 4) == 4);
+    vm_read(&vm, BUF + 0x100, magic, 4);
+    CHECK(!memcmp(magic, "oxNX", 4));
+    calln("NtClose", 1, &h);
+    FILE *hf = fopen("build-test/hdd/Partition1/TDATA/prueba.bin", "rb");
+    CHECK(hf != NULL);
+    if (hf) {
+        fclose(hf);
+    }
+    /* T: como enlace a la carpeta */
+    wr(SCRATCH + 0x300, 4 | (5u << 16));
+    wr(SCRATCH + 0x304, SCRATCH + 0x310);
+    vm_write(&vm, SCRATCH + 0x310, "\\??\\T:", 6);
+    const char *tgt = "\\Device\\Harddisk0\\Partition1\\TDATA";
+    wr(SCRATCH + 0x320, (uint32_t)strlen(tgt) | ((uint32_t)(strlen(tgt) + 1) << 16));
+    wr(SCRATCH + 0x324, SCRATCH + 0x330);
+    vm_write(&vm, SCRATCH + 0x330, tgt, strlen(tgt));
+    wr(SCRATCH + 0x300, 6 | (7u << 16));
+    uint32_t l[2] = {SCRATCH + 0x300, SCRATCH + 0x320};
+    CHECK(calln("IoCreateSymbolicLink", 2, l) == ST_SUCCESS);
+    h = create("\\??\\T:\\PRUEBA.BIN", 0x80000000u, 1, 0x60, &st);
+    CHECK(st == ST_SUCCESS); /* sin distinguir mayúsculas */
+    uint32_t q2[5] = {h, IOSB, BUF, 0x18, 5};
+    CHECK(calln("NtQueryInformationFile", 5, q2) == ST_SUCCESS && rd(BUF + 8) == 6);
+    calln("NtClose", 1, &h);
+    uint32_t del[1] = {oa("\\??\\T:\\prueba.bin", 0)};
+    CHECK(calln("NtDeleteFile", 1, del) == ST_SUCCESS);
+    hf = fopen("build-test/hdd/Partition1/TDATA/prueba.bin", "rb");
+    CHECK(hf == NULL);
+    /* crear donde falta la carpeta */
+    create("\\Device\\Harddisk0\\Partition1\\no\\x.bin", 0xC0000000u, 2, 0, &st);
+    CHECK(st == 0xC000003Au);
+    /* partición 0 cruda: ceros */
+    h = create("\\Device\\Harddisk0\\Partition0", 0x80000000u, 1, 0x20, &st);
+    CHECK(st == ST_SUCCESS);
+    wr(BUF, 0xFFFFFFFFu);
+    uint32_t r3[8] = {h, 0, 0, 0, IOSB, BUF, 512, 0};
+    CHECK(calln("NtReadFile", 8, r3) == ST_SUCCESS && rd(BUF) == 0);
+    uint32_t io[10] = {h, 0, 0, 0, IOSB, 0x00074004u, 0, 0, BUF, 32};
+    CHECK(calln("NtDeviceIoControlFile", 10, io) == ST_SUCCESS && rd(IOSB + 4) == 32);
+    calln("NtClose", 1, &h);
+    CHECK(k.files_open == 0);
+    printf("3c archivos: %u lecturas, %llu bytes, %u escrituras\n", k.reads, (unsigned long long)k.bytes_read,
+           k.writes);
+    xdisc_close(&disc);
+}
+
+int main(int argc, char **argv)
 {
     CHECK(vm_init(&vm));
     CHECK(kernel_init(&k, &vm));
@@ -404,6 +561,9 @@ int main(void)
     CHECK(st >= 0xD0000000u && vm_phys(&vm, st) != VM_NO_PHYS && vm_phys(&vm, st - 1) == VM_NO_PHYS);
 
     thread_tests();
+    if (argc > 1) {
+        io_tests(argv[1]);
+    }
 
     vm_free(&vm);
     printf(g_fail ? "%d fallos\n" : "todo bien\n", g_fail);

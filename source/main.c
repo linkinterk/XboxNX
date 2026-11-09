@@ -22,7 +22,7 @@
 #include "probe.h"
 #include "ui.h"
 
-#define APP_VER   "0.6.0"
+#define APP_VER   "0.7.0"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -72,6 +72,8 @@ static void load_into_memory(void)
     } else if (!kernel_init(&g_kernel, &g_vm)) {
         snprintf(g_load.error, sizeof(g_load.error), "No se pudo preparar el área del kernel");
     } else {
+        /* D: es la ISO; el disco duro del Xbox, carpetas en la SD */
+        kio_set_media(&g_kernel, &g_game.disc, "sdmc:/switch/XboxNX/hdd");
         loader_load(&g_vm, &g_kernel, &g_game, &g_load);
     }
     g_load.ms = (unsigned)(armTicksToNs(armGetSystemTick() - t0) / 1000000);

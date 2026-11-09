@@ -186,6 +186,7 @@ bool kernel_init(Kernel *k, Vm *vm)
     kmm_register(k);
     kob_register(k);
     kps_register(k);
+    kio_register(k);
     k->cur = -1;
     return true;
 }

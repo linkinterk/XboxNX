@@ -26,6 +26,7 @@ typedef struct KCallRec {
     bool real;           /* la contestó una implementación real (no simulada) */
     uint32_t ret;        /* lo que devolvió (EAX) */
     uint32_t thread;     /* id del hilo que llamó */
+    char note[64];       /* detalle (el archivo que abrió...) */
 } KCallRec;
 
 typedef enum {

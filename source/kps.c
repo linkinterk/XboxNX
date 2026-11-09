@@ -770,7 +770,11 @@ static bool handle_obj(Kernel *k, uint32_t h, uint32_t *o)
         *o = me(k);
         return *o != 0;
     }
-    *o = kob_lookup(k, h, NULL);
+    ObType t;
+    *o = kob_lookup(k, h, &t);
+    if (*o && t == OB_FILE) {
+        *o += K_FO_EVENT; /* esperar un archivo es esperar su E/S */
+    }
     return *o != 0;
 }
 

@@ -89,7 +89,7 @@ static void top_bar(const UiState *s, const char *subtitle)
         gfx_text(104, 52, 18, C_ON_VAR, subtitle);
     }
     char chip[48];
-    snprintf(chip, sizeof(chip), "Etapa 3b  ·  v%s", s->version);
+    snprintf(chip, sizeof(chip), "Etapa 3c  ·  v%s", s->version);
     int w = gfx_text_width(18, chip) + 32;
     gfx_rrect(UI_W - 40 - w, 26, w, 34, 17, C_GREEN_BG);
     gfx_text(UI_W - 40 - w + 16, 33, 18, C_GREEN, chip);
@@ -706,7 +706,8 @@ static void draw_run(const UiState *s)
     x += tw + 16;
     const Kernel *kn = r->k;
     snprintf(v, sizeof(v), "%u", kn ? kps_alive(kn) : 0);
-    snprintf(d, sizeof(d), "%.1f ms virtuales  ·  %u cambios", kn ? kn->now_ns / 1e6 : 0.0, kn ? kn->switches : 0);
+    snprintf(d, sizeof(d), "%.1f ms  ·  %u cambios  ·  %u archivos, %.1f MB leídos", kn ? kn->now_ns / 1e6 : 0.0,
+             kn ? kn->switches : 0, kn ? kn->files_open : 0, kn ? kn->bytes_read / 1048576.0 : 0.0);
     gfx_rrect(x, y, tw, 110, 20, C_SURF);
     gfx_text(x + 22, y + 14, 18, C_ON_VAR, "Hilos vivos");
     gfx_text(x + 22, y + 40, 30, C_ON, v);
@@ -771,9 +772,16 @@ static void draw_run(const UiState *s)
         gfx_circle(px + 62, ly + 11, 5, k->real ? C_GREEN : C_WARN);
         snprintf(b, sizeof(b), "%s  · h%u", k->name, (unsigned)k->thread / 4);
         gfx_text_fit(px + 74, ly, 17, 296, C_ON, b);
-        snprintf(b, sizeof(b), "%X, %X, %X, %X", (unsigned)k->args[0], (unsigned)k->args[1], (unsigned)k->args[2],
-                 (unsigned)k->args[3]);
-        gfx_text_fit(px + 380, ly, 16, 225, C_ON_VAR, b);
+        if (k->note[0]) {
+            /* el final de la ruta es lo que dice más */
+            size_t nl = strlen(k->note);
+            snprintf(b, sizeof(b), "%s%s", nl > 30 ? "..." : "", nl > 30 ? k->note + nl - 27 : k->note);
+            gfx_text_fit(px + 380, ly, 16, 225, C_ON, b);
+        } else {
+            snprintf(b, sizeof(b), "%X, %X, %X, %X", (unsigned)k->args[0], (unsigned)k->args[1],
+                     (unsigned)k->args[2], (unsigned)k->args[3]);
+            gfx_text_fit(px + 380, ly, 16, 225, C_ON_VAR, b);
+        }
         if (k->real) {
             snprintf(b, sizeof(b), "%X", (unsigned)k->ret);
             gfx_text_fit(px + 615, ly, 16, 135, (k->ret & 0xC0000000u) == 0xC0000000u ? C_ERROR : C_GREEN, b);
