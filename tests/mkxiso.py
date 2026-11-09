@@ -5,6 +5,7 @@ Raíz con default.xbe, una carpeta media/ y un archivo, más un XBE falso con
 cabecera, certificado, 2 secciones, 2 librerías y una tabla del kernel.
 Uso: mkxiso.py salida.iso [--full-xgd2]
 """
+import hashlib
 import struct
 import sys
 
@@ -75,6 +76,12 @@ def make_xbe():
         for x in range(4):
             i = dep(y, 0b1010) | dep(x, 0b0101)
             struct.pack_into("<I", img, 0x20 + i * 4, 0xFF000000 | ((x * 40) << 16) | ((y * 40) << 8) | 7)
+    # Firma SHA-1 de cada sección (tamaño de 32 bits + bytes) en su cabecera +0x24.
+    for i, data in enumerate([text, rdata, img]):
+        dig = hashlib.sha1(struct.pack("<I", len(data)) + bytes(data)).digest()
+        h[0x400 + i * 56 + 0x24:0x400 + i * 56 + 0x38] = dig
+    if "--bad-sha" in sys.argv:
+        h[0x400 + 0x24] ^= 0xFF
     return bytes(h) + bytes(text) + bytes(rdata) + bytes(img)
 
 

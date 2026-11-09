@@ -6,6 +6,7 @@
 #define XBOXNX_UI_H
 
 #include "game.h"
+#include "loader.h"
 #include "probe.h"
 
 #define UI_W 1280
@@ -26,7 +27,7 @@ typedef struct UiCard {
     char error[128];
 } UiCard;
 
-typedef enum { UI_LOADING, UI_LIBRARY, UI_DETAIL, UI_PROBE } UiScreen;
+typedef enum { UI_LOADING, UI_LIBRARY, UI_DETAIL, UI_PROBE, UI_MEMORY } UiScreen;
 
 typedef struct UiState {
     UiScreen screen;
@@ -43,6 +44,9 @@ typedef struct UiState {
     const Game *game;
     int page;           /* 0 General, 1 Secciones, 2 Librerías, 3 Archivos */
     int scroll;
+    /* etapa 2a: el juego en la memoria del Xbox */
+    const LoadReport *load;
+    int load_scroll;
     /* pruebas */
     const ProbeResult *probe;
     bool exc_tried, exc_ok;
@@ -55,6 +59,8 @@ typedef struct UiState {
 void ui_draw(const UiState *s);
 /* Filas visibles por página de la pantalla de detalle (para el scroll). */
 int ui_detail_rows(void);
+/* Filas visibles de la lista de importaciones de la etapa 2a. */
+int ui_memory_rows(void);
 /* Índice de la tarjeta bajo (x, y) en la biblioteca, o -1 (pantalla táctil). */
 int ui_card_at(const UiState *s, int x, int y);
 

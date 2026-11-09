@@ -19,12 +19,18 @@ jobs:
           mkdir -p build-test
           python3 tests/mkxiso.py build-test/t.iso
           python3 tests/mkxiso.py build-test/full.iso --full-xgd2
+          python3 tests/mkxiso.py build-test/bad.iso --bad-sha
       - name: Compilar y correr
         run: |
           gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
             -o build-test/host_test tests/host_test.c source/disc.c source/xbe.c source/game.c source/xpr.c
           ./build-test/host_test build-test/t.iso XISO
           ./build-test/host_test build-test/full.iso "Disco completo XGD2"
+          gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
+            -o build-test/load_test tests/load_test.c source/disc.c source/xbe.c source/game.c source/xpr.c \
+            source/vm.c source/kernel.c source/loader.c source/sha1.c
+          ./build-test/load_test build-test/t.iso
+          ./build-test/load_test build-test/bad.iso --bad-sha
 
   switch:
     name: XboxNX.nro (Switch)

@@ -96,7 +96,7 @@ int main(int argc, char **argv)
     }
 
     UiState s = {0};
-    s.version = "0.2.0";
+    s.version = "0.3.0";
     s.cards = cards;
 
     s.screen = UI_LOADING;
@@ -132,6 +132,25 @@ int main(int argc, char **argv)
         ui_draw(&s);
         save(argv[3], names[p]);
     }
+
+    /* etapa 2a */
+    static Vm vm;
+    static Kernel k;
+    static LoadReport lr;
+    vm_init(&vm);
+    kernel_init(&k, &vm);
+    loader_load(&vm, &k, &g_game, &lr);
+    s.screen = UI_MEMORY;
+    s.load = &lr;
+    ui_draw(&s);
+    save(argv[3], "10_memoria");
+    LoadReport bad = lr;
+    bad.ok = false;
+    snprintf(bad.error, sizeof(bad.error), "Sin memoria para la sección .data");
+    s.load = &bad;
+    ui_draw(&s);
+    save(argv[3], "11_memoria_error");
+    vm_free(&vm);
 
     ProbeResult pr = {0};
     pr.applet_mode = false;

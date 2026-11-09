@@ -16,10 +16,12 @@
 
 #include "game.h"
 #include "gfx.h"
+#include "kernel.h"
+#include "loader.h"
 #include "probe.h"
 #include "ui.h"
 
-#define APP_VER   "0.2.0"
+#define APP_VER   "0.3.0"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -33,6 +35,34 @@ static Game g_scan;       /* para leer cada juego al cargar */
 static ProbeResult g_probe;
 static bool g_probe_done;
 static UiState g_ui;
+static Vm g_vm;
+static Kernel g_kernel;
+static void present(void);
+static LoadReport g_load;
+
+/* Etapa 2a: memoria del Xbox limpia, kernel y el juego cargado. */
+static void load_into_memory(void)
+{
+    g_ui.screen = UI_LOADING;
+    g_ui.load_total = 0;
+    g_ui.load_name = "Cargando en la memoria del Xbox...";
+    present();
+    vm_free(&g_vm);
+    memset(&g_load, 0, sizeof(g_load));
+    u64 t0 = armGetSystemTick();
+    if (!vm_init(&g_vm)) {
+        snprintf(g_load.error, sizeof(g_load.error), "No hay RAM para los 64 MB del Xbox");
+    } else if (!kernel_init(&g_kernel, &g_vm)) {
+        snprintf(g_load.error, sizeof(g_load.error), "No se pudo preparar el área del kernel");
+    } else {
+        loader_load(&g_vm, &g_kernel, &g_game, &g_load);
+    }
+    g_load.ms = (unsigned)(armTicksToNs(armGetSystemTick() - t0) / 1000000);
+    g_ui.load = &g_load;
+    g_ui.load_scroll = 0;
+    g_ui.load_name = NULL;
+    g_ui.screen = UI_MEMORY;
+}
 
 static void present(void)
 {
@@ -245,8 +275,36 @@ int main(int argc, char **argv)
                 g_ui.scroll--;
                 dirty = true;
             }
-            if (k & HidNpadButton_B) {
+            if ((k & HidNpadButton_Y) && g_cards[g_ui.sel].ok) {
+                load_into_memory();
+                dirty = true;
+            } else if (k & HidNpadButton_B) {
                 g_ui.screen = UI_LIBRARY;
+                dirty = true;
+            }
+            break;
+        }
+        case UI_MEMORY: {
+            int max = (int)g_load.nimports - ui_memory_rows();
+            if ((k & HidNpadButton_AnyDown) && g_ui.load_scroll < max) {
+                g_ui.load_scroll++;
+                dirty = true;
+            }
+            if ((k & HidNpadButton_AnyUp) && g_ui.load_scroll > 0) {
+                g_ui.load_scroll--;
+                dirty = true;
+            }
+            if (k & (HidNpadButton_R | HidNpadButton_ZR)) {
+                g_ui.load_scroll = g_ui.load_scroll + ui_memory_rows() < max ? g_ui.load_scroll + ui_memory_rows()
+                                                                              : (max > 0 ? max : 0);
+                dirty = true;
+            }
+            if (k & (HidNpadButton_L | HidNpadButton_ZL)) {
+                g_ui.load_scroll = g_ui.load_scroll > ui_memory_rows() ? g_ui.load_scroll - ui_memory_rows() : 0;
+                dirty = true;
+            }
+            if (k & HidNpadButton_B) {
+                g_ui.screen = UI_DETAIL;
                 dirty = true;
             }
             break;
@@ -272,6 +330,7 @@ int main(int argc, char **argv)
         }
     }
 
+    vm_free(&g_vm);
     game_close(&g_game);
     for (int i = 0; i < g_ncards; i++) {
         ui_card_free(&g_cards[i]);

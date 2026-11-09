@@ -89,7 +89,7 @@ static void top_bar(const UiState *s, const char *subtitle)
         gfx_text(104, 52, 18, C_ON_VAR, subtitle);
     }
     char chip[48];
-    snprintf(chip, sizeof(chip), "Etapa 1  ·  v%s", s->version);
+    snprintf(chip, sizeof(chip), "Etapa 2a  ·  v%s", s->version);
     int w = gfx_text_width(18, chip) + 32;
     gfx_rrect(UI_W - 40 - w, 26, w, 34, 17, C_GREEN_BG);
     gfx_text(UI_W - 40 - w + 16, 33, 18, C_GREEN, chip);
@@ -178,7 +178,8 @@ static void draw_loading(const UiState *s)
 {
     top_bar(s, "Emulador de Xbox original para Nintendo Switch");
     app_logo(UI_W / 2 - 60, 220, 120);
-    gfx_text_center(0, UI_W, 370, 30, C_ON, "Leyendo tus juegos...");
+    const char *head = s->load_total > 0 || !s->load_name ? "Leyendo tus juegos..." : s->load_name;
+    gfx_text_center(0, UI_W, 370, 30, C_ON, head);
     int bw = 520, bx = (UI_W - bw) / 2, by = 430;
     gfx_rrect(bx, by, bw, 12, 6, C_SURF_HI);
     if (s->load_total > 0) {
@@ -187,7 +188,7 @@ static void draw_loading(const UiState *s)
             gfx_rrect(bx, by, fw < 12 ? 12 : fw, 12, 6, C_GREEN);
         }
     }
-    if (s->load_name) {
+    if (s->load_name && s->load_total > 0) {
         char line[300];
         snprintf(line, sizeof(line), "%d de %d  ·  %s", s->load_done + 1, s->load_total, s->load_name);
         gfx_text_center(0, UI_W, 462, 20, C_ON_VAR, line);
@@ -472,7 +473,7 @@ static void draw_detail(const UiState *s)
         snprintf(b, sizeof(b), "Región %s  ·  versión %u", reg, (unsigned)x->version);
         gfx_text_fit(64, 502, 19, 328, C_ON_VAR, b);
         chip(64, 548, xdisc_kind(&g->disc), C_GREEN_BG, C_GREEN);
-        chip(64, 584, "Etapa 2: ejecutar el juego (pendiente)", C_VARIANT, C_ON_VAR);
+        chip(64, 584, "Y: cargar en la memoria del Xbox", C_GREEN_BG, C_GREEN);
     }
 
     /* pestañas */
@@ -505,8 +506,143 @@ static void draw_detail(const UiState *s)
         default: page_files(s); break;
         }
     }
-    Hint h[] = {{"L", "Pestaña"}, {"R", "Pestaña"}, {"B", "Volver"}, {"+", "Salir"}};
-    bottom_bar(h, 4);
+    Hint h[] = {{"Y", "Cargar en memoria"}, {"L", "Pestaña"}, {"R", "Pestaña"}, {"B", "Volver"}, {"+", "Salir"}};
+    Hint hbad[] = {{"L", "Pestaña"}, {"R", "Pestaña"}, {"B", "Volver"}, {"+", "Salir"}};
+    if (c->ok) {
+        bottom_bar(h, 5);
+    } else {
+        bottom_bar(hbad, 4);
+    }
+}
+
+/* ---- etapa 2a: el juego en la memoria del Xbox ---- */
+
+#define MEM_LIST_Y 330
+#define MEM_ROW_H  36
+
+int ui_memory_rows(void) { return (BOTBAR_Y - 20 - (MEM_LIST_Y + 60)) / MEM_ROW_H; }
+
+static void stat_tile(int x, int y, int w, const char *title, const char *value, const char *sub, int st)
+{
+    gfx_rrect(x, y, w, 120, 20, C_SURF);
+    gfx_text(x + 22, y + 16, 18, C_ON_VAR, title);
+    uint32_t vc = st == 0 ? C_GREEN : st == 1 ? C_ERROR : st == 2 ? C_WARN : C_ON;
+    gfx_text_fit(x + 22, y + 42, 30, w - 44, vc, value);
+    gfx_text_fit(x + 22, y + 84, 17, w - 44, C_ON_VAR, sub);
+}
+
+static void draw_memory(const UiState *s)
+{
+    const UiCard *c = &s->cards[s->sel];
+    const LoadReport *r = s->load;
+    char sub[320];
+    snprintf(sub, sizeof(sub), "%s en la memoria del Xbox", c->title[0] ? c->title : c->file);
+    top_bar(s, sub);
+
+    if (!r || !r->ok) {
+        gfx_rrect(40, 110, UI_W - 80, 120, 20, C_ERROR_BG);
+        gfx_text(70, 130, 26, C_ERROR, "No se pudo cargar");
+        gfx_text_fit(70, 172, 20, UI_W - 140, C_ON, r ? r->error : "sin datos");
+        Hint h[] = {{"B", "Volver"}, {"+", "Salir"}};
+        bottom_bar(h, 2);
+        return;
+    }
+
+    /* fila de resúmenes */
+    char v[64], d[96];
+    int tw = (UI_W - 80 - 3 * 16) / 4, x = 40, y = 104;
+    snprintf(v, sizeof(v), "%.1f MB", r->ram_used_kb / 1024.0);
+    snprintf(d, sizeof(d), "de 64 MB  ·  imagen %u KB", (unsigned)r->backed_kb);
+    stat_tile(x, y, tw, "Memoria usada", v, d, 3);
+    x += tw + 16;
+    snprintf(v, sizeof(v), "%u de %u", r->sections_loaded, r->sections_total);
+    snprintf(d, sizeof(d), "%u las carga el juego después", r->sections_later);
+    stat_tile(x, y, tw, "Secciones cargadas", v, d, 0);
+    x += tw + 16;
+    snprintf(v, sizeof(v), "%u de %u", r->sha_ok, r->sections_loaded);
+    snprintf(d, sizeof(d), "%s", r->sha_bad ? "Algunas no coinciden con su firma" : "Coinciden con su firma");
+    stat_tile(x, y, tw, "Verificación SHA-1", v, d, r->sha_bad ? (r->sha_ok ? 2 : 1) : 0);
+    x += tw + 16;
+    snprintf(v, sizeof(v), "%u", r->nimports);
+    snprintf(d, sizeof(d), "entrada 0x%08X", (unsigned)r->entry);
+    stat_tile(x, y, tw, "Llamadas al kernel", v, d, 3);
+
+    /* barra: listas / datos / faltan */
+    y = 244;
+    gfx_rrect(40, y, UI_W - 80, 70, 20, C_SURF);
+    int bx = 64, bw = 560, by = y + 22;
+    unsigned tot = r->nimports ? r->nimports : 1;
+    int wi = (int)(bw * r->n_impl / tot), wd = (int)(bw * r->n_data / tot);
+    gfx_rrect(bx, by, bw, 26, 13, HEX(0x3B3320));
+    gfx_rrect(bx, by, wi + wd, 26, 13, HEX(0x37474F));
+    gfx_rrect(bx, by, wi, 26, 13, C_GREEN_MID);
+    char lg[64];
+    int lx = bx + bw + 30;
+    gfx_circle(lx + 8, by + 13, 8, C_GREEN_MID);
+    snprintf(lg, sizeof(lg), "%u ya en hakuX", r->n_impl);
+    lx += 24 + gfx_text(lx + 24, by + 1, 19, C_ON, lg) + 28;
+    gfx_circle(lx + 8, by + 13, 8, HEX(0x78909C));
+    snprintf(lg, sizeof(lg), "%u datos", r->n_data);
+    lx += 24 + gfx_text(lx + 24, by + 1, 19, C_ON, lg) + 28;
+    gfx_circle(lx + 8, by + 13, 8, C_WARN);
+    snprintf(lg, sizeof(lg), "%u %s", r->n_todo, r->n_todo == 1 ? "falta" : "faltan");
+    gfx_text(lx + 24, by + 1, 19, C_ON, lg);
+
+    /* lista de importaciones */
+    int px = 40, pw = 820;
+    gfx_rrect(px, MEM_LIST_Y, pw, BOTBAR_Y - 20 - MEM_LIST_Y, 20, C_SURF);
+    gfx_rect(px, MEM_LIST_Y + 10, pw, 40, C_SURF_HI);
+    gfx_text(px + 24, MEM_LIST_Y + 18, 18, C_ON_VAR, "Ordinal");
+    gfx_text(px + 120, MEM_LIST_Y + 18, 18, C_ON_VAR, "Función del kernel");
+    gfx_text(px + 470, MEM_LIST_Y + 18, 18, C_ON_VAR, "Estado");
+    gfx_text(px + 640, MEM_LIST_Y + 18, 18, C_ON_VAR, "Dirección");
+    int ly = MEM_LIST_Y + 60;
+    for (int i = s->load_scroll; i < (int)r->nimports && i < s->load_scroll + ui_memory_rows(); i++) {
+        const LoadImport *im = &r->imports[i];
+        if ((i - s->load_scroll) % 2) {
+            gfx_rect(px, ly - 5, pw, MEM_ROW_H, HEX(0x232323));
+        }
+        char b[24];
+        snprintf(b, sizeof(b), "%u", im->ordinal);
+        gfx_text(px + 24, ly, 18, C_ON_VAR, b);
+        gfx_text_fit(px + 120, ly, 18, 340, C_ON, im->name);
+        if (im->kind == KX_IMPL) {
+            chip(px + 470, ly - 2, "lista", C_GREEN_BG, C_GREEN);
+        } else if (im->kind == KX_DATA) {
+            chip(px + 470, ly - 2, "dato", HEX(0x263238), HEX(0xB0BEC5));
+        } else {
+            chip(px + 470, ly - 2, "falta (etapa 3)", C_WARN_BG, C_WARN);
+        }
+        snprintf(b, sizeof(b), "0x%08X", (unsigned)im->target);
+        gfx_text(px + 640, ly, 18, C_ON_VAR, b);
+        ly += MEM_ROW_H;
+    }
+    int rows = (int)r->nimports;
+    if (rows > ui_memory_rows()) {
+        int th = BOTBAR_Y - 20 - MEM_LIST_Y - 70;
+        int bh = th * ui_memory_rows() / rows;
+        int yy = MEM_LIST_Y + 60 + (th - bh) * s->load_scroll / (rows - ui_memory_rows());
+        gfx_rrect(px + pw - 14, yy, 6, bh, 3, C_GREEN);
+    }
+
+    /* panel derecho: primeras instrucciones y siguiente paso */
+    int rx = px + pw + 20, rw = UI_W - 40 - rx;
+    gfx_rrect(rx, MEM_LIST_Y, rw, BOTBAR_Y - 20 - MEM_LIST_Y, 20, C_SURF);
+    gfx_text(rx + 22, MEM_LIST_Y + 18, 20, C_ON, "Primeras instrucciones");
+    gfx_text(rx + 22, MEM_LIST_Y + 46, 16, C_ON_VAR, "x86 en el punto de entrada");
+    for (int row = 0; row < 4; row++) {
+        char hex[32];
+        snprintf(hex, sizeof(hex), "%02X %02X %02X %02X", r->entry_bytes[row * 4], r->entry_bytes[row * 4 + 1],
+                 r->entry_bytes[row * 4 + 2], r->entry_bytes[row * 4 + 3]);
+        gfx_text(rx + 22, MEM_LIST_Y + 80 + row * 28, 20, C_GREEN, hex);
+    }
+    gfx_rect(rx + 22, MEM_LIST_Y + 200, rw - 44, 1, C_OUTLINE);
+    gfx_text(rx + 22, MEM_LIST_Y + 214, 18, C_ON, "Siguiente: etapa 2b");
+    gfx_text_fit(rx + 22, MEM_LIST_Y + 242, 16, rw - 44, C_ON_VAR, "Traducir y ejecutar este");
+    gfx_text_fit(rx + 22, MEM_LIST_Y + 264, 16, rw - 44, C_ON_VAR, "código x86 en la Switch.");
+
+    Hint h[] = {{"B", "Volver"}, {"+", "Salir"}};
+    bottom_bar(h, 2);
 }
 
 /* ---- pruebas de hardware ---- */
@@ -573,6 +709,7 @@ void ui_draw(const UiState *s)
     case UI_LIBRARY: draw_library(s); break;
     case UI_DETAIL: draw_detail(s); break;
     case UI_PROBE: draw_probe(s); break;
+    case UI_MEMORY: draw_memory(s); break;
     }
 }
 
