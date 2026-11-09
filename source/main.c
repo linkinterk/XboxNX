@@ -23,7 +23,7 @@
 #include "ui.h"
 #include "usb/usb.h"
 
-#define APP_VER   "0.14.1"
+#define APP_VER   "0.15.0"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -301,6 +301,10 @@ int main(int argc, char **argv)
             } else if (k & HidNpadButton_Y) {
                 scan_games();
                 dirty = true;
+            } else if (k & HidNpadButton_Minus) {
+                g_ui.stage_back = UI_LIBRARY;
+                g_ui.screen = UI_STAGES;
+                dirty = true;
             } else if (k & HidNpadButton_X) {
                 if (!g_probe_done) {
                     probe_run(&g_probe);
@@ -397,12 +401,14 @@ int main(int argc, char **argv)
                 }
             }
             if (g_run.state == RUN_ACTIVE) {
-                /* ~25 ms de intérprete por cuadro, en tramos de 100.000 */
+                /* intérprete entre dibujos de la pantalla (dibujarla cuesta):
+                 * ~60 ms viendo la del Xbox, ~150 ms en el registro */
+                u64 budget = g_ui.run_screen ? 60000000ull : 150000000ull;
                 u64 t0 = armGetSystemTick(), spent = 0;
                 do {
                     runner_slice(&g_run, 100000);
                     spent = armTicksToNs(armGetSystemTick() - t0);
-                } while (g_run.state == RUN_ACTIVE && spent < 25000000ull);
+                } while (g_run.state == RUN_ACTIVE && spent < budget);
                 g_run.ns += spent;
                 dirty = true;
                 if (k & HidNpadButton_B) {
@@ -427,6 +433,22 @@ int main(int argc, char **argv)
             if (k & (HidNpadButton_AnyDown | HidNpadButton_R | HidNpadButton_ZR)) {
                 int step = (k & HidNpadButton_AnyDown) ? 1 : rows;
                 g_ui.run_scroll = cur + step >= max ? -1 : cur + step;
+                dirty = true;
+            }
+            break;
+        }
+        case UI_STAGES: {
+            int max = ui_stage_count() - ui_stage_rows();
+            if ((k & HidNpadButton_AnyDown) && g_ui.stage_scroll < max) {
+                g_ui.stage_scroll++;
+                dirty = true;
+            }
+            if ((k & HidNpadButton_AnyUp) && g_ui.stage_scroll > 0) {
+                g_ui.stage_scroll--;
+                dirty = true;
+            }
+            if (k & HidNpadButton_B) {
+                g_ui.screen = (UiScreen)g_ui.stage_back;
                 dirty = true;
             }
             break;

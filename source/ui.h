@@ -28,7 +28,7 @@ typedef struct UiCard {
     char error[128];
 } UiCard;
 
-typedef enum { UI_LOADING, UI_LIBRARY, UI_DETAIL, UI_PROBE, UI_MEMORY, UI_RUN } UiScreen;
+typedef enum { UI_LOADING, UI_LIBRARY, UI_DETAIL, UI_PROBE, UI_MEMORY, UI_RUN, UI_STAGES } UiScreen;
 
 typedef struct UiState {
     UiScreen screen;
@@ -51,6 +51,8 @@ typedef struct UiState {
     /* etapa 2c: ejecución en el intérprete */
     const Runner *run;
     int run_scroll;          /* -1: seguir la última llamada */
+    int stage_scroll;        /* la tabla de etapas */
+    int stage_back;          /* la pantalla a la que vuelve */
     bool run_screen;         /* X: ver la pantalla del Xbox en vez del registro */
     /* pruebas */
     const ProbeResult *probe;
@@ -68,6 +70,9 @@ int ui_detail_rows(void);
 int ui_memory_rows(void);
 /* Filas visibles del registro de llamadas de la etapa 2c. */
 int ui_run_rows(void);
+/* La tabla de etapas: cuántas hay y cuántas filas se ven. */
+int ui_stage_count(void);
+int ui_stage_rows(void);
 /* Índice de la tarjeta bajo (x, y) en la biblioteca, o -1 (pantalla táctil). */
 int ui_card_at(const UiState *s, int x, int y);
 

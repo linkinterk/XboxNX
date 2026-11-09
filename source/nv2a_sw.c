@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "workers.h"
 #include "vsh/nv2a_vsh_disassembler.h"
 #include "vsh/nv2a_vsh_emulator.h"
 
@@ -75,6 +76,7 @@ void sw_init(uint8_t *ram, uint32_t ram_size, SwDmaFn dma)
     memset(&S, 0, sizeof(S));
     S.ram = ram;
     S.ram_size = ram_size;
+    workers_init();
     S.dma = dma;
     S.dmask = true;
     S.cmask = 0x01010101u;
@@ -785,7 +787,14 @@ static Tex g_tex[4];
 static bool g_tex_on[4];
 static unsigned g_tex_mode[4];
 
-static void shade(const Target *t, int x, int y, const float l[3], const OutVert *v[3], float z)
+/* Lo que cuenta cada hilo del dibujo (se suma al final). */
+typedef struct Count {
+    uint64_t pixels;
+    unsigned depth_fail;
+    uint32_t first_px;
+} Count;
+
+static void shade(const Target *t, int x, int y, const float l[3], const OutVert *v[3], float z, Count *k)
 {
     uint8_t *cp = t->color + (uint32_t)y * t->pitch + (uint32_t)x * t->bpp;
     /* profundidad */
@@ -806,7 +815,7 @@ static void shade(const Target *t, int x, int y, const float l[3], const OutVert
             zv = (uint32_t)zc;
         }
         if (!cmp_func(S.dfunc, (float)zv, (float)old)) {
-            S.st.last.depth_fail++;
+            k->depth_fail++;
             return;
         }
     }
@@ -851,8 +860,8 @@ static void shade(const Target *t, int x, int y, const float l[3], const OutVert
     if (S.atest && !cmp_func(S.afunc, floorf(c[3] * 255 + 0.5f), (float)(S.aref & 0xFF))) {
         return;
     }
-    if (S.st.last.first_px == 0xFFFFFFFFu) {
-        S.st.last.first_px = (uint32_t)(clamp01(c[3]) * 255) << 24 | (uint32_t)(clamp01(c[0]) * 255) << 16 |
+    if (k->first_px == 0xFFFFFFFFu) {
+        k->first_px = (uint32_t)(clamp01(c[3]) * 255) << 24 | (uint32_t)(clamp01(c[0]) * 255) << 16 |
                              (uint32_t)(clamp01(c[1]) * 255) << 8 | (uint32_t)(clamp01(c[2]) * 255);
     }
     if (S.blend) {
@@ -884,8 +893,18 @@ static void shade(const Target *t, int x, int y, const float l[3], const OutVert
             memcpy(zp, &nz, 4);
         }
     }
-    S.st.pixels++;
+    k->pixels++;
 }
+
+typedef struct Job {
+    const Target *t;
+    const OutVert *v[3];
+    float iw[3], inv;
+    int ix0, ix1, iy0, iy1;
+    Count cnt[4];
+} Job;
+
+static void raster_rows(void *arg, int part, int n);
 
 static void raster(const Target *t, const OutVert *a, const OutVert *b, const OutVert *c)
 {
@@ -920,8 +939,36 @@ static void raster(const Target *t, const OutVert *a, const OutVert *b, const Ou
         float w = v[i]->pos[3];
         iw[i] = (w > 1e-20f || w < -1e-20f) && isfinite(w) ? 1.0f / w : 1.0f;
     }
-    float inv = 1.0f / area;
-    for (int y = iy0; y < iy1; y++) {
+    Job j = {t, {a, b, c}, {iw[0], iw[1], iw[2]}, 1.0f / area, ix0, ix1, iy0, iy1, {{0}}};
+    int n = (ix1 - ix0) * (iy1 - iy0) > 2048 ? workers_count() : 1;
+    if (n > 1) {
+        workers_run(raster_rows, &j);
+    } else {
+        raster_rows(&j, 0, 1);
+    }
+    for (int i = 0; i < n; i++) {
+        S.st.pixels += j.cnt[i].pixels;
+        S.st.last.depth_fail += j.cnt[i].depth_fail;
+        if (S.st.last.first_px == 0xFFFFFFFFu && i == 0) {
+            S.st.last.first_px = j.cnt[0].first_px;
+        }
+    }
+}
+
+/* Las filas y % n == part de un triángulo. */
+static void raster_rows(void *arg, int part, int n)
+{
+    Job *j = arg;
+    const Target *t = j->t;
+    const OutVert *a = j->v[0], *b = j->v[1], *c = j->v[2];
+    const OutVert *v[3] = {a, b, c};
+    float x0 = a->pos[0], y0 = a->pos[1], x1 = b->pos[0], y1 = b->pos[1], x2 = c->pos[0], y2 = c->pos[1];
+    const float *iw = j->iw;
+    float inv = j->inv;
+    int ix0 = j->ix0, ix1 = j->ix1;
+    Count *k = &j->cnt[part];
+    k->first_px = 0xFFFFFFFFu;
+    for (int y = j->iy0 + part; y < j->iy1; y += n) {
         float py = y + 0.5f;
         for (int x = ix0; x < ix1; x++) {
             float px = x + 0.5f;
@@ -937,7 +984,7 @@ static void raster(const Target *t, const OutVert *a, const OutVert *b, const Ou
             if (ps != 0 && isfinite(ps)) {
                 l[0] = p0 / ps, l[1] = p1 / ps, l[2] = p2 / ps;
             }
-            shade(t, x, y, l, v, z);
+            shade(t, x, y, l, v, z, k);
         }
     }
 }

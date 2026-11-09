@@ -22,9 +22,17 @@ static void fault(Cpu *c, uint32_t addr, bool write)
     }
 }
 
+/* La memoria de va (válida hasta el final de su página) o NULL: la tabla
+ * de páginas leída aquí mismo, sin llamar a vm.c (es lo más frecuente). */
+static inline uint8_t *hp(const Cpu *c, uint32_t a)
+{
+    uint32_t e = c->vm->pt[a >> 12];
+    return e ? c->vm->ram + ((size_t)(e - 1) << 12) + (a & 0xFFFu) : NULL;
+}
+
 static uint32_t mrd(Cpu *c, uint32_t a, int sz)
 {
-    uint8_t *h = vm_host(c->vm, a);
+    uint8_t *h = hp(c, a);
     if (h && (a & (VM_PAGE - 1)) + (uint32_t)sz <= VM_PAGE) {
         if (sz == 1) {
             return h[0];
@@ -49,7 +57,7 @@ static uint32_t mrd(Cpu *c, uint32_t a, int sz)
 static void mwr(Cpu *c, uint32_t a, int sz, uint32_t v)
 {
     uint8_t b[4] = {(uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24)};
-    uint8_t *h = vm_host(c->vm, a);
+    uint8_t *h = hp(c, a);
     if (h && (a & (VM_PAGE - 1)) + (uint32_t)sz <= VM_PAGE) {
         memcpy(h, b, (size_t)sz);
         return;
@@ -72,21 +80,40 @@ typedef struct Dec {
     int rep;          /* 0, 0xF2, 0xF3 */
 } Dec;
 
-static uint8_t fetch8(Cpu *c)
+/* El código se lee de la página en curso, guardada (fetch_page / fetch_host);
+ * cpu_run la olvida al empezar, por si el kernel cambió las páginas. */
+static inline const uint8_t *code_at(Cpu *c, uint32_t eip, unsigned n)
 {
-    uint8_t v = (uint8_t)mrd(c, c->eip, 1);
+    if ((eip >> 12) != c->fetch_page || !c->fetch_host) {
+        uint8_t *h = hp(c, eip);
+        if (!h) {
+            return NULL;
+        }
+        c->fetch_page = eip >> 12;
+        c->fetch_host = h - (eip & 0xFFFu);
+    }
+    return (eip & 0xFFFu) + n <= 0x1000u ? c->fetch_host + (eip & 0xFFFu) : NULL;
+}
+
+static inline uint8_t fetch8(Cpu *c)
+{
+    const uint8_t *p = code_at(c, c->eip, 1);
+    uint8_t v = p ? p[0] : (uint8_t)mrd(c, c->eip, 1);
     c->eip++;
     return v;
 }
-static uint16_t fetch16(Cpu *c)
+static inline uint16_t fetch16(Cpu *c)
 {
-    uint16_t v = (uint16_t)mrd(c, c->eip, 2);
+    const uint8_t *p = code_at(c, c->eip, 2);
+    uint16_t v = p ? (uint16_t)(p[0] | p[1] << 8) : (uint16_t)mrd(c, c->eip, 2);
     c->eip += 2;
     return v;
 }
-static uint32_t fetch32(Cpu *c)
+static inline uint32_t fetch32(Cpu *c)
 {
-    uint32_t v = mrd(c, c->eip, 4);
+    const uint8_t *p = code_at(c, c->eip, 4);
+    uint32_t v = p ? (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24
+                   : mrd(c, c->eip, 4);
     c->eip += 4;
     return v;
 }
@@ -1250,6 +1277,7 @@ done:
 
 CpuStop cpu_run(Cpu *c, uint64_t max)
 {
+    c->fetch_host = NULL; /* el kernel pudo cambiar las páginas */
     for (uint64_t i = 0; i < max; i++) {
         if (cpu_step(c) != CPU_RUNNING) {
             return c->stop;

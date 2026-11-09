@@ -97,7 +97,7 @@ int main(int argc, char **argv)
     }
 
     UiState s = {0};
-    s.version = "0.14.1";
+    s.version = "0.15.0";
     s.cards = cards;
 
     s.screen = UI_LOADING;
@@ -116,6 +116,10 @@ int main(int argc, char **argv)
     s.ncards = 0;
     ui_draw(&s);
     save(argv[3], "3_vacia");
+    s.screen = UI_STAGES;
+    ui_draw(&s);
+    save(argv[3], "3b_etapas");
+    s.screen = UI_LIBRARY;
     s.ncards = 5;
 
     if (!game_open(&g_game, argv[2])) {

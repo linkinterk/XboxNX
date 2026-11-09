@@ -93,7 +93,7 @@ static void top_bar(const UiState *s, const char *subtitle)
         gfx_text(104, 52, 18, C_ON_VAR, subtitle);
     }
     char chip[48];
-    snprintf(chip, sizeof(chip), "Etapa 3g  ·  v%s", s->version);
+    snprintf(chip, sizeof(chip), "Etapa 5a  ·  v%s", s->version);
     int w = gfx_text_width(18, chip) + 32;
     gfx_rrect(UI_W - 40 - w, 26, w, 34, 17, C_GREEN_BG);
     gfx_text(UI_W - 40 - w + 16, 33, 18, C_GREEN, chip);
@@ -267,8 +267,8 @@ static void draw_library(const UiState *s)
         gfx_text_center(px, 760, py + 210, 21, C_ON_VAR, "Copia tu ISO (.iso o .xiso, de un disco tuyo) a");
         gfx_text_center(px, 760, py + 240, 21, C_GREEN, "sd:/xbox/");
         gfx_text_center(px, 760, py + 290, 18, C_ON_VAR, "Si pesa más de 4 GB, la tarjeta SD tiene que estar en exFAT.");
-        Hint h[] = {{"Y", "Buscar"}, {"X", "Pruebas"}, {"+", "Salir"}};
-        bottom_bar(h, 3);
+        Hint h[] = {{"Y", "Buscar"}, {"X", "Pruebas"}, {"-", "Etapas"}, {"+", "Salir"}};
+        bottom_bar(h, 4);
         return;
     }
 
@@ -285,8 +285,8 @@ static void draw_library(const UiState *s)
         gfx_rrect(UI_W - 18, GRID_Y, 6, th, 3, C_SURF_HI);
         gfx_rrect(UI_W - 18, by, 6, bh, 3, C_GREEN);
     }
-    Hint h[] = {{"A", "Abrir"}, {"Y", "Buscar"}, {"X", "Pruebas"}, {"+", "Salir"}};
-    bottom_bar(h, 4);
+    Hint h[] = {{"A", "Abrir"}, {"Y", "Buscar"}, {"X", "Pruebas"}, {"-", "Etapas"}, {"+", "Salir"}};
+    bottom_bar(h, 5);
 }
 
 /* ---- detalle ---- */
@@ -1166,6 +1166,81 @@ static void draw_probe(const UiState *s)
     }
 }
 
+/* ---- etapas del proyecto ---- */
+
+typedef struct Stage {
+    const char *id, *name, *what;
+    int state; /* 0 lista, 1 ahora, 2 pendiente */
+} Stage;
+
+static const Stage k_stages[] = {
+    {"1", "Cargador", "Biblioteca de juegos, lectura de la ISO y del default.xbe, pruebas del hardware", 0},
+    {"2a", "Memoria", "Los 64 MB del Xbox y el juego cargado en ellos", 0},
+    {"2b", "CPU (intérprete)", "Las instrucciones del Pentium III del Xbox, con x87, MMX y SSE", 0},
+    {"2c", "Arranque", "El hilo de arranque y el registro de cada llamada al kernel", 0},
+    {"3a", "Kernel: memoria y objetos", "Memoria, eventos, semáforos, mutex", 0},
+    {"3b", "Kernel: hilos y tiempo", "Hilos con prioridades, esperas, temporizadores, DPC", 0},
+    {"3c", "Kernel: archivos", "D: desde la ISO, disco duro del Xbox en la SD", 0},
+    {"3d", "Kernel: sistema", "Configuración (EEPROM), cadenas, criptografía, AV, HAL", 0},
+    {"3e", "Hardware simulado", "Registros del GPU, vblank, interrupciones, USB, red", 0},
+    {"3f", "Audio", "El chip de audio completo (todavía sin sonido en la Switch)", 0},
+    {"4a", "Pantalla", "La imagen del Xbox (botón X), cuadros, borrado de pantalla", 0},
+    {"4b", "Dibujo por software", "Vertex shaders, texturas, combiners y mezcla en la CPU", 0},
+    {"3g", "Controles", "El control de la Switch como control del Xbox (USB y XID)", 0},
+    {"5a", "Optimización 1", "Intérprete ~40% más rápido, dibujo en 3 núcleos, reloj ajustable", 1},
+    {"3h", "Sonido", "Sacar el audio del Xbox por la Switch", 2},
+    {"2d", "CPU rápida (JIT)", "Traducir el código x86 a ARM64: la velocidad de verdad", 2},
+    {"4c", "Gráficos por GPU", "El dibujo en el GPU de la Switch, rápido", 2},
+    {"5", "Optimizar", "Velocidad general hasta que Halo 2 se pueda jugar", 2},
+};
+#define NSTAGES ((int)(sizeof(k_stages) / sizeof(k_stages[0])))
+#define STAGE_ROW 26
+
+int ui_stage_count(void) { return NSTAGES; }
+int ui_stage_rows(void) { return (BOTBAR_Y - 20 - 160) / STAGE_ROW; }
+
+static void draw_stages(const UiState *s)
+{
+    int done = 0, now = -1;
+    for (int i = 0; i < NSTAGES; i++) {
+        done += k_stages[i].state == 0;
+        if (k_stages[i].state == 1 && now < 0) {
+            now = i;
+        }
+    }
+    char sub[96];
+    snprintf(sub, sizeof(sub), "Etapas: %d de %d listas · ahora: %s %s", done, NSTAGES, now >= 0 ? k_stages[now].id : "-",
+             now >= 0 ? k_stages[now].name : "");
+    top_bar(s, sub);
+    int x = 40, w = UI_W - 80, y = 104;
+    gfx_rrect(x, y, w, BOTBAR_Y - 20 - y, 20, C_SURF);
+    gfx_rect(x, y + 10, w, 38, C_SURF_HI);
+    gfx_text(x + 20, y + 18, 17, C_ON_VAR, "Etapa");
+    gfx_text(x + 110, y + 18, 17, C_ON_VAR, "Nombre");
+    gfx_text(x + 420, y + 18, 17, C_ON_VAR, "Qué hace");
+    gfx_text(x + w - 150, y + 18, 17, C_ON_VAR, "Estado");
+    int rows = ui_stage_rows();
+    int first = s->stage_scroll;
+    int ry = y + 58;
+    for (int i = first; i < NSTAGES && i < first + rows; i++) {
+        const Stage *st = &k_stages[i];
+        uint32_t col = st->state == 0 ? C_GREEN : st->state == 1 ? HEX(0x6AB7FF) : C_ON_VAR;
+        if (st->state == 1) {
+            gfx_rect(x, ry - 5, w, STAGE_ROW, HEX(0x1E3346));
+        } else if ((i - first) % 2) {
+            gfx_rect(x, ry - 5, w, STAGE_ROW, HEX(0x232323));
+        }
+        gfx_circle(x + 24, ry + 9, 5, col);
+        gfx_text(x + 40, ry, 17, C_ON, st->id);
+        gfx_text_fit(x + 110, ry, 17, 290, st->state == 2 ? C_ON_VAR : C_ON, st->name);
+        gfx_text_fit(x + 420, ry + 1, 15, w - 420 - 170, C_ON_VAR, st->what);
+        gfx_text(x + w - 150, ry, 17, col, st->state == 0 ? "Lista" : st->state == 1 ? "Ahora" : "Pendiente");
+        ry += STAGE_ROW;
+    }
+    Hint h[] = {{"B", "Volver"}};
+    bottom_bar(h, 1);
+}
+
 void ui_draw(const UiState *s)
 {
     gfx_clear(C_BG);
@@ -1176,6 +1251,7 @@ void ui_draw(const UiState *s)
     case UI_PROBE: draw_probe(s); break;
     case UI_MEMORY: draw_memory(s); break;
     case UI_RUN: draw_run(s); break;
+    case UI_STAGES: draw_stages(s); break;
     }
 }
 
