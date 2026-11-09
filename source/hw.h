@@ -84,5 +84,6 @@ bool hw_next_event(const struct Kernel *k, uint64_t *ns);
 /* Líneas de interrupción activas (bit = nivel del bus). */
 uint32_t hw_irq_lines(const struct Kernel *k);
 const HwStats *hw_stats(void);
+void hw_irq_debug(char *b, size_t n);
 
 #endif

@@ -786,7 +786,7 @@ static void draw_xbox_screen(const UiState *s)
                  (unsigned long long)sw->triangles, (unsigned long long)sw->pixels, sw->skipped_ff, sw->no_target,
                  sw->no_target_why, (unsigned)sw->surf_format, (unsigned)sw->surf_pitch, (unsigned)sw->clip_h,
                  (unsigned)sw->clip_v, sw->vs_errors, (unsigned)hw_scanout());
-        gfx_rrect(14, ly - 4, UI_W - 28, 100, 10, WITH_ALPHA(HEX(0x000000), 200));
+        gfx_rrect(14, ly - 4, UI_W - 28, 122, 10, WITH_ALPHA(HEX(0x000000), 200));
         gfx_text_fit(24, ly, 16, UI_W - 48, C_ON, e);
         ly += 22;
         snprintf(e, sizeof(e), "Último: prim %u, %u vértices, %llu tri, %llu px, %u ocultos, %u tras Z · destino %08X pitch %u fmt %X · Z %08X",
@@ -804,6 +804,15 @@ static void draw_xbox_screen(const UiState *s)
                  L->pos[0], L->pos[1], L->pos[2], L->pos[3], L->d0[0], L->d0[1], L->d0[2], L->d0[3], L->t0[0], L->t0[1],
                  L->t0[2], L->t0[3]);
         gfx_text_fit(24, ly, 16, UI_W - 48, C_ON, e);
+        ly += 22;
+        /* las interrupciones: si el GPU queda en una trampa, por qué no se atiende */
+        char irq[200];
+        hw_irq_debug(irq, sizeof(irq));
+        const uint8_t *pirql = vm_host(r->cpu.vm, K_KPCR_VA + 0x24);
+        snprintf(e, sizeof(e), "IRQL %u · DPC en cola %u · %s%s · %u ISR, %u DPC · %s", pirql ? *pirql : 0,
+                 kn->ndpc, kn->in_isr ? "en ISR" : "sin ISR", kn->in_dpc ? ", en DPC" : "", kn->isrs_run,
+                 kn->dpcs_run, irq);
+        gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
     } else {
         snprintf(b, sizeof(b), "Pantalla del Xbox: el juego todavía no eligió un modo de video");
         gfx_text_center(0, UI_W, 330, 22, C_ON_VAR, "Todavía no hay imagen");
@@ -1099,9 +1108,11 @@ static void draw_run(const UiState *s)
             snprintf(b, sizeof(b), "h%u p%d %s%s%s", (unsigned)t->id / 4, t->priority, what,
                      t->has_deadline ? " (plazo)" : "", from);
         } else {
-            snprintf(b, sizeof(b), "h%u p%d %s %.1fM%s%s", (unsigned)t->id / 4, t->priority,
-                     t->state == KT_RUNNING ? "corre" : "listo", t->instructions / 1e6, t->suspend ? " pausa" : "",
-                     from);
+            const uint8_t *pq = vm_host(r->cpu.vm, K_KPCR_VA + 0x24);
+            unsigned irql = t->state == KT_RUNNING ? (pq ? *pq : 0) : t->ctx.irql;
+            snprintf(b, sizeof(b), "h%u p%d %s i%u %.1fM%s%s", (unsigned)t->id / 4, t->priority,
+                     t->state == KT_RUNNING ? "corre" : "listo", irql, t->instructions / 1e6,
+                     t->suspend ? " pausa" : "", from);
         }
         gfx_text_fit(rx + 34, ry, 14, rw - 46, C_ON, b);
         ry += 19;

@@ -171,6 +171,18 @@ bool hw_init(Kernel *k)
 
 const HwStats *hw_stats(void) { return &g_hw.st; }
 
+static uint32_t pmc_intr(void);
+
+/* Para la pantalla: el estado de las interrupciones del GPU. */
+void hw_irq_debug(char *b, size_t n)
+{
+    snprintf(b, n, "PGRAPH intr %X en %X · PMC %X en %X · trampa %X: %X (%u) · PCRTC %X en %X",
+             (unsigned)nv_ld(NV_PGRAPH_INTR), (unsigned)nv_ld(NV_PGRAPH_INTR_EN), (unsigned)pmc_intr(),
+             (unsigned)nv_ld(NV_PMC_INTR_EN_0), (unsigned)nv_ld(NV_PGRAPH_TRAPPED_ADDR),
+             (unsigned)nv_ld(NV_PGRAPH_TRAPPED_DATA), (unsigned)g_hw.st.traps, (unsigned)nv_ld(NV_PCRTC_INTR_0),
+             (unsigned)nv_ld(NV_PCRTC_INTR_EN_0));
+}
+
 /* ================================================================ NV2A */
 
 static uint32_t pmc_intr(void)
