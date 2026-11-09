@@ -59,6 +59,8 @@ def main():
             p.stdin.write(line)
             p.stdin.flush()
             outs.append(p.stdout.readline().split())
+        if outs[1][0] == "0":
+            continue  # el código se escribió encima (rep stos sobre el hlt): el intérprete paró al final, sin hlt
         if outs[0][:2] == outs[1][:2] and outs[1][0] == FAULT:
             continue  # un fallo de memoria termina el juego: basta que paren igual
         if outs[0] != outs[1]:
@@ -66,6 +68,8 @@ def main():
             if fails <= 20:
                 print("FALLO %s\n  bloques   %s\n  intérprete %s" % (code.hex(), " ".join(outs[0][:11]),
                                                                    " ".join(outs[1][:11])))
+                if os.environ.get("BLOCK_SEQ_LINEA"):
+                    print("  entrada: " + line.strip())
     for p in (pb, pi):
         p.stdin.close()
         p.wait()
