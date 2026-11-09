@@ -609,6 +609,13 @@ static void hw_tests(void)
     kcall("KeInsertQueueDpc");
     b1(0xB8); d4(1);
     b1(0xC2); b1(0x08); b1(0x00);                /* ret 8 */
+    /* el ISR del USB (más IRQL que el del GPU): borra el SOF y cuenta */
+    const uint32_t KI2 = SCRATCH + 0x680;
+    uint32_t usb_isr = here();
+    mov_mem_imm(0xFED0000Cu, 4);                 /* HcInterruptStatus: SF atendido */
+    b1(0xFF); b1(0x05); d4(SCRATCH + 0x520);     /* inc dword [contador USB] */
+    b1(0xB8); d4(1);
+    b1(0xC2); b1(0x08); b1(0x00);
     uint32_t dpc = here();
     push(0); push(0); push(EV);
     kcall("KeSetEvent");
@@ -625,6 +632,14 @@ static void hw_tests(void)
     push(KI);
     kcall("KeConnectInterrupt");
     store_eax(SCRATCH + 0x504);
+    /* el USB interrumpe cada 1 ms (SOF), con más IRQL: el GPU debe atenderse
+     * igual (antes, tras un ISR se usaba su IRQL y el del GPU no corría) */
+    push(0); push(0); push(26); push(0x31); push(0); push(usb_isr); push(KI2);
+    kcall("KeInitializeInterrupt");
+    push(KI2);
+    kcall("KeConnectInterrupt");
+    mov_mem_imm(0xFED00010u, 0x80000004u);       /* HcInterruptEnable: MIE | SF */
+    mov_mem_imm(0xFED00004u, 0x80u);             /* HcControl: operacional */
     mov_mem_imm(0xFD000140u, 1);                 /* PMC_INTR_EN_0 */
     mov_mem_imm(0xFD600140u, 1);                 /* PCRTC_INTR_EN_0: el vblank */
     push(0); push(0); push(0); push(0); push(EV);
@@ -644,6 +659,8 @@ static void hw_tests(void)
     b1(0x72); b1(0xF3);                          /* jb bucle */
     b1(0xB9); d4(0);                             /* mov ecx, 0 */
     kcall("KfLowerIrql");
+    mov_mem_imm(0xFED00014u, 0x80000004u);       /* HcInterruptDisable */
+    mov_mem_imm(0xFED00004u, 0);                 /* HcControl: reset */
     b1(0xA1); d4(0xFD000000u);                   /* mov eax, [PMC_BOOT_0] */
     store_eax(SCRATCH + 0x510);
     b1(0xBA); d4(0x8008);                        /* mov edx, 0x8008 */
@@ -657,6 +674,7 @@ static void hw_tests(void)
     CHECK(rd(SCRATCH + 0x508) == 0);
     CHECK(rd(SCRATCH + 0x500) >= 1 && k.isrs_run >= 1 && k.dpcs_run >= 1);
     CHECK(rd(SCRATCH + 0x50C) == 42);
+    CHECK(rd(SCRATCH + 0x520) >= 5); /* el USB también se atendió */
     CHECK(rd(SCRATCH + 0x510) == 0x02A000A1u);
     CHECK(rd(SCRATCH + 0x514) > 50000);           /* > 15 ms a 3,375 MHz */
     CHECK(k.now_ns >= 16000000u);

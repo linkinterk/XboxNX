@@ -600,47 +600,61 @@ static void irq_dispatch(Kernel *k, Cpu *c)
     }
     (void)c;
     KThread *t = cur(k); /* ya guardado por kps_schedule */
+    if (k->cur >= 0 && k->cur == k->isr_thread) {
+        /* el hilo de los ISR acaba de terminar uno: lo que importa es el
+         * hilo interrumpido (si estaba a DISPATCH_LEVEL o más), si no, nadie.
+         * Antes se usaba el IRQL del ISR que terminó y las interrupciones de
+         * menos IRQL (el GPU) esperaban; con el USB siempre primero, nunca. */
+        t = k->isr_from ? &k->threads[k->isr_from - 1] : NULL;
+    }
     bool live = t && t->state != KT_DEAD && t->state != KT_FREE;
     uint8_t irql = live ? t->ctx.irql : 0;
     uint32_t flags = live ? t->ctx.flags : 0x202;
     if (!(flags & F_IF)) {
         return;
     }
+    /* la línea pendiente de más IRQL (como el PIC: no la de número menor) */
+    int best = -1;
+    uint8_t best_irql = 0;
     for (unsigned level = 0; level < 32; level++) {
         uint32_t obj = k->irq_obj[level];
         if (!(lines & (1u << level)) || !obj) {
             continue;
         }
-        uint8_t level_irql = (uint8_t)rd(k, obj + KI_IRQL);
-        if (level_irql <= irql) {
-            continue;
+        uint8_t li = (uint8_t)rd(k, obj + KI_IRQL);
+        if (li > irql && (best < 0 || li > best_irql)) {
+            best = (int)level;
+            best_irql = li;
         }
-        if (k->isr_thread < 0) {
-            int ti = kps_thread_create(k, 0x4000, 0, 0);
-            if (ti < 0) {
-                return;
-            }
-            k->isr_thread = ti;
-            k->threads[ti].system = true;
-            k->threads[ti].priority = ISR_PRIORITY;
-            k->threads[ti].start = 0;
-        }
-        KThread *it = &k->threads[k->isr_thread];
-        uint32_t esp = it->stack_base - FX_SAVE_AREA - 16 - 12;
-        wr(k, esp, K_STUB_ISR_RETURN);
-        wr(k, esp + 4, obj);
-        wr(k, esp + 8, rd(k, obj + KI_CONTEXT));
-        memset(it->ctx.r, 0, sizeof(it->ctx.r));
-        it->ctx.r[R_ESP] = esp;
-        it->ctx.eip = rd(k, obj + KI_ROUTINE);
-        it->start = it->ctx.eip;
-        it->ctx.flags = 0x002;
-        it->ctx.irql = level_irql;
-        it->state = KT_READY;
-        it->wait_what = NULL;
-        k->in_isr = true;
+    }
+    if (best < 0) {
         return;
     }
+    uint32_t obj = k->irq_obj[best];
+    if (k->isr_thread < 0) {
+        int ti = kps_thread_create(k, 0x4000, 0, 0);
+        if (ti < 0) {
+            return;
+        }
+        k->isr_thread = ti;
+        k->threads[ti].system = true;
+        k->threads[ti].priority = ISR_PRIORITY;
+        k->threads[ti].start = 0;
+    }
+    KThread *it = &k->threads[k->isr_thread];
+    uint32_t esp = it->stack_base - FX_SAVE_AREA - 16 - 12;
+    wr(k, esp, K_STUB_ISR_RETURN);
+    wr(k, esp + 4, obj);
+    wr(k, esp + 8, rd(k, obj + KI_CONTEXT));
+    memset(it->ctx.r, 0, sizeof(it->ctx.r));
+    it->ctx.r[R_ESP] = esp;
+    it->ctx.eip = rd(k, obj + KI_ROUTINE);
+    it->start = it->ctx.eip;
+    it->ctx.flags = 0x002;
+    it->ctx.irql = best_irql;
+    it->state = KT_READY;
+    it->wait_what = NULL;
+    k->in_isr = true;
 }
 
 /* El hilo actual corre a DISPATCH_LEVEL o más (no se cambia de hilo), pero
@@ -770,6 +784,13 @@ bool kps_schedule(Kernel *k, Cpu *c, bool preempt)
     if (k->isr_from && !k->in_isr) {
         /* un ISR interrumpió un hilo a DISPATCH_LEVEL o más: se vuelve a él
          * directo (sin DPC ni otro hilo hasta que baje el IRQL) */
+        irq_dispatch(k, c); /* antes, las otras interrupciones pendientes */
+        if (k->in_isr) {
+            k->cur = k->isr_thread;
+            k->threads[k->cur].state = KT_RUNNING;
+            kps_load(k, c);
+            return true;
+        }
         int f = k->isr_from - 1;
         k->isr_from = 0;
         KThread *x = &k->threads[f];
