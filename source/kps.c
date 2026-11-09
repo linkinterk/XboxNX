@@ -662,11 +662,15 @@ void kps_idle_skip(Kernel *k)
     if (k->in_isr || k->in_dpc) {
         return;
     }
+    int prio = k->cur >= 0 ? k->threads[k->cur].priority : -1000;
     for (int i = 0; i < K_MAX_THREADS; i++) {
-        if (i != k->cur && k->threads[i].state == KT_READY && !k->threads[i].suspend) {
-            return; /* otro hilo puede usar el tiempo */
+        const KThread *t = &k->threads[i];
+        if (i != k->cur && t->state == KT_READY && !t->suspend && t->priority >= prio) {
+            return; /* otro hilo (de igual o más prioridad) puede usar el tiempo */
         }
     }
+    /* los de menos prioridad no correrían mientras este espera (en el Xbox
+     * tampoco); su turno de vez en cuando lo da el planificador igual */
     uint64_t next, before = k->now_ns;
     if (kps_next_deadline(k, &next) && next > k->now_ns) {
         uint64_t cap = k->now_ns + 20000000u;
