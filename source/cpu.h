@@ -107,4 +107,13 @@ CpuStop cpu_run(Cpu *c, uint64_t max);
 CpuStop cpu_step(Cpu *c);
 const char *cpu_stop_text(CpuStop s);
 
+/* El JIT (2d.2): bloques traducidos, búfer usado y cuántas veces se vació. */
+typedef struct CpuJitStats {
+    bool on;
+    uint64_t compiled;
+    size_t used, size;
+    uint32_t flushes;
+} CpuJitStats;
+void cpu_jit_stats(CpuJitStats *s);
+
 #endif

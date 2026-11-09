@@ -2390,6 +2390,18 @@ static Block *get_block(Cpu *c, uint32_t eip)
 #include "cpu_jit.inc"
 #endif
 
+void cpu_jit_stats(CpuJitStats *s)
+{
+    memset(s, 0, sizeof(*s));
+#ifdef HAVE_JIT
+    s->on = g_jit.ok;
+    s->compiled = g_jit.compiled;
+    s->used = g_jit.used;
+    s->size = g_jit.size;
+    s->flushes = g_jit.epoch ? g_jit.epoch - 1 : 0;
+#endif
+}
+
 /* Hasta max instrucciones por bloques; las demás, una a una en step(). */
 static CpuStop run_blocks(Cpu *c, uint64_t max)
 {

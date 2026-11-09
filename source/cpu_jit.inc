@@ -15,11 +15,12 @@
 
 typedef uint32_t (*JitFn)(Cpu *c);
 
-#define JIT_SIZE (8u << 20)
+#define JIT_SIZE_MAX (32u << 20)
 
 static struct {
     uint8_t *rw, *rx;
-    size_t used;
+    size_t size, used;
+    uint64_t compiled; /* bloques traducidos (para la pantalla) */
     uint32_t epoch; /* sube al vaciar el búfer: los bloques de antes ya no valen */
     bool tried, ok;
 #ifdef __SWITCH__
@@ -35,8 +36,12 @@ static bool jit_init(void)
     g_jit.tried = true;
     g_jit.epoch = 1;
 #ifdef __SWITCH__
-    if (R_FAILED(jitCreate(&g_jit.j, JIT_SIZE))) {
-        return false;
+    /* 32 MB (el código de Halo 2 traducido no cabía en 8 y se vaciaba
+     * seguido); si no hay memoria, menos */
+    for (g_jit.size = JIT_SIZE_MAX; R_FAILED(jitCreate(&g_jit.j, g_jit.size)); g_jit.size /= 2) {
+        if (g_jit.size <= (4u << 20)) {
+            return false;
+        }
     }
     if (g_jit.j.type != JitType_CodeMemory && R_FAILED(jitTransitionToExecutable(&g_jit.j))) {
         return false;
@@ -44,7 +49,8 @@ static bool jit_init(void)
     g_jit.rw = jitGetRwAddr(&g_jit.j);
     g_jit.rx = jitGetRxAddr(&g_jit.j);
 #else
-    void *p = mmap(NULL, JIT_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    g_jit.size = JIT_SIZE_MAX;
+    void *p = mmap(NULL, g_jit.size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) {
         return false;
     }
@@ -480,7 +486,7 @@ static bool jit_compile(Cpu *c, Block *b)
     for (int attempt = 0; attempt < 2; attempt++) {
         Em e;
         e.p = (uint32_t *)(g_jit.rw + g_jit.used);
-        e.end = (uint32_t *)(g_jit.rw + JIT_SIZE);
+        e.end = (uint32_t *)(g_jit.rw + g_jit.size);
         e.nexits = 0;
         e.full = false;
         uint32_t *start = e.p;
@@ -521,6 +527,7 @@ static bool jit_compile(Cpu *c, Block *b)
         g_jit.used = (off + len + 15) & ~(size_t)15;
         b->jit = (void *)(g_jit.rx + off);
         b->jit_epoch = g_jit.epoch;
+        g_jit.compiled++;
         return true;
     }
     jit_publish(0, 0);
