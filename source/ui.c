@@ -786,7 +786,7 @@ static void draw_xbox_screen(const UiState *s)
                  (unsigned long long)sw->triangles, (unsigned long long)sw->pixels, sw->skipped_ff, sw->no_target,
                  sw->no_target_why, (unsigned)sw->surf_format, (unsigned)sw->surf_pitch, (unsigned)sw->clip_h,
                  (unsigned)sw->clip_v, sw->vs_errors, (unsigned)hw_scanout());
-        gfx_rrect(14, ly - 4, UI_W - 28, 122, 10, WITH_ALPHA(HEX(0x000000), 200));
+        gfx_rrect(14, ly - 4, UI_W - 28, 144, 10, WITH_ALPHA(HEX(0x000000), 200));
         gfx_text_fit(24, ly, 16, UI_W - 48, C_ON, e);
         ly += 22;
         snprintf(e, sizeof(e), "Último: prim %u, %u vértices, %llu tri, %llu px, %u ocultos, %u tras Z · destino %08X pitch %u fmt %X · Z %08X",
@@ -812,6 +812,10 @@ static void draw_xbox_screen(const UiState *s)
         snprintf(e, sizeof(e), "IRQL %u · DPC en cola %u · %s%s · %u ISR, %u DPC · esperas saltadas %llu (%.1f s) · %s",
                  pirql ? *pirql : 0, kn->ndpc, kn->in_isr ? "en ISR" : "sin ISR", kn->in_dpc ? ", en DPC" : "",
                  kn->isrs_run, kn->dpcs_run, (unsigned long long)r->idle_skips, kn->idle_ns_skipped / 1e9, irq);
+        gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
+        ly += 22;
+        snprintf(e, sizeof(e), "Archivos: %u lecturas (%.1f MB), %u escrituras, %u abiertos · último: %s", kn->reads,
+                 kn->bytes_read / 1048576.0, kn->writes, kn->files_open, kn->last_io[0] ? kn->last_io : "-");
         gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
     } else {
         snprintf(b, sizeof(b), "Pantalla del Xbox: el juego todavía no eligió un modo de video");

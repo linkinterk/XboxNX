@@ -732,6 +732,13 @@ static void complete(KCall *c)
 
 /* Una petición asíncrona que terminó informa STATUS_PENDING (como el DMA del
  * Xbox); una que falla de entrada devuelve el error y deja todo como estaba. */
+/* Para la pantalla: "L ...ruta" o "E ...ruta" (el final de la ruta). */
+static void set_last_io(Kernel *k, char kind, const char *path)
+{
+    size_t n = strlen(path), cap = sizeof(k->last_io) - 3;
+    snprintf(k->last_io, sizeof(k->last_io), "%c %s", kind, n > cap ? path + n - cap : path);
+}
+
 static uint32_t io_finish(KCall *c, const KFile *f, uint32_t st, uint32_t n, bool pend)
 {
     if (f->async && st >= 0xC0000000u) {
@@ -803,6 +810,7 @@ static uint64_t NtReadFile(KCall *c)
         return ST_INVALID_HANDLE;
     }
     note(c, "%s", f->path);
+    set_last_io(k, 'L', f->path);
     uint32_t len = c->a[6];
     bool named;
     uint64_t off = io_offset(k, f, c->a[7], &named);
@@ -851,6 +859,7 @@ static uint64_t NtReadFileScatter(KCall *c)
         return ST_INVALID_HANDLE;
     }
     note(c, "%s", f->path);
+    set_last_io(k, 'L', f->path);
     if (f->is_dir || f->kind == F_VOLUME) {
         return ST_INVALID_DEVICE_REQUEST;
     }
@@ -887,6 +896,7 @@ static uint64_t NtWriteFile(KCall *c)
         return ST_INVALID_HANDLE;
     }
     note(c, "%s", f->path);
+    set_last_io(k, 'E', f->path);
     uint32_t len = c->a[6];
     bool named;
     uint64_t off = io_offset(k, f, c->a[7], &named);

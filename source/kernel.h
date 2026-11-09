@@ -198,6 +198,7 @@ typedef struct Kernel {
     const struct XDisc *disc;    /* el disco del juego (D:) */
     char hdd_root[192];          /* carpeta del disco duro virtual */
     unsigned files_open, reads, writes;
+    char last_io[72];            /* la última lectura o escritura (para la pantalla) */
     uint64_t bytes_read;
     /* sistema (ksys.c) */
     uint32_t xbe_base, xbe_sector, xbe_size;  /* el XBE en memoria y en el disco */
