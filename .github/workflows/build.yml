@@ -83,6 +83,24 @@ jobs:
           CPU_BLOQUES=1 python3 tests/fp_diff.py ./cpu_diff_arm 3000 5
           CPU_BLOQUES=1 CPU_BLOQUES_N=1000 python3 tests/fp_diff.py ./cpu_diff_arm 3000 7
           python3 tests/fp_diff.py ./cpu_diff_arm 3000 6
+      - name: JIT a ARM64 (2d.2) contra el intérprete y Unicorn, con qemu
+        run: |
+          CPU_JIT=1 python3 tests/block_seq.py ./cpu_diff_arm 3000 3
+          CPU_JIT=1 CPU_BLOQUES=1 CPU_BLOQUES_N=1000 python3 tests/fp_diff.py ./cpu_diff_arm 2000 8
+          CPU_JIT=1 CPU_BLOQUES=1 CPU_BLOQUES_N=1000 python3 tests/flags_pair.py ./cpu_diff_arm 3000 8
+          mkdir -p a64
+          for f in source/apu/apu.c source/apu/vp/vp.c source/apu/vp/resample.c source/apu/dsp/dsp.c source/apu/dsp/dsp_cpu.c source/apu/dsp/dsp_dma.c source/apu/dsp/gp_ep.c source/apu/dsp/debug.c source/vsh/nv2a_vsh_cpu.c source/vsh/nv2a_vsh_disassembler.c source/vsh/nv2a_vsh_emulator.c source/vsh/nv2a_vsh_emulator_execution_state.c source/usb/usb.c source/usb/usb_hub.c source/usb/xid.c source/usb/ohci.c; do
+            aarch64-linux-gnu-gcc -std=gnu11 -O1 -w -Isource -c $f -o a64/$(basename $f .c).o
+          done
+          mkdir -p build-test/hdd
+          python3 tests/mkxiso.py build-test/t.iso
+          aarch64-linux-gnu-gcc -std=gnu11 -O1 -Wall -Wextra -Werror -static -Isource -o kernel_test_a64 tests/kernel_test.c \
+            source/vm.c source/kernel.c source/kmm.c source/kob.c source/kps.c source/kio.c source/ksys.c source/xc_crypto.c \
+            source/hw.c source/nv2a_sw.c source/workers.c source/prof.c source/aci.c a64/*.o source/disc.c source/cpu.c source/runner.c -lm -lpthread
+          aarch64-linux-gnu-gcc -std=gnu11 -O2 -ffp-contract=off -static -Isource -o bench_a64 tests/bench.c source/cpu.c source/vm.c -lm
+          qemu-aarch64 ./kernel_test_a64 build-test/t.iso
+          qemu-aarch64 ./bench_a64 100
+          SIN_JIT=1 qemu-aarch64 ./bench_a64 100
 
   switch:
     name: XboxNX.nro (Switch)

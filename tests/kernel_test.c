@@ -472,10 +472,11 @@ static void block_tests(void)
     uint32_t imm_at = at + 11;
     memcpy(code + 2, &imm_at, 4);
     vm_write(&vm, at, code, sizeof(code));
-    for (int pass = 0; pass < 2; pass++) {
+    for (int pass = 0; pass < 3; pass++) {
         Cpu c;
         cpu_init(&c, &vm);
         c.use_blocks = true;
+        c.jit_hot = pass == 2; /* JIT (solo en ARM64) */
         c.eip = at;
         c.r[R_ESP] = at + 0x1F00;
         CHECK(cpu_run(&c, 100) == CPU_HLT);
@@ -490,11 +491,12 @@ static void block_tests(void)
         0x6B, 0xC0, 0x03, 0x83, 0xF0, 0x55, 0xC3,
     };
     vm_write(&vm, at, loop, sizeof(loop));
-    uint32_t regs[2][8];
-    for (int mode = 0; mode < 2; mode++) {
+    uint32_t regs[3][8];
+    for (int mode = 0; mode < 3; mode++) {
         Cpu c;
         cpu_init(&c, &vm);
-        c.use_blocks = mode;
+        c.use_blocks = mode >= 1;
+        c.jit_hot = mode == 2 ? 2 : 0; /* JIT (solo en ARM64) */
         c.eip = at;
         c.r[R_ECX] = 5000;
         c.r[R_ESI] = c.r[R_EDI] = at + 0x1000;
@@ -505,6 +507,7 @@ static void block_tests(void)
         cpu_free(&c);
     }
     CHECK(memcmp(regs[0], regs[1], sizeof(regs[0])) == 0);
+    CHECK(memcmp(regs[0], regs[2], sizeof(regs[0])) == 0);
 }
 
 static void sys_tests(void)

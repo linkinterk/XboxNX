@@ -89,6 +89,7 @@ typedef struct Cpu {
     uint8_t lf_op, lf_sz, lf_cin; /* flags perezosos (cpu.c): la última operación */
     uint32_t lf_a, lf_b, lf_res;
     bool use_blocks;            /* cpu_run por bloques decodificados (etapa 2d.1) */
+    uint8_t jit_hot;            /* JIT a ARM64 (2d.2): veces que corre un bloque antes de traducirlo; 0 sin JIT */
     void *blocks;               /* su tabla (cpu.c) */
     uint32_t fetch_page;        /* la página del código en curso (cpu.c) */
     const uint8_t *fetch_host;

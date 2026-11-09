@@ -72,6 +72,7 @@ int main(void)
         /* CPU_BLOQUES=1: por los bloques decodificados (cpu_run de a una) */
         static void *blocks;
         c.use_blocks = getenv("CPU_BLOQUES") != NULL;
+        c.jit_hot = getenv("CPU_JIT") != NULL; /* JIT (solo ARM64): traducir a la primera */
         c.blocks = blocks;
         /* CPU_BLOQUES_N=k: las k instrucciones de una vez (dentro de un bloque) */
         const char *nk = getenv("CPU_BLOQUES_N");

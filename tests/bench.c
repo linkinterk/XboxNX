@@ -37,6 +37,7 @@ int main(int argc, char **argv)
     Cpu c;
     cpu_init(&c, &vm);
     c.use_blocks = getenv("SIN_BLOQUES") == NULL;
+    c.jit_hot = getenv("SIN_JIT") == NULL && c.use_blocks ? 2 : 0; /* solo en ARM64 */
     c.eip = 0x1000;
     c.r[R_ECX] = (uint32_t)(mi * 1e6 / (use_mmx ? 12 : 16));
     c.r[R_ESI] = c.r[R_EDI] = 0x100000;

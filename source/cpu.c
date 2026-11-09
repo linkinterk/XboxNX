@@ -10,6 +10,17 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#if defined(__aarch64__)
+#include <stddef.h>
+#ifdef __SWITCH__
+#include <switch/types.h>
+#include <switch/result.h>
+#include <switch/arm/cache.h>
+#include <switch/kernel/jit.h>
+#else
+#include <sys/mman.h>
+#endif
+#endif
 #include <string.h>
 
 /* ---- memoria ---- */
@@ -1412,6 +1423,9 @@ struct Insn {
 typedef struct Block {
     uint32_t eip, ppage, gen;
     unsigned n;
+    void *jit;            /* su traducción a ARM64 (2d.2), si la hay */
+    uint32_t jit_epoch;   /* del búfer del JIT en que se tradujo */
+    uint32_t hits;        /* veces que corrió sin traducción */
     Insn in[];
 } Block;
 
@@ -2334,11 +2348,19 @@ static Block *get_block(Cpu *c, uint32_t eip)
     }
     nb->gen = c->vm->gen[pp];
     nb->n = n;
+    nb->jit = NULL;
+    nb->jit_epoch = 0;
+    nb->hits = 0;
     memcpy(nb->in, tmp, n * sizeof(Insn));
     s->eip = eip;
     s->b = nb;
     return nb;
 }
+
+#if defined(__aarch64__)
+#define HAVE_JIT 1
+#include "cpu_jit.inc"
+#endif
 
 /* Hasta max instrucciones por bloques; las demás, una a una en step(). */
 static CpuStop run_blocks(Cpu *c, uint64_t max)
@@ -2354,6 +2376,36 @@ static CpuStop run_blocks(Cpu *c, uint64_t max)
             continue;
         }
         c->trace[c->trace_pos++ % CPU_TRACE] = b->eip;
+#ifdef HAVE_JIT
+        if (c->jit_hot) {
+            bool have = b->jit && b->jit_epoch == g_jit.epoch;
+            if (!have && ++b->hits >= c->jit_hot) {
+                have = jit_compile(c, b);
+            }
+            if (have && done + b->n <= max) {
+                unsigned k = ((JitFn)b->jit)(c);
+                c->icount += k;
+                done += k;
+                if (c->stop != CPU_RUNNING) {
+                    const Insn *in = &b->in[k];
+                    c->stop_eip = in->start;
+                    vm_read(c->vm, in->start, c->stop_bytes, sizeof(c->stop_bytes));
+                    if (c->stop == CPU_FAULT || c->stop == CPU_UNIMPL || c->stop == CPU_DIVIDE) {
+                        c->eip = in->start;
+                    }
+                    return c->stop;
+                }
+                const Insn *last = &b->in[b->n - 1];
+                if (k == b->n && done < max && !ends_block(last->fn) && c->eip == last->next) {
+                    if (step(c) != CPU_RUNNING) { /* la siguiente no tenía función */
+                        return c->stop;
+                    }
+                    done++;
+                }
+                continue;
+            }
+        }
+#endif
         unsigned i = 0;
         for (; i < b->n && done < max; i++) {
             const Insn *in = &b->in[i];
