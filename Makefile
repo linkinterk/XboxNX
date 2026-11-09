@@ -40,7 +40,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET		:=	XboxNX
 APP_TITLE	:=	XboxNX
 APP_AUTHOR	:=	Jairo (basado en hakuX)
-APP_VERSION	:=	0.1.0
+APP_VERSION	:=	0.2.0
 BUILD		:=	build
 SOURCES		:=	source
 DATA		:=	data
@@ -62,7 +62,7 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS	:= -lnx
+LIBS	:= -lnx -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing

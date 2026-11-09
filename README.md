@@ -5,7 +5,7 @@ Port del emulador de Xbox original **hakuX** a Nintendo Switch, nativo (homebrew
 
 | Etapa | Qué hace | Estado |
 |---|---|---|
-| 1. Cargador | Lee la ISO de la SD, abre el disco de Xbox, analiza `default.xbe` y prueba el hardware | **Esta versión** |
+| 1. Cargador | Biblioteca con la imagen de cada juego, lee la ISO, analiza `default.xbe` y prueba el hardware | **Esta versión** |
 | 2. CPU y memoria | Traductor x86→ARM64 (FEX) sobre el JIT de la Switch, memoria del Xbox | Pendiente |
 | 3. Kernel, audio, controles | Kernel de Xbox de hakuX, audio MCPX, controles | Pendiente |
 | 4. Gráficos | Renderizador NV2A de Vulkan a deko3d | Pendiente |
@@ -21,11 +21,16 @@ Port del emulador de Xbox original **hakuX** a Nintendo Switch, nativo (homebrew
 4. Abre el Homebrew Menu **manteniendo R sobre un juego** (modo aplicación,
    más RAM) y entra a XboxNX.
 
-Controles: **A** abrir juego · **L/R** cambiar página · **X** pruebas de
-hardware · **B** volver · **+** salir.
+Controles: **A** o tocar la tarjeta: abrir · **L/R** cambiar pestaña · **X**
+pruebas de hardware · **Y** buscar juegos otra vez · **B** volver · **+** salir.
 
 En la pantalla de pruebas (X), pulsa **A** para la prueba de excepciones y
 manda una foto del resultado: decide cómo se hace la etapa 2.
+
+## Vista previa en la PC
+
+`tools/preview.c` dibuja todas las pantallas a PNG con juegos de ejemplo
+inventados (ver el comentario del archivo).
 
 ## Compilar
 
@@ -36,5 +41,6 @@ con devkitPro instalado: `make`.
 
 GPL-3.0-or-later (ver `COPYING`). Basado en
 [hakuX](https://github.com/rfandango/hakuX) de rfandango (GPL-3.0-or-later), que
-a su vez toma partes de xemu. No incluye software de Microsoft: necesitas tus
+a su vez toma partes de xemu. Texto con stb_truetype (dominio público / MIT).
+El ícono es original. No incluye software de Microsoft: necesitas tus
 propias imágenes de disco.

@@ -51,6 +51,30 @@ static void count_thunks(Game *g)
     free(buf);
 }
 
+/* La imagen del juego: $$XTIMAGE, si no la de partidas guardadas $$XSIMAGE. */
+static void load_icon(Game *g)
+{
+    static const char *names[] = {"$$XTIMAGE", "$$XSIMAGE"};
+    for (unsigned n = 0; n < 2; n++) {
+        for (unsigned i = 0; i < g->xbe.nsections; i++) {
+            const XbeSection *s = &g->xbe.sections[i];
+            if (strcmp(s->name, names[n]) != 0 || !s->raw_size || s->raw_size > 4u * 1024 * 1024) {
+                continue;
+            }
+            uint8_t *buf = malloc(s->raw_size);
+            if (!buf) {
+                return;
+            }
+            if (xdisc_read(&g->disc, &g->xbe_file, s->raw_off, buf, s->raw_size) &&
+                xpr_decode(buf, s->raw_size, &g->icon) == 0) {
+                free(buf);
+                return;
+            }
+            free(buf);
+        }
+    }
+}
+
 bool game_open(Game *g, const char *path)
 {
     memset(g, 0, sizeof(*g));
@@ -100,11 +124,13 @@ bool game_open(Game *g, const char *path)
         return false;
     }
     count_thunks(g);
+    load_icon(g);
     return true;
 }
 
 void game_close(Game *g)
 {
+    ximage_free(&g->icon);
     xdisc_close(&g->disc);
 }
 

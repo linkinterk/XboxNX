@@ -22,7 +22,7 @@ jobs:
       - name: Compilar y correr
         run: |
           gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
-            -o build-test/host_test tests/host_test.c source/disc.c source/xbe.c source/game.c
+            -o build-test/host_test tests/host_test.c source/disc.c source/xbe.c source/game.c source/xpr.c
           ./build-test/host_test build-test/t.iso XISO
           ./build-test/host_test build-test/full.iso "Disco completo XGD2"
 

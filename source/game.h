@@ -7,6 +7,7 @@
 
 #include "disc.h"
 #include "xbe.h"
+#include "xpr.h"
 
 #define GAME_MAX_ROOT 128
 
@@ -27,6 +28,7 @@ typedef struct Game {
     uint16_t max_ordinal;     /* el ordinal más alto que pide */
     unsigned nroot;
     GameRootEntry root[GAME_MAX_ROOT];
+    XImage icon;              /* imagen del juego ($$XTIMAGE), px NULL si no hay */
     char error[128];
 } Game;
 

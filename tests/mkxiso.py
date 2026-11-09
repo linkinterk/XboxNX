@@ -30,7 +30,7 @@ def make_xbe():
     struct.pack_into("<I", h, 0x10C, 0x5000)              # tamaño de imagen
     struct.pack_into("<I", h, 0x114, 0x40000000)
     struct.pack_into("<I", h, 0x118, base + 0x200)        # certificado
-    struct.pack_into("<I", h, 0x11C, 2)                   # secciones
+    struct.pack_into("<I", h, 0x11C, 3)                   # secciones
     struct.pack_into("<I", h, 0x120, base + 0x400)
     struct.pack_into("<I", h, 0x128, (base + 0x1000) ^ ENTRY_KEY)
     struct.pack_into("<I", h, 0x158, (base + 0x2000) ^ THUNK_KEY)
@@ -46,7 +46,9 @@ def make_xbe():
     # secciones (56 bytes): flags, va, vsize, raw_off, raw_size, name_va
     struct.pack_into("<IIIIII", h, 0x400, 0x06, base + 0x1000, 0x1000, 0x1000, 0x1000, base + 0x500)
     struct.pack_into("<IIIIII", h, 0x400 + 56, 0x03, base + 0x2000, 0x1000, 0x2000, 0x1000, base + 0x508)
+    struct.pack_into("<IIIIII", h, 0x400 + 112, 0x00, base + 0x3000, 0x1000, 0x3000, 0x1000, base + 0x510)
     h[0x500:0x506] = b".text\0"
+    h[0x510:0x51A] = b"$$XTIMAGE\0"
     h[0x508:0x50F] = b".rdata\0"
     # librerías (16 bytes)
     struct.pack_into("<8sHHHH", h, 0x600, b"XAPILIB", 1, 0, 5849, 1)
@@ -56,7 +58,24 @@ def make_xbe():
     rdata = bytearray(0x1000)
     for i, ordn in enumerate([1, 49, 187, 366]):           # 4 imports, termina en 0
         struct.pack_into("<I", rdata, i * 4, 0x80000000 | ordn)
-    return bytes(h) + bytes(text) + bytes(rdata)
+    # $$XTIMAGE: XPR0 de 4x4 ARGB8888 con swizzle; el píxel (x, y) es R=x*40, G=y*40.
+    img = bytearray(0x1000)
+    fmt = (2 << 24) | (2 << 20) | (0x06 << 8)
+    struct.pack_into("<4sIIIIIII", img, 0, b"XPR0", 0x60, 0x20, 0, 0, 0, fmt, 0)
+    def dep(v, mask):
+        r, bit = 0, 1
+        while mask:
+            low = mask & -mask
+            if v & 1:
+                r |= low
+            v >>= 1
+            mask &= mask - 1
+        return r
+    for y in range(4):
+        for x in range(4):
+            i = dep(y, 0b1010) | dep(x, 0b0101)
+            struct.pack_into("<I", img, 0x20 + i * 4, 0xFF000000 | ((x * 40) << 16) | ((y * 40) << 8) | 7)
+    return bytes(h) + bytes(text) + bytes(rdata) + bytes(img)
 
 
 def main():

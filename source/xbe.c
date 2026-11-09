@@ -52,10 +52,10 @@ static bool hva(uint32_t base, uint32_t hdr_len, uint32_t va, uint32_t len, uint
     return true;
 }
 
-static void copy_name(char dst[9], const uint8_t *src, uint32_t max)
+static void copy_name(char *dst, uint32_t cap, const uint8_t *src, uint32_t max)
 {
     uint32_t i;
-    for (i = 0; i < 8 && i < max && src[i]; i++) {
+    for (i = 0; i + 1 < cap && i < max && src[i]; i++) {
         dst[i] = (char)src[i];
     }
     dst[i] = '\0';
@@ -126,7 +126,7 @@ int xbe_parse(const uint8_t *hdr, uint32_t hdr_len, XbeInfo *out)
         d->raw_size = rd32(s + 0x10);
         uint32_t noff;
         if (hva(out->base, hdr_len, rd32(s + 0x14), 1, &noff)) {
-            copy_name(d->name, hdr + noff, hdr_len - noff);
+            copy_name(d->name, sizeof(d->name), hdr + noff, hdr_len - noff);
         }
     }
     out->nsections = nsec;
@@ -139,7 +139,7 @@ int xbe_parse(const uint8_t *hdr, uint32_t hdr_len, XbeInfo *out)
     for (uint32_t i = 0; i < nlib; i++) {
         const uint8_t *l = hdr + off + i * LIB_SIZE;
         XbeLib *d = &out->libs[i];
-        copy_name(d->name, l, 8);
+        copy_name(d->name, sizeof(d->name), l, 8);
         d->major = rd16(l + 8);
         d->minor = rd16(l + 10);
         d->build = rd16(l + 12);

@@ -24,7 +24,7 @@
 #define XBE_MAX_LIBS     48
 
 typedef struct XbeSection {
-    char     name[9];
+    char     name[16];      /* "$$XTIMAGE" tiene 9 letras */
     uint32_t flags;
     uint32_t va;
     uint32_t vsize;
