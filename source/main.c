@@ -22,8 +22,9 @@
 #include "probe.h"
 #include "ui.h"
 #include "usb/usb.h"
+#include "prof.h"
 
-#define APP_VER   "0.15.1"
+#define APP_VER   "0.15.2"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -92,6 +93,10 @@ static void load_into_memory(void)
 
 static void present(void)
 {
+    if (g_ui.screen == UI_RUN) {
+        prof_take(g_ui.prof);
+    }
+    prof_push(PROF_UI);
     ui_draw(&g_ui);
     u32 stride;
     u8 *dst = framebufferBegin(&g_fb, &stride);
@@ -99,6 +104,7 @@ static void present(void)
         memcpy(dst + (size_t)y * stride, &g_shadow[y * UI_W], UI_W * 4);
     }
     framebufferEnd(&g_fb);
+    prof_pop();
 }
 
 static bool has_ext(const char *name)
@@ -378,7 +384,7 @@ int main(int argc, char **argv)
             if (g_ui.run_screen) {
                 u64 held = padGetButtons(&pad);
                 NcPadState ps = {0};
-                if ((held & HidNpadButton_StickL) && (held & HidNpadButton_StickR)) {
+                if (((held & HidNpadButton_StickL) && (held & HidNpadButton_StickR)) || tx >= 0) {
                     g_ui.run_screen = false;
                     dirty = true;
                 } else {

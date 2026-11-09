@@ -2,6 +2,7 @@
  * XboxNX — ejecución del juego en el intérprete, con varios hilos (etapa 3b).
  */
 #include "runner.h"
+#include "prof.h"
 
 #include "hw.h"
 
@@ -242,7 +243,9 @@ RunState runner_slice(Runner *r, uint64_t max)
         uint64_t before = r->cpu.icount;
         r->cpu.clock_icount = before; /* rdtsc: k->now_ns vale hasta aquí */
         r->cpu.ns_per_instr = k->ns_per_instr ? k->ns_per_instr : 1;
+        prof_push(PROF_CPU);
         CpuStop st = cpu_run(&r->cpu, n);
+        prof_pop();
         uint64_t done = r->cpu.icount - before;
         max = done + 1 >= max ? 0 : max - done - 1; /* al menos 1 por vuelta */
         r->quantum_left = done >= r->quantum_left ? 0 : r->quantum_left - done;
@@ -257,7 +260,9 @@ RunState runner_slice(Runner *r, uint64_t max)
             continue;
         }
         if (st == CPU_KCALL) {
+            prof_push(PROF_KERNEL);
             kernel_call(r);
+            prof_pop();
             continue;
         }
         r->state = RUN_CPU_STOP;

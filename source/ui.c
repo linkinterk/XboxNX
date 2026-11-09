@@ -14,6 +14,7 @@
 #include "hw.h"
 #include "apu/apu.h"
 #include "nv2a_sw.h"
+#include "prof.h"
 #include "usb/usb.h"
 
 #define C_BG        HEX(0x121212)
@@ -775,7 +776,7 @@ static void draw_xbox_screen(const UiState *s)
                 o += snprintf(d2 + o, sizeof(d2) - (size_t)o, " %02X", dw->formats[i]);
             }
         }
-        gfx_text_fit(20, BOTBAR_Y + 22, 15, 700, C_ON_VAR, d2);
+        gfx_text_fit(20, BOTBAR_Y + 22, 15, 880, C_ON_VAR, d2);
         /* el dibujo por software: el último dibujo con lo que dio */
         const SwStats *sw = sw_stats();
         const __typeof__(sw->last) *L = &sw->last;
@@ -810,7 +811,9 @@ static void draw_xbox_screen(const UiState *s)
     gfx_text_fit(20, 6, 18, UI_W - 40, C_ON_VAR, b);
     /* aquí los botones son del juego: L3 + R3 vuelve al registro */
     gfx_rect(0, BOTBAR_Y, UI_W, 1, C_OUTLINE);
-    gfx_text(UI_W - 470, BOTBAR_Y + 20, 18, C_ON, "Botones del juego · L3 + R3: registro");
+    /* los botones son del juego: para salir, tocar la pantalla (o L3 + R3) */
+    gfx_rrect(UI_W - 330, BOTBAR_Y + 10, 310, 44, 22, C_SURF_HI);
+    gfx_text_center(UI_W - 330, 310, BOTBAR_Y + 21, 19, C_ON, "Toca aquí para salir");
     const UsbStats *us = usb_stats();
     snprintf(b, sizeof(b), "Control: %s · el juego lo leyó %u veces", us->operational ? "USB activo" : "USB sin iniciar",
              us->polls);
@@ -826,7 +829,16 @@ static void draw_run(const UiState *s)
     const UiCard *c = &s->cards[s->sel];
     const Runner *r = s->run;
     char sub[320];
-    snprintf(sub, sizeof(sub), "%s en el intérprete x86", c->title[0] ? c->title : c->file);
+    if (r->state == RUN_ACTIVE && (s->prof[0] | s->prof[1] | s->prof[2] | s->prof[3] | s->prof[5])) {
+        /* en qué se va el tiempo real */
+        int o = snprintf(sub, sizeof(sub), "Tiempo:");
+        for (int i = 0; i < PROF_N && o < (int)sizeof(sub) - 20; i++) {
+            o += snprintf(sub + o, sizeof(sub) - (size_t)o, "%s %s %u%%", i ? " ·" : "", prof_name((ProfPart)i),
+                          (s->prof[i] + 5) / 10);
+        }
+    } else {
+        snprintf(sub, sizeof(sub), "%s en el intérprete x86", c->title[0] ? c->title : c->file);
+    }
     top_bar(s, sub);
     if (!r) {
         return;

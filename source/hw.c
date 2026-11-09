@@ -3,6 +3,7 @@
  */
 #include "hw.h"
 #include "nv2a_sw.h"
+#include "prof.h"
 #include "usb/usb.h"
 
 #include <stdio.h>
@@ -473,7 +474,16 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
 }
 
 /* Recorre el push buffer de GET a PUT (o hasta tener que esperar). */
+static void pb_run_(Kernel *k);
+
 static void pb_run(Kernel *k)
+{
+    prof_push(PROF_GPU);
+    pb_run_(k);
+    prof_pop();
+}
+
+static void pb_run_(Kernel *k)
 {
     uint32_t inst = (nv_ld(NV_PFIFO_CACHE1_DMA_INSTANCE) & 0xFFFFu) << 4;
     uint32_t base = 0, limit = 0x07FFFFFFu;
@@ -780,9 +790,13 @@ void hw_tick(Kernel *k)
         nv_st(NV_PTIMER_INTR_0, nv_ld(NV_PTIMER_INTR_0) | 1);
         g_hw.alarm_due += 1ull << 32;
     }
+    prof_push(PROF_HW);
     aci_tick(k);
-    apu_tick(k);
     usb_tick(k->now_ns);
+    prof_pop();
+    prof_push(PROF_APU);
+    apu_tick(k);
+    prof_pop();
 }
 
 bool hw_next_event(const Kernel *k, uint64_t *ns)

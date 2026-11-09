@@ -52,6 +52,7 @@ typedef struct UiState {
     const Runner *run;
     int run_scroll;          /* -1: seguir la última llamada */
     int stage_scroll;        /* la tabla de etapas */
+    unsigned prof[8];        /* el reparto del tiempo real (prof.h), en milésimas */
     int stage_back;          /* la pantalla a la que vuelve */
     bool run_screen;         /* X: ver la pantalla del Xbox en vez del registro */
     /* pruebas */
