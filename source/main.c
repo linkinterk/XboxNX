@@ -22,7 +22,7 @@
 #include "probe.h"
 #include "ui.h"
 
-#define APP_VER   "0.9.0"
+#define APP_VER   "0.10.0"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 

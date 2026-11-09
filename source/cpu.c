@@ -36,6 +36,10 @@ static uint32_t mrd(Cpu *c, uint32_t a, int sz)
     }
     uint8_t b[4] = {0};
     if (!vm_read(c->vm, a, b, (size_t)sz)) {
+        uint32_t v = 0;
+        if (c->mmio && c->mmio(c->dev, a, sz, false, &v)) {
+            return v;
+        }
         fault(c, a, false);
         return 0;
     }
@@ -51,6 +55,9 @@ static void mwr(Cpu *c, uint32_t a, int sz, uint32_t v)
         return;
     }
     if (!vm_write(c->vm, a, b, (size_t)sz)) {
+        if (c->mmio && c->mmio(c->dev, a, sz, true, &v)) {
+            return;
+        }
         fault(c, a, true);
     }
 }
@@ -593,8 +600,9 @@ static void two_byte(Cpu *c, const Dec *d, int osz)
     case 0x1F: /* nop Ev */
         modrm_ea(c, d, fetch8(c));
         return;
-    case 0x31: { /* rdtsc */
-        uint64_t t = c->icount;
+    case 0x31: { /* rdtsc: el Pentium III a 733 MHz sobre el tiempo virtual */
+        uint64_t ns = c->clock_ns ? *c->clock_ns + (c->icount - c->clock_icount) : c->icount;
+        uint64_t t = ns * 733 / 1000;
         c->r[R_EAX] = (uint32_t)t;
         c->r[R_EDX] = (uint32_t)(t >> 32);
         return;
@@ -1176,6 +1184,21 @@ CpuStop cpu_step(Cpu *c)
         break;
     case 0xF8: c->flags &= ~F_CF; break;
     case 0xF9: c->flags |= F_CF; break;
+    case 0xE4: case 0xE5: case 0xEC: case 0xED: { /* in */
+        int sz = (op & 1) ? osz : 1;
+        uint16_t port = op < 0xEC ? fetch8(c) : (uint16_t)c->r[R_EDX];
+        uint32_t ones = sz == 4 ? 0xFFFFFFFFu : (1u << (8 * sz)) - 1;
+        reg_set(c, R_EAX, sz, c->port_in ? c->port_in(c->dev, port, sz) : ones);
+        break;
+    }
+    case 0xE6: case 0xE7: case 0xEE: case 0xEF: { /* out */
+        int sz = (op & 1) ? osz : 1;
+        uint16_t port = op < 0xEE ? fetch8(c) : (uint16_t)c->r[R_EDX];
+        if (c->port_out) {
+            c->port_out(c->dev, port, sz, reg_get(c, R_EAX, sz));
+        }
+        break;
+    }
     case 0xFA: c->flags &= ~F_IF; break;
     case 0xFB: c->flags |= F_IF; break;
     case 0xFC: c->flags &= ~F_DF; break;

@@ -13,8 +13,9 @@ Port del emulador de Xbox original **hakuX** a Nintendo Switch, nativo (homebrew
 | 3a. Kernel: memoria y objetos | Memoria contigua y virtual, pool, pilas, handles, eventos, semáforos, mutex (44 funciones reales) | Lista |
 | 3b. Kernel: hilos y tiempo | Varios hilos con prioridades y turnos, esperas, secciones críticas, temporizadores, DPC, tiempo virtual (97 funciones reales) | Lista |
 | 3c. Kernel: archivos | D: desde la ISO, disco duro del Xbox en `sd:/switch/XboxNX/hdd`, carpetas, enlaces, dispositivos (130 funciones reales) | Lista |
-| 3d. Kernel: sistema | Rtl (cadenas, memoria, tiempo), configuración de la consola (EEPROM), cerrojos, secciones del XBE, HAL, AV, criptografía Xc (199 funciones reales) | **Esta versión** |
-| 3e–3g | Hardware simulado, audio, controles | Pendiente |
+| 3d. Kernel: sistema | Rtl (cadenas, memoria, tiempo), configuración de la consola (EEPROM), cerrojos, secciones del XBE, HAL, AV, criptografía Xc (199 funciones reales) | Lista |
+| 3e. Hardware simulado | Registros del GPU NV2A (temporizador, vblank, interrupción, cola de comandos sin dibujar), USB, audio y red como registros, puertos de E/S, interrupciones y su hilo | **Esta versión** |
+| 3f–3g | Audio, controles | Pendiente |
 | 4. Gráficos | Renderizador NV2A de Vulkan a deko3d | Pendiente |
 | 5. Optimizar | Velocidad en el CPU de la Switch | Pendiente |
 

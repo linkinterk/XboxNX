@@ -77,6 +77,14 @@ typedef struct Cpu {
 
     uint32_t trace[CPU_TRACE]; /* las últimas EIP */
     unsigned trace_pos;
+
+    /* el hardware (hw.c): registros de los chips, puertos de E/S y el reloj */
+    bool (*mmio)(void *dev, uint32_t addr, int size, bool write, uint32_t *value);
+    uint32_t (*port_in)(void *dev, uint16_t port, int size);
+    void (*port_out)(void *dev, uint16_t port, int size, uint32_t value);
+    void *dev;
+    const uint64_t *clock_ns;   /* tiempo virtual (para rdtsc), hasta clock_icount */
+    uint64_t clock_icount;
 } Cpu;
 
 void cpu_init(Cpu *c, Vm *vm);

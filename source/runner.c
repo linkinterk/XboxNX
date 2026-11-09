@@ -3,6 +3,8 @@
  */
 #include "runner.h"
 
+#include "hw.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -68,6 +70,11 @@ bool runner_boot(Runner *r, Vm *vm, Kernel *k, const LoadReport *load)
     *vm_host(vm, pcr + 0x24) = 0; /* PASSIVE_LEVEL */
 
     cpu_init(&r->cpu, vm);
+    r->cpu.mmio = hw_mmio;
+    r->cpu.port_in = hw_port_in;
+    r->cpu.port_out = hw_port_out;
+    r->cpu.dev = k;
+    r->cpu.clock_ns = &k->now_ns;
     k->cur = ti;
     t->state = KT_RUNNING;
     kps_load(k, &r->cpu);
@@ -86,6 +93,9 @@ static void finish(Runner *r, RunState st, const char *fmt, const char *a, uint3
 static void reschedule(Runner *r, bool preempt)
 {
     r->quantum_left = QUANTUM;
+    if (preempt && *vm_host(r->cpu.vm, K_KPCR_VA + 0x24) >= 2) {
+        return; /* a DISPATCH_LEVEL o más no se cambia de hilo */
+    }
     if (kps_schedule(r->k, &r->cpu, preempt)) {
         r->cpu.stop = CPU_RUNNING;
         return;
@@ -133,6 +143,11 @@ static void kernel_call(Runner *r)
     }
     if (ord == K_ORD_DPC_RETURN) {
         kps_dpc_return(k, c);
+        reschedule(r, false);
+        return;
+    }
+    if (ord == K_ORD_ISR_RETURN) {
+        kps_isr_return(k);
         reschedule(r, false);
         return;
     }
@@ -198,6 +213,16 @@ static void kernel_call(Runner *r)
         reschedule(r, false);
         return;
     }
+    if (kc.tail_eip) { /* saltar a tail_eip(tail_arg) con la vuelta del que llamó */
+        uint32_t back = vm_rd32(c->vm, esp);
+        uint32_t nesp = esp + 4 + kernel_pop_bytes(e) - 8;
+        vm_wr32(c->vm, nesp, back);
+        vm_wr32(c->vm, nesp + 4, kc.tail_arg);
+        c->r[R_ESP] = nesp;
+        c->eip = kc.tail_eip;
+        c->stop = CPU_RUNNING;
+        return;
+    }
     /* volver al que llamó */
     c->r[R_EAX] = (uint32_t)ret;
     c->r[R_EDX] = (uint32_t)(ret >> 32);
@@ -215,6 +240,7 @@ RunState runner_slice(Runner *r, uint64_t max)
     while (r->state == RUN_ACTIVE && max) {
         uint64_t n = max < r->quantum_left ? max : r->quantum_left;
         uint64_t before = r->cpu.icount;
+        r->cpu.clock_icount = before; /* rdtsc: k->now_ns vale hasta aquí */
         CpuStop st = cpu_run(&r->cpu, n);
         uint64_t done = r->cpu.icount - before;
         max = done + 1 >= max ? 0 : max - done - 1; /* al menos 1 por vuelta */

@@ -513,6 +513,64 @@ static void sys_tests(void)
     printf("3d sistema: %u funciones reales\n", kernel_real_count(&k));
 }
 
+/* ---- etapa 3e: hardware e interrupciones ---- */
+static void mov_mem_imm(uint32_t va, uint32_t v) { b1(0xC7); b1(0x05); d4(va); d4(v); }
+
+static void hw_tests(void)
+{
+    const uint32_t EV = SCRATCH + 0x600, DPC = SCRATCH + 0x620, KI = SCRATCH + 0x640;
+    g_pc = 0;
+    uint32_t isr = here();
+    mov_mem_imm(0xFD600100u, 1);                 /* PCRTC_INTR_0: atendido */
+    b1(0xFF); b1(0x05); d4(SCRATCH + 0x500);     /* inc dword [contador] */
+    push(0); push(0); push(DPC);
+    kcall("KeInsertQueueDpc");
+    b1(0xB8); d4(1);
+    b1(0xC2); b1(0x08); b1(0x00);                /* ret 8 */
+    uint32_t dpc = here();
+    push(0); push(0); push(EV);
+    kcall("KeSetEvent");
+    b1(0xC2); b1(0x10); b1(0x00);
+    uint32_t sync = here();
+    b1(0x8B); b1(0x44); b1(0x24); b1(0x04); b1(0x40); b1(0xC2); b1(0x04); b1(0x00);
+    uint32_t main_va = here();
+    push(0); push(1); push(EV);
+    kcall("KeInitializeEvent");
+    push(0); push(dpc); push(DPC);
+    kcall("KeInitializeDpc");
+    push(0); push(0); push(23); push(0x33); push(0x77); push(isr); push(KI);
+    kcall("KeInitializeInterrupt");
+    push(KI);
+    kcall("KeConnectInterrupt");
+    store_eax(SCRATCH + 0x504);
+    mov_mem_imm(0xFD000140u, 1);                 /* PMC_INTR_EN_0 */
+    mov_mem_imm(0xFD600140u, 1);                 /* PCRTC_INTR_EN_0: el vblank */
+    push(0); push(0); push(0); push(0); push(EV);
+    kcall("KeWaitForSingleObject");
+    store_eax(SCRATCH + 0x508);
+    push(41); push(sync); push(KI);
+    kcall("KeSynchronizeExecution");
+    store_eax(SCRATCH + 0x50C);
+    b1(0xA1); d4(0xFD000000u);                   /* mov eax, [PMC_BOOT_0] */
+    store_eax(SCRATCH + 0x510);
+    b1(0xBA); d4(0x8008);                        /* mov edx, 0x8008 */
+    b1(0xED);                                    /* in eax, dx: el reloj ACPI */
+    store_eax(SCRATCH + 0x514);
+    push(7);
+    kcall("HalReturnToFirmware");
+    boot(main_va);
+    CHECK(runner_slice(&g_run, 1000000) == RUN_SYSTEM_STOP);
+    CHECK(rd(SCRATCH + 0x504) == 1);
+    CHECK(rd(SCRATCH + 0x508) == 0);
+    CHECK(rd(SCRATCH + 0x500) >= 1 && k.isrs_run >= 1 && k.dpcs_run >= 1);
+    CHECK(rd(SCRATCH + 0x50C) == 42);
+    CHECK(rd(SCRATCH + 0x510) == 0x02A000A1u);
+    CHECK(rd(SCRATCH + 0x514) > 50000);           /* > 15 ms a 3,375 MHz */
+    CHECK(k.now_ns >= 16000000u);
+    printf("3e hardware: %u ISR, %u DPC, %.1f ms virtuales, fin: %s\n", k.isrs_run, k.dpcs_run, k.now_ns / 1e6,
+           g_run.end);
+}
+
 int main(int argc, char **argv)
 {
     CHECK(vm_init(&vm));
@@ -649,6 +707,7 @@ int main(int argc, char **argv)
     CHECK(st >= 0xD0000000u && vm_phys(&vm, st) != VM_NO_PHYS && vm_phys(&vm, st - 1) == VM_NO_PHYS);
 
     thread_tests();
+    hw_tests();
     if (argc > 1) {
         io_tests(argv[1]);
     }

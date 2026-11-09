@@ -4,6 +4,7 @@
  * Distribución tomada de hakuX (native/kernel/kernel.c, GPL-3.0-or-later).
  */
 #include "kernel.h"
+#include "hw.h"
 
 #include <string.h>
 
@@ -102,6 +103,10 @@ bool kernel_init(Kernel *k, Vm *vm)
     km[K_STUBS + 17] = K_CALL_VECTOR;
     km[K_STUBS + 18] = (uint8_t)K_ORD_DPC_RETURN;
     km[K_STUBS + 19] = (uint8_t)(K_ORD_DPC_RETURN >> 8);
+    km[K_STUBS + 24] = 0xCD; /* un ISR volvió */
+    km[K_STUBS + 25] = K_CALL_VECTOR;
+    km[K_STUBS + 26] = (uint8_t)K_ORD_ISR_RETURN;
+    km[K_STUBS + 27] = (uint8_t)(K_ORD_ISR_RETURN >> 8);
 
     for (size_t i = 0; i < sizeof(k_exports) / sizeof(k_exports[0]); i++) {
         const KExport *e = &k_exports[i];
@@ -188,6 +193,9 @@ bool kernel_init(Kernel *k, Vm *vm)
     kps_register(k);
     kio_register(k);
     ksys_register(k);
+    if (!hw_init(k)) {
+        return false;
+    }
     k->cur = -1;
     return true;
 }

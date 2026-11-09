@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "gfx.h"
+#include "hw.h"
 
 #define C_BG        HEX(0x121212)
 #define C_SURF      HEX(0x1F1F1F)
@@ -89,7 +90,7 @@ static void top_bar(const UiState *s, const char *subtitle)
         gfx_text(104, 52, 18, C_ON_VAR, subtitle);
     }
     char chip[48];
-    snprintf(chip, sizeof(chip), "Etapa 3d  ·  v%s", s->version);
+    snprintf(chip, sizeof(chip), "Etapa 3e  ·  v%s", s->version);
     int w = gfx_text_width(18, chip) + 32;
     gfx_rrect(UI_W - 40 - w, 26, w, 34, 17, C_GREEN_BG);
     gfx_text(UI_W - 40 - w + 16, 33, 18, C_GREEN, chip);
@@ -818,14 +819,26 @@ static void draw_run(const UiState *s)
     snprintf(b, sizeof(b), "%08X", (unsigned)cpu->flags);
     gfx_text(rx + 168, ry, 15, C_ON_VAR, "FLG");
     gfx_text(rx + 212, ry, 15, C_ON, b);
-    ry += 30;
+    ry += 24;
+    {
+        const HwStats *hs = hw_stats();
+        static const char *pbs[] = {"corre", "espera flip", "trampa", "FIFO cerrada", "error"};
+        snprintf(b, sizeof(b), "HW %08X %s  ·  %llu accesos", (unsigned)hs->last_addr, hs->last_write ? "esc" : "lect",
+                 (unsigned long long)hs->accesses);
+        gfx_text_fit(rx + 16, ry, 14, rw - 32, C_ON_VAR, b);
+        ry += 19;
+        snprintf(b, sizeof(b), "vblank %llu  ·  ISR %u  ·  GPU %s, %llu palabras", (unsigned long long)hs->vblanks,
+                 kn ? kn->isrs_run : 0, pbs[hs->pb_stall < 5 ? hs->pb_stall : 4], (unsigned long long)hs->pb_words);
+        gfx_text_fit(rx + 16, ry, 14, rw - 32, C_ON_VAR, b);
+        ry += 26;
+    }
     gfx_rect(rx + 16, ry - 6, rw - 32, 1, C_SURF_HI);
     gfx_text(rx + 20, ry, 18, C_ON, "Hilos");
     ry += 28;
     for (int i = 0; kn && i < K_MAX_THREADS && ry + 40 < ly0 + ph; i++) {
         const KThread *t = &kn->threads[i];
-        if (t->state == KT_FREE) {
-            continue;
+        if (t->state == KT_FREE || (t->system && t->state == KT_WAITING && !kn->in_isr)) {
+            continue; /* el hilo de las interrupciones, dormido */
         }
         static const char *stn[] = {"", "Listo", "Corre", "Espera", "Terminó"};
         uint32_t col = t->state == KT_RUNNING ? C_GREEN : (t->state == KT_WAITING ? C_WARN : C_ON_VAR);

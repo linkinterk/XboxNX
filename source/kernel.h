@@ -39,6 +39,8 @@ typedef struct KExport {
 #define K_ORD_THREAD_RETURN 0x3FFu
 #define K_STUB_DPC_RETURN  (K_VA + 0x0F10u)  /* un DPC volvió: int 0x3F, 0x3FE */
 #define K_ORD_DPC_RETURN    0x3FEu
+#define K_STUB_ISR_RETURN  (K_VA + 0x0F18u)  /* un ISR volvió: int 0x3F, 0x3FD */
+#define K_ORD_ISR_RETURN    0x3FDu
 #define K_KPCR_VA      (K_VA + 0x10000u)
 #define K_ETHREAD_VA   (K_VA + 0x14000u)
 
@@ -94,6 +96,8 @@ typedef struct KCall {
     bool block;      /* la llamada dejó al hilo esperando: EAX llega al despertar */
     bool resched;    /* replanificar al volver (ceder, hilo nuevo, terminar) */
     bool ended;      /* el hilo actual terminó */
+    uint32_t tail_eip; /* no volver: saltar a tail_eip(tail_arg) con la vuelta del que llamó */
+    uint32_t tail_arg;
     char note[64];   /* detalle para el registro (el archivo que abre...) */
 } KCall;
 typedef uint64_t (*KFn)(KCall *c);
@@ -123,10 +127,12 @@ typedef struct KCtx {
     uint16_t fpu_cw, fpu_sw;
     uint32_t mxcsr;
     CpuFp fp;        /* x87, MMX y SSE */
+    uint8_t irql;    /* su IRQL (KPCR+0x24) */
 } KCtx;
 
 typedef struct KThread {
     KtState state;
+    bool system;               /* del kernel (el de las interrupciones) */
     uint32_t id;
     uint32_t ethread, stack_base, stack_limit, tib, exception_list;
     uint32_t start;            /* rutina de inicio (para mostrar) */
@@ -195,6 +201,11 @@ typedef struct Kernel {
     uint64_t boot_filetime;      /* hora real al arrancar (100 ns desde 1601) */
     int64_t time_offset;         /* lo que NtSetSystemTime movió el reloj */
     uint32_t av_saved;
+    /* interrupciones (kps.c + hw.c) */
+    uint32_t irq_obj[32];        /* KINTERRUPT conectado por nivel del bus */
+    int isr_thread;              /* hilo del kernel que corre los ISR, -1 sin crear */
+    bool in_isr;
+    unsigned isrs_run;
 } Kernel;
 
 bool kernel_init(Kernel *k, Vm *vm);
@@ -255,6 +266,8 @@ bool kps_schedule(Kernel *k, struct Cpu *c, bool preempt);
 void kps_exit(Kernel *k, uint32_t status);
 /* Vuelve de un DPC (stub 0x3FE). */
 void kps_dpc_return(Kernel *k, struct Cpu *c);
+/* Un ISR volvió (stub 0x3FD). */
+void kps_isr_return(Kernel *k);
 unsigned kps_alive(const Kernel *k);
 /* Siguiente plazo (de espera o temporizador); false si no hay. */
 bool kps_next_deadline(const Kernel *k, uint64_t *ns);

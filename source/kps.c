@@ -8,10 +8,12 @@
  * Semántica y distribución de estructuras según hakuX (native/kernel/ps.c,
  * ke.c y timer.c, GPL-3.0-or-later); implementación propia.
  */
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
 #include "cpu.h"
+#include "hw.h"
 #include "kernel.h"
 
 /* KTHREAD / ETHREAD (como hakuX ps.c) */
@@ -209,6 +211,7 @@ void kps_save(Kernel *k, Cpu *c)
     t->ctx.fpu_sw = c->fpu_sw;
     t->ctx.mxcsr = c->mxcsr;
     t->ctx.fp = c->fp;
+    t->ctx.irql = rd8(k, K_KPCR_VA + PCR_IRQL);
     t->exception_list = rd(k, K_KPCR_VA + PCR_EXCEPTION_LIST);
 }
 
@@ -225,6 +228,7 @@ void kps_load(Kernel *k, Cpu *c)
     c->fpu_sw = t->ctx.fpu_sw;
     c->mxcsr = t->ctx.mxcsr;
     c->fp = t->ctx.fp;
+    wr8(k, K_KPCR_VA + PCR_IRQL, t->ctx.irql);
     c->fs_base = K_KPCR_VA;
     wr(k, K_KPCR_VA + PCR_EXCEPTION_LIST, t->exception_list);
     wr(k, K_KPCR_VA + PCR_STACK_BASE, t->tib);
@@ -249,7 +253,7 @@ unsigned kps_alive(const Kernel *k)
 {
     unsigned n = 0;
     for (int i = 0; i < K_MAX_THREADS; i++) {
-        n += k->threads[i].state != KT_FREE && k->threads[i].state != KT_DEAD;
+        n += k->threads[i].state != KT_FREE && k->threads[i].state != KT_DEAD && !k->threads[i].system;
     }
     return n;
 }
@@ -529,6 +533,11 @@ bool kps_next_deadline(const Kernel *k, uint64_t *ns)
             any = true;
         }
     }
+    uint64_t hw;
+    if (k->irq_obj[HW_IRQ_NV2A] && hw_next_event(k, &hw) && hw < best) {
+        best = hw; /* el vblank despierta al ISR de D3D */
+        any = true;
+    }
     *ns = best;
     return any;
 }
@@ -564,6 +573,151 @@ void kps_dpc_return(Kernel *k, Cpu *c)
     wr8(k, K_KPCR_VA + PCR_IRQL, 0);
 }
 
+/* ------------------------------------------------------- interrupciones */
+
+/* KINTERRUPT: ServiceRoutine 0, ServiceContext 4, BusInterruptLevel 8,
+ * Irql 0xC, Connected 0x10, ShareVector 0x11, Mode 0x12 */
+#define KI_ROUTINE   0x00
+#define KI_CONTEXT   0x04
+#define KI_LEVEL     0x08
+#define KI_IRQL      0x0C
+#define KI_CONNECTED 0x10
+#define ISR_PRIORITY 2000
+
+/* Si hay una línea activa con su ISR conectado y el IRQL lo permite, el
+ * hilo de las interrupciones (prioridad 2000) pasa a correrlo. */
+static void irq_dispatch(Kernel *k, Cpu *c)
+{
+    if (k->in_isr || k->in_dpc) {
+        return;
+    }
+    uint32_t lines = hw_irq_lines(k);
+    if (!lines) {
+        return;
+    }
+    (void)c;
+    KThread *t = cur(k); /* ya guardado por kps_schedule */
+    bool live = t && t->state != KT_DEAD && t->state != KT_FREE;
+    uint8_t irql = live ? t->ctx.irql : 0;
+    uint32_t flags = live ? t->ctx.flags : 0x202;
+    if (!(flags & F_IF)) {
+        return;
+    }
+    for (unsigned level = 0; level < 32; level++) {
+        uint32_t obj = k->irq_obj[level];
+        if (!(lines & (1u << level)) || !obj) {
+            continue;
+        }
+        uint8_t level_irql = (uint8_t)rd(k, obj + KI_IRQL);
+        if (level_irql <= irql) {
+            continue;
+        }
+        if (k->isr_thread < 0) {
+            int ti = kps_thread_create(k, 0x4000, 0, 0);
+            if (ti < 0) {
+                return;
+            }
+            k->isr_thread = ti;
+            k->threads[ti].system = true;
+            k->threads[ti].priority = ISR_PRIORITY;
+            k->threads[ti].start = 0;
+        }
+        KThread *it = &k->threads[k->isr_thread];
+        uint32_t esp = it->stack_base - FX_SAVE_AREA - 16 - 12;
+        wr(k, esp, K_STUB_ISR_RETURN);
+        wr(k, esp + 4, obj);
+        wr(k, esp + 8, rd(k, obj + KI_CONTEXT));
+        memset(it->ctx.r, 0, sizeof(it->ctx.r));
+        it->ctx.r[R_ESP] = esp;
+        it->ctx.eip = rd(k, obj + KI_ROUTINE);
+        it->start = it->ctx.eip;
+        it->ctx.flags = 0x002;
+        it->ctx.irql = level_irql;
+        it->state = KT_READY;
+        it->wait_what = NULL;
+        k->in_isr = true;
+        return;
+    }
+}
+
+void kps_isr_return(Kernel *k)
+{
+    if (k->isr_thread >= 0) {
+        KThread *it = &k->threads[k->isr_thread];
+        it->state = KT_WAITING; /* dormido hasta la próxima interrupción */
+        it->nwait = 0;
+        it->has_deadline = false;
+        it->wait_cs = 0;
+        it->wait_what = "interrupción";
+        it->ctx.irql = 0;
+    }
+    k->in_isr = false;
+    k->isrs_run++;
+}
+
+/* HalGetInterruptVector(BusInterruptLevel, *Irql) -> vector */
+static uint64_t HalGetInterruptVector(KCall *c)
+{
+    if (c->a[1]) {
+        wr8(c->k, c->a[1], (uint8_t)(26 - c->a[0]));
+    }
+    return 0x30 + c->a[0];
+}
+
+/* KeInitializeInterrupt(Interrupt, ServiceRoutine, ServiceContext, Vector, Irql, InterruptMode, ShareVector) */
+static uint64_t KeInitializeInterrupt(KCall *c)
+{
+    Kernel *k = c->k;
+    wr(k, c->a[0] + KI_ROUTINE, c->a[1]);
+    wr(k, c->a[0] + KI_CONTEXT, c->a[2]);
+    wr(k, c->a[0] + KI_LEVEL, c->a[3] - 0x30);
+    wr(k, c->a[0] + KI_IRQL, c->a[4] & 0xFF);
+    wr8(k, c->a[0] + KI_CONNECTED, 0);
+    wr8(k, c->a[0] + 0x11, (uint8_t)c->a[6]);
+    wr8(k, c->a[0] + 0x12, (uint8_t)c->a[5]);
+    return 0;
+}
+
+/* KeConnectInterrupt(Interrupt) -> BOOLEAN */
+static uint64_t KeConnectInterrupt(KCall *c)
+{
+    Kernel *k = c->k;
+    uint32_t level = rd(k, c->a[0] + KI_LEVEL);
+    if (rd8(k, c->a[0] + KI_CONNECTED) || level >= 32 || k->irq_obj[level]) {
+        return 0;
+    }
+    wr8(k, c->a[0] + KI_CONNECTED, 1);
+    k->irq_obj[level] = c->a[0];
+    snprintf(c->note, sizeof(c->note), "nivel %u, rutina %08X", (unsigned)level, (unsigned)rd(k, c->a[0]));
+    return 1;
+}
+
+/* KeDisconnectInterrupt(Interrupt) -> BOOLEAN */
+static uint64_t KeDisconnectInterrupt(KCall *c)
+{
+    Kernel *k = c->k;
+    uint32_t level = rd(k, c->a[0] + KI_LEVEL);
+    if (!rd8(k, c->a[0] + KI_CONNECTED)) {
+        return 0;
+    }
+    wr8(k, c->a[0] + KI_CONNECTED, 0);
+    if (level < 32 && k->irq_obj[level] == c->a[0]) {
+        k->irq_obj[level] = 0;
+    }
+    return 1;
+}
+
+/* KeSynchronizeExecution(Interrupt, SynchronizeRoutine, SynchronizeContext):
+ * el resultado es el de SynchronizeRoutine(SynchronizeContext). Como los ISR
+ * solo corren entre turnos, basta con llamarla: se salta a ella con la
+ * dirección de vuelta del que llamó. */
+static uint64_t KeSynchronizeExecution(KCall *c)
+{
+    c->tail_eip = c->a[1];
+    c->tail_arg = c->a[2];
+    return 0;
+}
+
 /* ------------------------------------------------------- planificador */
 
 bool kps_schedule(Kernel *k, Cpu *c, bool preempt)
@@ -580,16 +734,18 @@ bool kps_schedule(Kernel *k, Cpu *c, bool preempt)
         }
     }
     for (int guard = 0; guard < 100000; guard++) {
+        hw_tick(k);
         timers_fire(k);
         wake(k);
         kps_update_tick(k);
-        if (k->ndpc) {
+        irq_dispatch(k, c);
+        if (k->ndpc && !k->in_isr) {
             dpc_start(k, c);
             return true;
         }
         /* el de más prioridad; entre iguales, el siguiente al actual. Cada 8
          * cuantos, el siguiente sin mirar prioridad (que nadie se quede sin CPU). */
-        bool rr = preempt && (++k->quantum_count % 8) == 0;
+        bool rr = preempt && !k->in_isr && (++k->quantum_count % 8) == 0;
         int pick = -1;
         for (int n = 1; n <= K_MAX_THREADS; n++) {
             int i = ((prev < 0 ? 0 : prev) + n) % K_MAX_THREADS;
@@ -1171,6 +1327,7 @@ static uint64_t KeQueryPerformanceFrequency(KCall *c)
 
 void kps_register(Kernel *k)
 {
+    k->isr_thread = -1;
     time_t now = time(NULL);
     if (now > 1000000000) { /* el reloj real: las partidas guardadas llevan fecha */
         k->boot_filetime = ((uint64_t)now + 11644473600ull) * 10000000ull;
@@ -1229,4 +1386,9 @@ void kps_register(Kernel *k)
     kernel_impl(k, "KeQueryInterruptTime", KeQueryInterruptTime);
     kernel_impl(k, "KeQueryPerformanceCounter", KeQueryPerformanceCounter);
     kernel_impl(k, "KeQueryPerformanceFrequency", KeQueryPerformanceFrequency);
+    kernel_impl(k, "HalGetInterruptVector", HalGetInterruptVector);
+    kernel_impl(k, "KeInitializeInterrupt", KeInitializeInterrupt);
+    kernel_impl(k, "KeConnectInterrupt", KeConnectInterrupt);
+    kernel_impl(k, "KeDisconnectInterrupt", KeDisconnectInterrupt);
+    kernel_impl(k, "KeSynchronizeExecution", KeSynchronizeExecution);
 }
