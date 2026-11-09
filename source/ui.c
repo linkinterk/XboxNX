@@ -754,6 +754,26 @@ static void draw_xbox_screen(const UiState *s)
         gfx_image(&img, (UI_W - w) / 2, 34, w, h, 0);
         snprintf(b, sizeof(b), "Pantalla del Xbox  ·  %dx%d  ·  %u cuadros  ·  %u borrados  ·  %u flips  ·  %.2f s del juego",
                  img.w, img.h, hs->frames, hs->clears, hs->flips, kn->now_ns / 1e9);
+        /* lo que el último cuadro pidió dibujar */
+        const HwDraws *dw = &hs->last;
+        static const char *pn[16] = {"", "puntos", "líneas", "lazo", "tira-l", "triángulos", "tira", "abanico",
+                                     "quads", "tira-q", "polígono", "", "", "", "", ""};
+        char d2[200];
+        int o = snprintf(d2, sizeof(d2), "Último cuadro: %u dibujos, %u vértices, %u con shader, %u con textura, %u sueltos",
+                         dw->draws, dw->vertices, dw->program, dw->textured, dw->immediate);
+        for (int i = 1, first = 1; i < 16 && o < (int)sizeof(d2) - 12; i++) {
+            if (dw->prims & (1u << i)) {
+                o += snprintf(d2 + o, sizeof(d2) - (size_t)o, "%s%s", first ? " · " : " ", pn[i]);
+                first = 0;
+            }
+        }
+        if (dw->nformats) {
+            o += snprintf(d2 + o, sizeof(d2) - (size_t)o, " · formatos");
+            for (unsigned i = 0; i < dw->nformats && o < (int)sizeof(d2) - 6; i++) {
+                o += snprintf(d2 + o, sizeof(d2) - (size_t)o, " %02X", dw->formats[i]);
+            }
+        }
+        gfx_text_fit(20, BOTBAR_Y + 22, 15, 700, C_ON_VAR, d2);
     } else {
         snprintf(b, sizeof(b), "Pantalla del Xbox: el juego todavía no eligió un modo de video");
         gfx_text_center(0, UI_W, 330, 22, C_ON_VAR, "Todavía no hay imagen");

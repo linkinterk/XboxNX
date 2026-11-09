@@ -636,6 +636,14 @@ static void hw_tests(void)
             (1u << 18) | 0x1D90, 0xFF336699u,            /* SET_COLOR_CLEAR_VALUE */
             (2u << 18) | 0x1D98, (63u << 16) | 2, (31u << 16) | 1, /* el rectángulo */
             (1u << 18) | 0x1D94, 0xF0,                   /* CLEAR_SURFACE: R, G, B, A */
+            (1u << 18) | 0x1760, 0x2032,                 /* atributo 0: 3 float, paso 32 */
+            (1u << 18) | 0x17FC, 5,                      /* triángulos */
+            (1u << 18) | 0x1810, (5u << 24) | 0,         /* DRAW_ARRAYS: 6 vértices */
+            (1u << 18) | 0x17FC, 0,
+            (1u << 18) | 0x17FC, 6,                      /* tira con INLINE_ARRAY: 4 vértices */
+            0x40000000u | (12u << 18) | 0x1818, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            (1u << 18) | 0x17FC, 0,
+            (1u << 18) | 0x012C, 0,                      /* FLIP_INCREMENT_WRITE: fin del cuadro */
         };
         memcpy(vm.ram + PB, pb, sizeof(pb));
         v = 1;
@@ -646,6 +654,8 @@ static void hw_tests(void)
         hw_mmio(&k, NV + 0x800040u, 4, true, &v);       /* PUT: corre */
         const uint32_t *fb = (const uint32_t *)(vm.ram + SURF + 0x1000);
         CHECK(hw_stats()->clears == 1);
+        const HwDraws *dw = &hw_stats()->last;
+        CHECK(dw->draws == 2 && dw->vertices == 10 && dw->prims == ((1u << 5) | (1u << 6)));
         CHECK(fb[1 * 64 + 2] == 0xFF336699u && fb[31 * 64 + 63] == 0xFF336699u);
         CHECK(fb[0] == 0 && fb[1 * 64 + 1] == 0);
         /* la pantalla: AvSetDisplayMode con ese búfer, 64 píxeles de ancho */

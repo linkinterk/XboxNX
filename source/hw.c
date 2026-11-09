@@ -96,6 +96,16 @@
 #define NV097_CLEAR_SURFACE             0x1D94u
 #define NV097_SET_CLEAR_RECT_HORIZONTAL 0x1D98u
 #define NV097_SET_CLEAR_RECT_VERTICAL   0x1D9Cu
+#define NV097_SET_VERTEX_DATA_ARRAY_FORMAT 0x1760u /* 16: tipo 3:0, tamaño 7:4, paso 31:8 */
+#define NV097_SET_BEGIN_END        0x17FCu
+#define NV097_ARRAY_ELEMENT16      0x1800u
+#define NV097_ARRAY_ELEMENT32      0x1808u
+#define NV097_DRAW_ARRAYS          0x1810u
+#define NV097_INLINE_ARRAY         0x1818u
+#define NV097_SET_VERTEX4F_W       0x1524u
+#define NV097_SET_TEXTURE_FORMAT   0x1B04u /* + 0x40 por etapa */
+#define NV097_SET_TEXTURE_CONTROL0 0x1B0Cu
+#define NV097_SET_TRANSFORM_EXECUTION_MODE 0x1E94u
 
 enum { PB_GO, PB_FLIP, PB_TRAP, PB_FIFO, PB_ERROR };
 
@@ -124,6 +134,10 @@ typedef struct Hw {
     uint32_t clear_value, clear_h, clear_v;
     /* lo que se ve: AvSetDisplayMode y PCRTC_START */
     uint32_t av_format, av_pitch, av_fb;
+    /* lo que se dibuja (para saber qué hace falta en la etapa 4) */
+    uint32_t va_format[16], tex_format[4], tex_control[4], xform_mode, prim;
+    uint32_t inline_words;
+    HwDraws cur;
     int stall;
     HwStats st;
 } Hw;
@@ -295,6 +309,79 @@ static void clear_color(Kernel *k, uint32_t flags)
     g_hw.st.clears++;
 }
 
+/* Bytes por vértice de INLINE_ARRAY: los atributos con tamaño (tipos del
+ * NV2A: 0 UB_D3D y 4 UB_OGL de 1 byte, 1 S1 y 5 S32K de 2, 2 F de 4, 6 CMP
+ * empaquetado en 4). */
+static unsigned inline_stride(void)
+{
+    unsigned bytes = 0;
+    for (int i = 0; i < 16; i++) {
+        unsigned type = g_hw.va_format[i] & 0xF, size = (g_hw.va_format[i] >> 4) & 0xF;
+        if (!size) {
+            continue;
+        }
+        unsigned ts = type == 2 ? 4 : (type == 1 || type == 5) ? 2 : 1;
+        bytes += type == 6 ? 4 : size * ts;
+    }
+    return bytes;
+}
+
+/* SET_BEGIN_END y los vértices: cuenta lo que el juego dibuja en el cuadro. */
+static void draw_method(uint32_t m, uint32_t v)
+{
+    HwDraws *d = &g_hw.cur;
+    switch (m) {
+    case NV097_SET_BEGIN_END:
+        if (v) {
+            g_hw.prim = v;
+            g_hw.inline_words = 0;
+            d->draws++;
+            d->prims |= 1u << (v & 15);
+            if ((g_hw.xform_mode & 3) == 2) {
+                d->program++;
+            }
+            unsigned n = 0;
+            for (int i = 0; i < 4; i++) {
+                if (g_hw.tex_control[i] & (1u << 30)) {
+                    n++;
+                    uint8_t f = (uint8_t)(g_hw.tex_format[i] >> 8);
+                    bool seen = false;
+                    for (unsigned j = 0; j < d->nformats; j++) {
+                        seen |= d->formats[j] == f;
+                    }
+                    if (!seen && d->nformats < 8) {
+                        d->formats[d->nformats++] = f;
+                    }
+                }
+            }
+            if (n) {
+                d->textured++;
+            }
+        } else if (g_hw.inline_words) {
+            unsigned st = inline_stride();
+            d->vertices += st ? g_hw.inline_words * 4 / st : 0;
+            g_hw.inline_words = 0;
+        }
+        break;
+    case NV097_ARRAY_ELEMENT16: d->vertices += 2; break;
+    case NV097_ARRAY_ELEMENT32: d->vertices += 1; break;
+    case NV097_DRAW_ARRAYS: d->vertices += (v >> 24) + 1; break;
+    case NV097_INLINE_ARRAY: g_hw.inline_words++; break;
+    case NV097_SET_VERTEX4F_W: d->vertices++; d->immediate++; break;
+    case NV097_SET_TRANSFORM_EXECUTION_MODE: g_hw.xform_mode = v; break;
+    default:
+        if (m >= NV097_SET_VERTEX_DATA_ARRAY_FORMAT && m < NV097_SET_VERTEX_DATA_ARRAY_FORMAT + 64) {
+            g_hw.va_format[(m - NV097_SET_VERTEX_DATA_ARRAY_FORMAT) / 4] = v;
+        } else if (m >= NV097_SET_TEXTURE_FORMAT && m < NV097_SET_TEXTURE_FORMAT + 0x100 && !((m - NV097_SET_TEXTURE_FORMAT) & 0x3F)) {
+            g_hw.tex_format[(m - NV097_SET_TEXTURE_FORMAT) / 0x40] = v;
+        } else if (m >= NV097_SET_TEXTURE_CONTROL0 && m < NV097_SET_TEXTURE_CONTROL0 + 0x100 &&
+                   !((m - NV097_SET_TEXTURE_CONTROL0) & 0x3F)) {
+            g_hw.tex_control[(m - NV097_SET_TEXTURE_CONTROL0) / 0x40] = v;
+        }
+        break;
+    }
+}
+
 /* Un método del push buffer. Devuelve PB_GO o el motivo de parar. */
 static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
 {
@@ -322,6 +409,7 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
     if (g_hw.obj_class[subch] != 0x97) {
         return PB_GO;
     }
+    draw_method(m, v);
     switch (m) { /* Kelvin */
     case NV097_SET_FLIP_READ: surf_set(SURF_READ, v); break;
     case NV097_SET_FLIP_WRITE: surf_set(SURF_WRITE, v); break;
@@ -330,6 +418,9 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         uint32_t mod = surf_get(SURF_MODULO);
         surf_set(SURF_WRITE, mod ? (surf_get(SURF_WRITE) + 1) % mod : 0);
         g_hw.st.flips++;
+        g_hw.st.last = g_hw.cur; /* el cuadro terminado */
+        g_hw.st.total_draws += g_hw.cur.draws;
+        memset(&g_hw.cur, 0, sizeof(g_hw.cur));
         break;
     }
     case NV097_FLIP_STALL:

@@ -31,6 +31,18 @@ struct Kernel;
 
 #define HW_RECENT 4
 
+/* Lo que el juego dibujó en un cuadro (entre dos flips). */
+typedef struct HwDraws {
+    unsigned draws;      /* SET_BEGIN_END con primitiva */
+    unsigned vertices;
+    unsigned program;    /* dibujos con vertex shader (los otros: función fija) */
+    unsigned textured;   /* dibujos con alguna textura */
+    unsigned immediate;  /* vértices sueltos (SET_VERTEX4F) */
+    unsigned prims;      /* bits: 1 puntos, 2 líneas... 5 triángulos, 6 tira, 7 abanico, 8 quads */
+    uint8_t formats[8];  /* formatos de textura vistos */
+    unsigned nformats;
+} HwDraws;
+
 typedef struct HwStats {
     uint32_t last_addr;     /* el último acceso a un registro */
     uint32_t last_value;
@@ -43,6 +55,8 @@ typedef struct HwStats {
     unsigned frames;        /* cambios de PCRTC_START: cuadros mostrados */
     unsigned clears;        /* CLEAR_SURFACE hechos */
     unsigned av_modes;      /* llamadas a AvSetDisplayMode */
+    HwDraws last;           /* el último cuadro */
+    uint64_t total_draws;
     /* los registros distintos tocados hace poco (el más reciente primero) */
     struct {
         uint32_t addr, value, count;
