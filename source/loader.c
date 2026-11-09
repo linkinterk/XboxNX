@@ -162,6 +162,7 @@ bool loader_load(Vm *vm, Kernel *k, const Game *g, LoadReport *r)
     }
 
     kmm_add_image(k, base, r->span);
+    kernel_title_loaded(k, "\\Device\\CdRom0\\default.xbe");
     vm_read(vm, x->entry, r->entry_bytes, sizeof(r->entry_bytes));
     r->ram_used_kb = vm->pages_used * (VM_PAGE / 1024);
     r->ok = true;

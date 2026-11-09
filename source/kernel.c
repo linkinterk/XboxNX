@@ -184,6 +184,24 @@ bool kernel_init(Kernel *k, Vm *vm)
     return true;
 }
 
+bool kernel_title_loaded(Kernel *k, const char *path)
+{
+    /* XeImageFileName: ANSI_STRING { Length, MaximumLength, Buffer }. Sin
+     * ella, el arranque de XAPI no sabe de dónde vino el juego y pide
+     * relanzarse (LaunchDataPage + HalReturnToFirmware(2)). */
+    uint32_t len = (uint32_t)strlen(path) + 1;
+    uint32_t buf = kmm_pool_alloc(k, len);
+    uint32_t s = kernel_data_va(k, "XeImageFileName");
+    if (!buf || !s) {
+        return false;
+    }
+    vm_write(k->vm, buf, path, len);
+    uint8_t hdr[4] = {(uint8_t)(len - 1), (uint8_t)((len - 1) >> 8), (uint8_t)len, (uint8_t)(len >> 8)};
+    vm_write(k->vm, s, hdr, 4);
+    vm_wr32(k->vm, s + 4, buf);
+    return true;
+}
+
 uint32_t kernel_data_va(const Kernel *k, const char *name)
 {
     for (size_t i = 0; i < sizeof(k_exports) / sizeof(k_exports[0]); i++) {

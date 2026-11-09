@@ -126,6 +126,10 @@ void kernel_impl(Kernel *k, const char *name, KFn fn);
 /* Cuántas funciones tienen implementación real aquí. */
 unsigned kernel_real_count(const Kernel *k);
 
+/* Lo que el kernel deja listo al cargar el juego: XeImageFileName (la ruta
+ * del XBE, como hakuX: \Device\CdRom0\default.xbe). */
+bool kernel_title_loaded(Kernel *k, const char *image_path);
+
 /* kmm.c: memoria */
 void kmm_register(Kernel *k);
 bool kmm_pool_init(Kernel *k);

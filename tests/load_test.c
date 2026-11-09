@@ -81,6 +81,12 @@ int main(int argc, char **argv)
     /* la tabla quedó apuntando al kernel */
     CHECK(vm_rd32(&vm, 0x12000) == kernel_resolve(&k, 1));
     CHECK(vm_rd32(&vm, 0x1200C) == kernel_resolve(&k, 366));
+    /* XeImageFileName apunta a la ruta del disco */
+    uint32_t xin = kernel_data_va(&k, "XeImageFileName");
+    char path[64] = {0};
+    CHECK(xin && vm_read(&vm, vm_rd32(&vm, xin + 4), path, 30));
+    CHECK(!strcmp(path, "\\Device\\CdRom0\\default.xbe") && (vm_rd32(&vm, xin) & 0xFFFF) == 26);
+
     /* las primeras instrucciones: push 0x1234 */
     CHECK(r.entry_bytes[0] == 0x68 && r.entry_bytes[1] == 0x34);
 
