@@ -235,12 +235,84 @@ static uint32_t pop(Cpu *c, int sz)
 
 /* ---- flags ---- */
 
+/* Flags perezosos: alu() guarda la operación y sus valores (lf_*) y los
+ * flags aritméticos (CF PF AF ZF SF OF) se calculan solo cuando alguien los
+ * lee; casi siempre la siguiente instrucción los vuelve a pisar. FL(c) da
+ * los flags ya calculados; fuera del intérprete (cpu_run, cpu_step) están
+ * siempre calculados. */
+enum { LF_NONE, LF_ADD, LF_SUB, LF_LOGIC, LF_INC, LF_DEC };
+
+static void flags_sync(Cpu *c)
+{
+    unsigned sz = c->lf_sz;
+    uint32_t m = sz == 1 ? 0xFFu : sz == 2 ? 0xFFFFu : 0xFFFFFFFFu;
+    uint32_t s = sz == 1 ? 0x80u : sz == 2 ? 0x8000u : 0x80000000u;
+    uint32_t a = c->lf_a, b = c->lf_b, res = c->lf_res, cin = c->lf_cin;
+    uint32_t f = c->flags & ~(F_CF | F_PF | F_AF | F_ZF | F_SF | F_OF);
+    switch (c->lf_op) {
+    case LF_ADD:
+        f |= ((uint64_t)a + b + cin > m) ? F_CF : 0;
+        f |= ((a ^ res) & (b ^ res) & s) ? F_OF : 0;
+        f |= ((a ^ b ^ res) & 0x10) ? F_AF : 0;
+        break;
+    case LF_SUB:
+        f |= ((uint64_t)a < (uint64_t)b + cin) ? F_CF : 0;
+        f |= ((a ^ b) & (a ^ res) & s) ? F_OF : 0;
+        f |= ((a ^ b ^ res) & 0x10) ? F_AF : 0;
+        break;
+    case LF_INC: /* CF se conserva (en cin) */
+    case LF_DEC:
+        f |= cin ? F_CF : 0;
+        if (c->lf_op == LF_INC) {
+            f |= ((a ^ res) & (b ^ res) & s) ? F_OF : 0;
+        } else {
+            f |= ((a ^ b) & (a ^ res) & s) ? F_OF : 0;
+        }
+        f |= ((a ^ b ^ res) & 0x10) ? F_AF : 0;
+        break;
+    case LF_LOGIC:
+        break;
+    default:
+        return;
+    }
+    f |= res == 0 ? F_ZF : 0;
+    f |= (res & s) ? F_SF : 0;
+    f |= __builtin_parity(res & 0xFF) ? 0 : F_PF;
+    c->flags = f;
+    c->lf_op = LF_NONE;
+}
+
+/* Solo CF (adc, sbb, inc, dec lo necesitan sin calcular los demás). */
+static inline uint32_t lazy_cf(Cpu *c)
+{
+    switch (c->lf_op) {
+    case LF_ADD: {
+        uint32_t m = c->lf_sz == 1 ? 0xFFu : c->lf_sz == 2 ? 0xFFFFu : 0xFFFFFFFFu;
+        return (uint64_t)c->lf_a + c->lf_b + c->lf_cin > m;
+    }
+    case LF_SUB: return (uint64_t)c->lf_a < (uint64_t)c->lf_b + c->lf_cin;
+    case LF_INC:
+    case LF_DEC: return c->lf_cin;
+    case LF_LOGIC: return 0;
+    default: return (c->flags & F_CF) ? 1 : 0;
+    }
+}
+
+static inline uint32_t *flags_ref(Cpu *c)
+{
+    if (c->lf_op) {
+        flags_sync(c);
+    }
+    return &c->flags;
+}
+#define FL(c) (*flags_ref(c))
+
 static void set_flag(Cpu *c, uint32_t f, bool on)
 {
     if (on) {
-        c->flags |= f;
+        FL(c) |= f;
     } else {
-        c->flags &= ~f;
+        FL(c) &= ~f;
     }
 }
 
@@ -256,46 +328,77 @@ enum { OP_ADD, OP_OR, OP_ADC, OP_SBB, OP_AND, OP_SUB, OP_XOR, OP_CMP };
 
 static uint32_t alu(Cpu *c, int op, uint32_t a, uint32_t b, int sz)
 {
-    uint32_t m = mask_of(sz), s = sign_of(sz);
+    uint32_t m = mask_of(sz);
     a &= m;
     b &= m;
-    uint32_t res, cin;
+    uint32_t res, cin = 0;
+    uint8_t kind;
     switch (op) {
     case OP_ADD:
-    case OP_ADC: {
-        cin = (op == OP_ADC && (c->flags & F_CF)) ? 1 : 0;
-        uint64_t full = (uint64_t)a + b + cin;
-        res = (uint32_t)full & m;
-        set_flag(c, F_CF, full > m);
-        set_flag(c, F_OF, ((a ^ res) & (b ^ res) & s) != 0);
-        set_flag(c, F_AF, ((a ^ b ^ res) & 0x10) != 0);
+    case OP_ADC:
+        if (op == OP_ADC) {
+            cin = lazy_cf(c);
+        }
+        res = (a + b + cin) & m;
+        kind = LF_ADD;
         break;
-    }
     case OP_SUB:
     case OP_SBB:
-    case OP_CMP: {
-        cin = (op == OP_SBB && (c->flags & F_CF)) ? 1 : 0;
+    case OP_CMP:
+        if (op == OP_SBB) {
+            cin = lazy_cf(c);
+        }
         res = (a - b - cin) & m;
-        set_flag(c, F_CF, (uint64_t)a < (uint64_t)b + cin);
-        set_flag(c, F_OF, ((a ^ b) & (a ^ res) & s) != 0);
-        set_flag(c, F_AF, ((a ^ b ^ res) & 0x10) != 0);
+        kind = LF_SUB;
         break;
+    case OP_OR: res = a | b; kind = LF_LOGIC; break;
+    case OP_AND: res = a & b; kind = LF_LOGIC; break;
+    default: res = a ^ b; kind = LF_LOGIC; break;
     }
-    case OP_OR: res = a | b; goto logic;
-    case OP_AND: res = a & b; goto logic;
-    default: res = a ^ b;
-    logic:
-        c->flags &= ~(F_CF | F_OF | F_AF);
-        break;
-    }
-    szp(c, res, sz);
+    c->lf_op = kind;
+    c->lf_sz = (uint8_t)sz;
+    c->lf_a = a;
+    c->lf_b = b;
+    c->lf_res = res;
+    c->lf_cin = (uint8_t)cin;
+    return res;
+}
+
+/* inc / dec: como add / sub de 1 sin tocar CF */
+static uint32_t incdec(Cpu *c, bool dec, uint32_t a, int sz)
+{
+    uint32_t m = mask_of(sz);
+    uint8_t cf = (uint8_t)lazy_cf(c);
+    a &= m;
+    uint32_t res = (dec ? a - 1 : a + 1) & m;
+    c->lf_op = dec ? LF_DEC : LF_INC;
+    c->lf_sz = (uint8_t)sz;
+    c->lf_a = a;
+    c->lf_b = 1;
+    c->lf_res = res;
+    c->lf_cin = cf;
     return res;
 }
 
 static bool cond(Cpu *c, int n)
 {
-    uint32_t f = c->flags;
-    bool cf = f & F_CF, zf = f & F_ZF, sf = f & F_SF, of = f & F_OF, pf = f & F_PF;
+    bool cf, zf, sf, of, pf = false;
+    if ((c->lf_op == LF_SUB || c->lf_op == LF_LOGIC) && (n >> 1) != 5) {
+        /* cmp / test seguidos de jcc: sin calcular todos los flags */
+        uint32_t s = c->lf_sz == 1 ? 0x80u : c->lf_sz == 2 ? 0x8000u : 0x80000000u;
+        uint32_t a = c->lf_a, b = c->lf_b, res = c->lf_res;
+        zf = res == 0;
+        sf = (res & s) != 0;
+        if (c->lf_op == LF_SUB) {
+            cf = (uint64_t)a < (uint64_t)b + c->lf_cin;
+            of = ((a ^ b) & (a ^ res) & s) != 0;
+        } else {
+            cf = of = false;
+        }
+    } else {
+        uint32_t f = FL(c);
+        cf = f & F_CF, zf = f & F_ZF, sf = f & F_SF, of = f & F_OF, pf = f & F_PF;
+    }
     bool r;
     switch (n >> 1) {
     case 0: r = of; break;
@@ -340,7 +443,7 @@ static uint32_t shift(Cpu *c, int op, uint32_t a, unsigned cnt, int sz)
     }
     case 2: { /* rcl */
         unsigned n = cnt % (bits + 1);
-        bool carry = c->flags & F_CF;
+        bool carry = FL(c) & F_CF;
         for (unsigned i = 0; i < n; i++) {
             bool out = (res & s) != 0;
             res = ((res << 1) | (carry ? 1u : 0u)) & m;
@@ -352,7 +455,7 @@ static uint32_t shift(Cpu *c, int op, uint32_t a, unsigned cnt, int sz)
     }
     case 3: { /* rcr */
         unsigned n = cnt % (bits + 1);
-        bool carry = c->flags & F_CF;
+        bool carry = FL(c) & F_CF;
         set_flag(c, F_OF, ((res & s) != 0) != carry);
         for (unsigned i = 0; i < n; i++) {
             bool out = res & 1;
@@ -385,7 +488,7 @@ static uint32_t shift(Cpu *c, int op, uint32_t a, unsigned cnt, int sz)
         break;
     }
     }
-    c->flags &= ~F_AF;
+    FL(c) &= ~F_AF;
     szp(c, res, sz);
     return res;
 }
@@ -394,7 +497,7 @@ static uint32_t shift(Cpu *c, int op, uint32_t a, unsigned cnt, int sz)
 
 static void string_op(Cpu *c, const Dec *d, uint8_t op, int sz)
 {
-    int32_t step = (c->flags & F_DF) ? -sz : sz;
+    int32_t step = (FL(c) & F_DF) ? -sz : sz;
     bool rep = d->rep != 0;
     uint32_t src_base = d->fs ? c->fs_base : 0;
     for (;;) {
@@ -433,10 +536,10 @@ static void string_op(Cpu *c, const Dec *d, uint8_t op, int sz)
         }
         c->r[R_ECX]--;
         bool cmp = op == 0xA6 || op == 0xA7 || op == 0xAE || op == 0xAF;
-        if (cmp && d->rep == 0xF3 && !(c->flags & F_ZF)) {
+        if (cmp && d->rep == 0xF3 && !(FL(c) & F_ZF)) {
             break;
         }
-        if (cmp && d->rep == 0xF2 && (c->flags & F_ZF)) {
+        if (cmp && d->rep == 0xF2 && (FL(c) & F_ZF)) {
             break;
         }
     }
@@ -699,7 +802,7 @@ static void two_byte(Cpu *c, const Dec *d, int osz)
         }
         set_flag(c, F_CF, cf);
         set_flag(c, F_OF, ((res ^ dst) & s) != 0);
-        c->flags &= ~F_AF;
+        FL(c) &= ~F_AF;
         szp(c, res, osz);
         ea_set(c, &e, osz, res);
         return;
@@ -723,7 +826,7 @@ static void two_byte(Cpu *c, const Dec *d, int osz)
         Ea e = modrm_ea(c, d, m);
         uint32_t v = ea_get(c, &e, sz);
         alu(c, OP_CMP, reg_get(c, R_EAX, sz), v, sz);
-        if (c->flags & F_ZF) {
+        if (FL(c) & F_ZF) {
             ea_set(c, &e, sz, reg_get(c, (m >> 3) & 7, sz));
         } else {
             reg_set(c, R_EAX, sz, v);
@@ -752,11 +855,11 @@ static void two_byte(Cpu *c, const Dec *d, int osz)
         if (lo == c->r[R_EAX] && hi == c->r[R_EDX]) {
             mwr(c, e.addr, 4, c->r[R_EBX]);
             mwr(c, e.addr + 4, 4, c->r[R_ECX]);
-            c->flags |= F_ZF;
+            FL(c) |= F_ZF;
         } else {
             c->r[R_EAX] = lo;
             c->r[R_EDX] = hi;
-            c->flags &= ~F_ZF;
+            FL(c) &= ~F_ZF;
         }
         return;
     }
@@ -776,10 +879,10 @@ static void two_byte(Cpu *c, const Dec *d, int osz)
         Ea e = modrm_ea(c, d, m);
         uint32_t v = ea_get(c, &e, osz);
         if (!v) {
-            c->flags |= F_ZF;
+            FL(c) |= F_ZF;
             return;
         }
-        c->flags &= ~F_ZF;
+        FL(c) &= ~F_ZF;
         unsigned idx = op == 0xBC ? (unsigned)__builtin_ctz(v) : 31u - (unsigned)__builtin_clz(v);
         reg_set(c, (m >> 3) & 7, osz, idx);
         return;
@@ -820,7 +923,11 @@ static void two_byte(Cpu *c, const Dec *d, int osz)
 
 /* ---- una instrucción ---- */
 
-CpuStop cpu_step(Cpu *c)
+/* los bytes de prefijo */
+static const bool k_prefix[256] = {[0x66] = 1, [0x67] = 1, [0x64] = 1, [0xF2] = 1, [0xF3] = 1, [0xF0] = 1,
+                                   [0x26] = 1, [0x2E] = 1, [0x36] = 1, [0x3E] = 1, [0x65] = 1};
+
+static CpuStop step(Cpu *c)
 {
     if (c->stop != CPU_RUNNING) {
         return c->stop;
@@ -833,6 +940,9 @@ CpuStop cpu_step(Cpu *c)
         op = fetch8(c);
         if (c->stop != CPU_RUNNING || n > 14) {
             goto done;
+        }
+        if (!k_prefix[op]) {
+            break;
         }
         if (op == 0x66) {
             d.opsize = true;
@@ -884,10 +994,7 @@ CpuStop cpu_step(Cpu *c)
     }
     if (op >= 0x40 && op <= 0x4F) { /* inc / dec r */
         int r = op & 7;
-        bool cf = c->flags & F_CF;
-        uint32_t res = alu(c, op < 0x48 ? OP_ADD : OP_SUB, reg_get(c, r, osz), 1, osz);
-        set_flag(c, F_CF, cf);
-        reg_set(c, r, osz, res);
+        reg_set(c, r, osz, incdec(c, op >= 0x48, reg_get(c, r, osz), osz));
         goto done;
     }
     if (op >= 0x50 && op <= 0x57) {
@@ -1067,19 +1174,19 @@ CpuStop cpu_step(Cpu *c)
     case 0x9B: /* wait */
         break;
     case 0x9C:
-        push(c, osz, (c->flags & 0x00244FD5u) | 0x2u);
+        push(c, osz, (FL(c) & 0x00244FD5u) | 0x2u);
         break;
     case 0x9D: {
         uint32_t v = pop(c, osz);
         uint32_t keep = osz == 2 ? 0xFFFF0000u : 0;
-        c->flags = (c->flags & keep) | (v & 0x00244FD5u & ~keep) | 0x2u;
+        FL(c) = (FL(c) & keep) | (v & 0x00244FD5u & ~keep) | 0x2u;
         break;
     }
     case 0x9E: /* sahf */
-        c->flags = (c->flags & ~0xD5u) | ((c->r[R_EAX] >> 8) & 0xD5u);
+        FL(c) = (FL(c) & ~0xD5u) | ((c->r[R_EAX] >> 8) & 0xD5u);
         break;
     case 0x9F: /* lahf */
-        reg_set(c, 4, 1, (c->flags & 0xD5u) | 0x2u);
+        reg_set(c, 4, 1, (FL(c) & 0xD5u) | 0x2u);
         break;
     case 0xA0: case 0xA1: case 0xA2: case 0xA3: { /* mov moffs */
         int sz = (op & 1) ? osz : 1;
@@ -1167,9 +1274,9 @@ CpuStop cpu_step(Cpu *c)
         c->r[R_ECX]--;
         bool go = c->r[R_ECX] != 0;
         if (op == 0xE0) {
-            go = go && !(c->flags & F_ZF);
+            go = go && !(FL(c) & F_ZF);
         } else if (op == 0xE1) {
-            go = go && (c->flags & F_ZF);
+            go = go && (FL(c) & F_ZF);
         }
         if (go) {
             c->eip += (uint32_t)(int32_t)rel;
@@ -1204,14 +1311,14 @@ CpuStop cpu_step(Cpu *c)
         c->eip = d.start;
         break;
     case 0xF5:
-        c->flags ^= F_CF;
+        FL(c) ^= F_CF;
         break;
     case 0xF6:
     case 0xF7:
         group3(c, &d, op == 0xF6 ? 1 : osz, fetch8(c));
         break;
-    case 0xF8: c->flags &= ~F_CF; break;
-    case 0xF9: c->flags |= F_CF; break;
+    case 0xF8: FL(c) &= ~F_CF; break;
+    case 0xF9: FL(c) |= F_CF; break;
     case 0xE4: case 0xE5: case 0xEC: case 0xED: { /* in */
         int sz = (op & 1) ? osz : 1;
         uint16_t port = op < 0xEC ? fetch8(c) : (uint16_t)c->r[R_EDX];
@@ -1227,10 +1334,10 @@ CpuStop cpu_step(Cpu *c)
         }
         break;
     }
-    case 0xFA: c->flags &= ~F_IF; break;
-    case 0xFB: c->flags |= F_IF; break;
-    case 0xFC: c->flags &= ~F_DF; break;
-    case 0xFD: c->flags |= F_DF; break;
+    case 0xFA: FL(c) &= ~F_IF; break;
+    case 0xFB: FL(c) |= F_IF; break;
+    case 0xFC: FL(c) &= ~F_DF; break;
+    case 0xFD: FL(c) |= F_DF; break;
     case 0xFE:
     case 0xFF: {
         int sz = op == 0xFE ? 1 : osz;
@@ -1238,10 +1345,7 @@ CpuStop cpu_step(Cpu *c)
         int sub = (m >> 3) & 7;
         Ea e = modrm_ea(c, &d, m);
         if (sub <= 1) {
-            bool cf = c->flags & F_CF;
-            uint32_t res = alu(c, sub == 0 ? OP_ADD : OP_SUB, ea_get(c, &e, sz), 1, sz);
-            set_flag(c, F_CF, cf);
-            ea_set(c, &e, sz, res);
+            ea_set(c, &e, sz, incdec(c, sub != 0, ea_get(c, &e, sz), sz));
         } else if (op == 0xFF && sub == 2) {
             uint32_t t = ea_get(c, &e, 4);
             push(c, 4, c->eip);
@@ -1275,14 +1379,23 @@ done:
     return c->stop;
 }
 
+CpuStop cpu_step(Cpu *c)
+{
+    CpuStop st = step(c);
+    flags_sync(c);
+    return st;
+}
+
 CpuStop cpu_run(Cpu *c, uint64_t max)
 {
     c->fetch_host = NULL; /* el kernel pudo cambiar las páginas */
     for (uint64_t i = 0; i < max; i++) {
-        if (cpu_step(c) != CPU_RUNNING) {
+        if (step(c) != CPU_RUNNING) {
+            flags_sync(c);
             return c->stop;
         }
     }
+    flags_sync(c);
     return CPU_LIMIT;
 }
 

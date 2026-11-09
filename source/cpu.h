@@ -86,6 +86,8 @@ typedef struct Cpu {
     const uint64_t *clock_ns;   /* tiempo virtual (para rdtsc), hasta clock_icount */
     uint64_t clock_icount;
     unsigned ns_per_instr;      /* el tiempo virtual de cada instrucción (0: 1 ns) */
+    uint8_t lf_op, lf_sz, lf_cin; /* flags perezosos (cpu.c): la última operación */
+    uint32_t lf_a, lf_b, lf_res;
     uint32_t fetch_page;        /* la página del código en curso (cpu.c) */
     const uint8_t *fetch_host;
 } Cpu;

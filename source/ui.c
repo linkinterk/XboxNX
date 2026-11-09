@@ -93,7 +93,7 @@ static void top_bar(const UiState *s, const char *subtitle)
         gfx_text(104, 52, 18, C_ON_VAR, subtitle);
     }
     char chip[48];
-    snprintf(chip, sizeof(chip), "Etapa 5a  ·  v%s", s->version);
+    snprintf(chip, sizeof(chip), "Etapa 5b  ·  v%s", s->version);
     int w = gfx_text_width(18, chip) + 32;
     gfx_rrect(UI_W - 40 - w, 26, w, 34, 17, C_GREEN_BG);
     gfx_text(UI_W - 40 - w + 16, 33, 18, C_GREEN, chip);
@@ -1187,14 +1187,15 @@ static const Stage k_stages[] = {
     {"4a", "Pantalla", "La imagen del Xbox (botón X), cuadros, borrado de pantalla", 0},
     {"4b", "Dibujo por software", "Vertex shaders, texturas, combiners y mezcla en la CPU", 0},
     {"3g", "Controles", "El control de la Switch como control del Xbox (USB y XID)", 0},
-    {"5a", "Optimización 1", "Intérprete ~40% más rápido, dibujo en 3 núcleos, reloj ajustable", 1},
+    {"5a", "Optimización 1", "Intérprete ~40% más rápido, dibujo en 3 núcleos, reloj ajustable", 0},
+    {"5b", "Optimización 2", "Flags perezosos: el intérprete ~70% más rápido que al principio", 1},
     {"3h", "Sonido", "Sacar el audio del Xbox por la Switch", 2},
     {"2d", "CPU rápida (JIT)", "Traducir el código x86 a ARM64: la velocidad de verdad", 2},
     {"4c", "Gráficos por GPU", "El dibujo en el GPU de la Switch, rápido", 2},
     {"5", "Optimizar", "Velocidad general hasta que Halo 2 se pueda jugar", 2},
 };
 #define NSTAGES ((int)(sizeof(k_stages) / sizeof(k_stages[0])))
-#define STAGE_ROW 26
+#define STAGE_ROW 25
 
 int ui_stage_count(void) { return NSTAGES; }
 int ui_stage_rows(void) { return (BOTBAR_Y - 20 - 160) / STAGE_ROW; }

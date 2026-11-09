@@ -23,7 +23,7 @@
 #include "ui.h"
 #include "usb/usb.h"
 
-#define APP_VER   "0.15.0"
+#define APP_VER   "0.15.1"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 

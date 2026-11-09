@@ -57,6 +57,12 @@ jobs:
         run: |
           python3 tests/fp_diff.py ./cpu_diff 10000 1
           python3 tests/fp_diff.py ./cpu_diff 10000 2
+      - name: Flags entre instrucciones (40.000 pares) y velocidad
+        run: |
+          python3 tests/flags_pair.py ./cpu_diff 20000 1
+          python3 tests/flags_pair.py ./cpu_diff 20000 2
+          gcc -std=gnu11 -O2 -ffp-contract=off -Wall -Wextra -Werror -Isource -o bench tests/bench.c source/cpu.c source/vm.c -lm
+          ./bench 300
 
   switch:
     name: XboxNX.nro (Switch)

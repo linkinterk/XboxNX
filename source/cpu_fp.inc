@@ -89,13 +89,13 @@ static void fcompare(Cpu *c, double a, double b)
 /* fcomi / fucomi y comiss / ucomiss: ZF PF CF; OF SF AF a cero */
 static void fcomi_flags(Cpu *c, double a, double b)
 {
-    c->flags &= ~(F_ZF | F_PF | F_CF | F_OF | F_SF | F_AF);
+    FL(c) &= ~(F_ZF | F_PF | F_CF | F_OF | F_SF | F_AF);
     if (isnan(a) || isnan(b)) {
-        c->flags |= F_ZF | F_PF | F_CF;
+        FL(c) |= F_ZF | F_PF | F_CF;
     } else if (a < b) {
-        c->flags |= F_CF;
+        FL(c) |= F_CF;
     } else if (a == b) {
-        c->flags |= F_ZF;
+        FL(c) |= F_ZF;
     }
 }
 
@@ -357,10 +357,10 @@ static void fprem(Cpu *c, bool ieee)
 static bool fcmov_cond(Cpu *c, int n)
 {
     switch (n) {
-    case 0: return c->flags & F_CF;
-    case 1: return c->flags & F_ZF;
-    case 2: return c->flags & (F_CF | F_ZF);
-    default: return c->flags & F_PF;
+    case 0: return FL(c) & F_CF;
+    case 1: return FL(c) & F_ZF;
+    case 2: return FL(c) & (F_CF | F_ZF);
+    default: return FL(c) & F_PF;
     }
 }
 
