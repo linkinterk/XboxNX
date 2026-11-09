@@ -522,13 +522,13 @@ bool kps_next_deadline(const Kernel *k, uint64_t *ns)
     uint64_t best = UINT64_MAX;
     for (int i = 0; i < K_MAX_THREADS; i++) {
         const KThread *t = &k->threads[i];
-        if (t->state == KT_WAITING && t->has_deadline && t->deadline_ns < best) {
+        if (t->state == KT_WAITING && t->has_deadline && t->deadline_ns > k->now_ns && t->deadline_ns < best) {
             best = t->deadline_ns;
             any = true;
         }
     }
     for (unsigned i = 0; i < k->ntimers; i++) {
-        if (k->timers[i].due_ns < best) {
+        if (k->timers[i].due_ns > k->now_ns && k->timers[i].due_ns < best) {
             best = k->timers[i].due_ns;
             any = true;
         }

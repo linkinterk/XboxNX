@@ -817,15 +817,17 @@ bool hw_next_event(const Kernel *k, uint64_t *ns)
     if (!g_hw.nv) {
         return false;
     }
-    uint64_t t = g_hw.next_vblank;
-    if (g_hw.alarm_on && (nv_ld(NV_PTIMER_INTR_EN_0) & 1) && g_hw.alarm_due < t) {
+    /* solo los eventos futuros: los ya pasados (el APU en su hilo puede ir
+     * atrasado) los atiende hw_tick, y no deben frenar el salto del tiempo */
+    uint64_t now = k->now_ns, t = g_hw.next_vblank;
+    if (g_hw.alarm_on && (nv_ld(NV_PTIMER_INTR_EN_0) & 1) && g_hw.alarm_due > now && g_hw.alarm_due < t) {
         t = g_hw.alarm_due;
     }
     uint64_t f;
-    if (k->irq_obj[HW_IRQ_APU] && apu_next_frame(&f) && f < t) {
+    if (k->irq_obj[HW_IRQ_APU] && apu_next_frame(&f) && f > now && f < t) {
         t = f; /* el APU avisa al terminar sus cuadros */
     }
-    if (k->irq_obj[HW_IRQ_USB0] && usb_next_frame(&f) && f < t) {
+    if (k->irq_obj[HW_IRQ_USB0] && usb_next_frame(&f) && f > now && f < t) {
         t = f; /* los cuadros USB de 1 ms */
     }
     *ns = t;
