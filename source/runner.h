@@ -23,6 +23,8 @@ typedef struct KCallRec {
     uint32_t caller;     /* dirección de retorno */
     uint32_t args[4];
     uint64_t icount;     /* instrucciones ejecutadas hasta la llamada */
+    bool real;           /* la contestó una implementación real (no simulada) */
+    uint32_t ret;        /* lo que devolvió (EAX) */
 } KCallRec;
 
 typedef enum {
@@ -42,6 +44,7 @@ typedef struct Runner {
     KCallRec calls[RUN_MAX_CALLS];
     unsigned ncalls;
     unsigned distinct;
+    unsigned simulated;      /* llamadas contestadas con un 0 simulado */
     uint64_t ns;             /* tiempo de CPU del intérprete */
 } Runner;
 

@@ -19,6 +19,7 @@
 #define VM_RAM_SIZE    (64u * 1024 * 1024)
 #define VM_MIRROR_BASE 0x80000000u
 #define VM_NO_PHYS     0xFFFFFFFFu
+#define VM_MIRROR_END  (VM_MIRROR_BASE + VM_RAM_SIZE)
 
 typedef struct Vm {
     uint8_t *ram;          /* VM_RAM_SIZE bytes, alineados a página */
@@ -36,6 +37,16 @@ bool vm_claim_phys(Vm *vm, uint32_t pa, uint32_t len);
 /* Mapea [va, va+len) a páginas físicas nuevas, en cero. Las ya mapeadas se
  * quedan como están. */
 bool vm_alloc_at(Vm *vm, uint32_t va, uint32_t len);
+
+/* Páginas físicas contiguas libres dentro de [lo, hi) (hi 0: hasta el final),
+ * alineadas, la más baja que entre; quedan ocupadas y en cero. VM_NO_PHYS si no hay. */
+uint32_t vm_alloc_phys(Vm *vm, uint32_t size, uint32_t lo, uint32_t hi, uint32_t align);
+/* Igual pero desde arriba (para lo que no debe estorbar a los bloques fijos). */
+uint32_t vm_alloc_phys_high(Vm *vm, uint32_t size);
+void vm_free_phys(Vm *vm, uint32_t pa, uint32_t size);
+/* Quita la memoria de [va, va+len) fuera del espejo: libera sus páginas físicas. */
+void vm_unmap(Vm *vm, uint32_t va, uint32_t len);
+uint32_t vm_free_pages(const Vm *vm);
 
 uint32_t vm_phys(const Vm *vm, uint32_t va);
 /* Puntero a la memoria de va, válido hasta el final de su página; NULL si no

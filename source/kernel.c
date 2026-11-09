@@ -61,9 +61,29 @@ static void wr32(uint8_t *p, uint32_t v)
     p[3] = (uint8_t)(v >> 24);
 }
 
+void kernel_impl(Kernel *k, const char *name, KFn fn)
+{
+    for (size_t i = 0; i < sizeof(k_exports) / sizeof(k_exports[0]); i++) {
+        if (k_exports[i].kind != KX_DATA && strcmp(k_exports[i].name, name) == 0) {
+            k->impl[k_exports[i].ordinal] = fn;
+            return;
+        }
+    }
+}
+
+unsigned kernel_real_count(const Kernel *k)
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < K_ORDINAL_MAX; i++) {
+        n += k->impl[i] != NULL;
+    }
+    return n;
+}
+
 bool kernel_init(Kernel *k, Vm *vm)
 {
     memset(k, 0, sizeof(*k));
+    k->vm = vm;
     index_exports();
     if (!vm_claim_phys(vm, K_PA, K_SIZE)) {
         return false;
@@ -147,6 +167,20 @@ bool kernel_init(Kernel *k, Vm *vm)
     if ((va = kernel_data_va(k, "KdDebuggerNotPresent")) != 0) {
         *vm_host(vm, va) = 1;
     }
+
+    static const char *const type_names[OB_TYPES] = {
+        "PsThreadObjectType", "ExEventObjectType",   "ExSemaphoreObjectType",
+        "ExMutantObjectType", "ExTimerObjectType",   "IoFileObjectType",
+        "IoDeviceObjectType", "ObSymbolicLinkObjectType", "ObDirectoryObjectType",
+    };
+    for (unsigned t = 0; t < OB_TYPES; t++) {
+        k->type_va[t] = kernel_data_va(k, type_names[t]);
+    }
+    if (!kmm_pool_init(k)) {
+        return false;
+    }
+    kmm_register(k);
+    kob_register(k);
     return true;
 }
 

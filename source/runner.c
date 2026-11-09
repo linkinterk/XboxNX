@@ -7,7 +7,6 @@
 #include <string.h>
 
 /* Pila del hilo (KiInitializeContextThread; distribución de hakuX ps.c). */
-#define STACK_VA         0x7F000000u
 #define MAIN_STACK_SIZE  (256u * 1024u)
 #define FX_SAVE_AREA     0x210u
 #define ETHREAD_SIZE     0x140u
@@ -42,12 +41,13 @@ bool runner_boot(Runner *r, Vm *vm, Kernel *k, const LoadReport *load)
         size = (load->stack_commit + VM_PAGE - 1) & ~(VM_PAGE - 1);
     }
     size = (size + FX_SAVE_AREA + 16 + VM_PAGE - 1) & ~(VM_PAGE - 1);
-    if (!vm_alloc_at(vm, STACK_VA - size, size)) {
+    uint32_t base = kmm_stack_alloc(k, size);
+    if (!base) {
         snprintf(r->end, sizeof(r->end), "Sin memoria para la pila del hilo");
         r->state = RUN_SYSTEM_STOP;
         return false;
     }
-    uint32_t base = STACK_VA - size, top = STACK_VA, tib = top - FX_SAVE_AREA;
+    uint32_t top = base + size, tib = top - FX_SAVE_AREA;
     r->stack_base = top;
     r->stack_limit = base;
 
@@ -75,6 +75,7 @@ bool runner_boot(Runner *r, Vm *vm, Kernel *k, const LoadReport *load)
     kt[KT_BASE_PRIORITY] = 8;
     vm_wr32(vm, et + KT_QUANTUM, 36);
     vm_wr32(vm, et + ET_START_ADDRESS, load->entry);
+    k->current_thread = et;
 
     /* KPCR en fs: NT_TIB, SelfPcr, Prcb, Irql, CurrentThread */
     uint32_t pcr = K_KPCR_VA;
@@ -113,8 +114,9 @@ static void kernel_call(Runner *r)
         return;
     }
     const KExport *e = kernel_export(ord);
+    KCallRec *rec = NULL;
     if (r->ncalls < RUN_MAX_CALLS) {
-        KCallRec *rec = &r->calls[r->ncalls];
+        rec = &r->calls[r->ncalls];
         rec->ordinal = ord;
         rec->name = e ? e->name : "?";
         rec->kind = e ? e->kind : KX_TODO;
@@ -141,6 +143,9 @@ static void kernel_call(Runner *r)
         finish(r, RUN_SYSTEM_STOP, "Llamada a un ordinal del kernel desconocido%s (%u)", "", ord);
         return;
     }
+    if (rec && (ord == 258 || ord == 49 || ord == 95)) {
+        rec->real = true; /* el ejecutor las atiende: terminan la ejecución */
+    }
     if (ord == 258) { /* PsTerminateSystemThread */
         finish(r, RUN_THREAD_END, "El juego terminó este hilo (PsTerminateSystemThread%s, estado 0x%X)", "",
                vm_rd32(c->vm, esp + 4));
@@ -155,12 +160,35 @@ static void kernel_call(Runner *r)
         finish(r, RUN_SYSTEM_STOP, "Error fatal del juego (KeBugCheck%s 0x%X)", "", vm_rd32(c->vm, esp + 4));
         return;
     }
+    /* la implementación real, o un 0 simulado */
+    uint64_t ret = 0;
+    KFn fn = r->k->impl[ord];
+    if (fn) {
+        KCall kc = {r->k, c->vm, c, {0}};
+        unsigned stack_args = 12;
+        unsigned at = 0;
+        if (e->conv == KC_FAST) {
+            kc.a[at++] = c->r[R_ECX];
+            kc.a[at++] = c->r[R_EDX];
+        }
+        for (unsigned i = 0; at < stack_args; i++) {
+            kc.a[at++] = vm_rd32(c->vm, esp + 4 + 4 * i);
+        }
+        ret = fn(&kc);
+    } else {
+        r->simulated++;
+    }
+    if (rec) {
+        rec->real = fn != NULL;
+        rec->ret = (uint32_t)ret;
+    }
     if (r->ncalls >= RUN_MAX_CALLS) {
         finish(r, RUN_CALL_LIMIT, "Se registraron %s%u llamadas: alto", "", RUN_MAX_CALLS);
         return;
     }
-    /* volver al que llamó con éxito */
-    c->r[R_EAX] = 0;
+    /* volver al que llamó */
+    c->r[R_EAX] = (uint32_t)ret;
+    c->r[R_EDX] = (uint32_t)(ret >> 32);
     c->eip = vm_rd32(c->vm, esp);
     c->r[R_ESP] = esp + 4 + kernel_pop_bytes(e);
     c->stop = CPU_RUNNING;

@@ -89,7 +89,7 @@ static void top_bar(const UiState *s, const char *subtitle)
         gfx_text(104, 52, 18, C_ON_VAR, subtitle);
     }
     char chip[48];
-    snprintf(chip, sizeof(chip), "Etapa 2c  ·  v%s", s->version);
+    snprintf(chip, sizeof(chip), "Etapa 3a  ·  v%s", s->version);
     int w = gfx_text_width(18, chip) + 32;
     gfx_rrect(UI_W - 40 - w, 26, w, 34, 17, C_GREEN_BG);
     gfx_text(UI_W - 40 - w + 16, 33, 18, C_GREEN, chip);
@@ -696,7 +696,7 @@ static void draw_run(const UiState *s)
     gfx_text_fit(x + 22, y + 80, 16, tw - 44, C_ON_VAR, d);
     x += tw + 16;
     snprintf(v, sizeof(v), "%u", r->ncalls);
-    snprintf(d, sizeof(d), "%u funciones distintas", r->distinct);
+    snprintf(d, sizeof(d), "%u reales  ·  %u simuladas", r->ncalls - r->simulated, r->simulated);
     gfx_rrect(x, y, tw, 110, 20, C_SURF);
     gfx_text(x + 22, y + 14, 18, C_ON_VAR, "Llamadas al kernel");
     gfx_text(x + 22, y + 40, 30, C_GREEN, v);
@@ -742,8 +742,9 @@ static void draw_run(const UiState *s)
     gfx_rect(px, ly0 + 10, pw, 38, C_SURF_HI);
     gfx_text(px + 20, ly0 + 18, 17, C_ON_VAR, "#");
     gfx_text(px + 70, ly0 + 18, 17, C_ON_VAR, "Llamada al kernel");
-    gfx_text(px + 410, ly0 + 18, 17, C_ON_VAR, "Argumentos");
-    gfx_text(px + 735, ly0 + 18, 17, C_ON_VAR, "Desde");
+    gfx_text(px + 380, ly0 + 18, 17, C_ON_VAR, "Argumentos");
+    gfx_text(px + 615, ly0 + 18, 17, C_ON_VAR, "Resultado");
+    gfx_text(px + 760, ly0 + 18, 17, C_ON_VAR, "Desde");
     int rows = (ph - 60) / RUN_ROW_H;
     int first = s->run_scroll >= 0 ? s->run_scroll : (int)r->ncalls - rows;
     if (first < 0) {
@@ -758,14 +759,19 @@ static void draw_run(const UiState *s)
         char b[96];
         snprintf(b, sizeof(b), "%d", i + 1);
         gfx_text(px + 20, ly, 17, C_ON_VAR, b);
-        uint32_t dot = k->kind == KX_IMPL ? C_GREEN : k->kind == KX_DATA ? HEX(0x78909C) : C_WARN;
-        gfx_circle(px + 62, ly + 11, 5, dot);
-        gfx_text_fit(px + 74, ly, 17, 320, C_ON, k->name);
+        gfx_circle(px + 62, ly + 11, 5, k->real ? C_GREEN : C_WARN);
+        gfx_text_fit(px + 74, ly, 17, 296, C_ON, k->name);
         snprintf(b, sizeof(b), "%X, %X, %X, %X", (unsigned)k->args[0], (unsigned)k->args[1], (unsigned)k->args[2],
                  (unsigned)k->args[3]);
-        gfx_text_fit(px + 410, ly, 16, 310, C_ON_VAR, b);
+        gfx_text_fit(px + 380, ly, 16, 225, C_ON_VAR, b);
+        if (k->real) {
+            snprintf(b, sizeof(b), "%X", (unsigned)k->ret);
+            gfx_text_fit(px + 615, ly, 16, 135, (k->ret & 0xC0000000u) == 0xC0000000u ? C_ERROR : C_GREEN, b);
+        } else {
+            gfx_text(px + 615, ly, 16, C_WARN, "simulada");
+        }
         snprintf(b, sizeof(b), "%08X", (unsigned)k->caller);
-        gfx_text(px + 735, ly, 16, C_ON_VAR, b);
+        gfx_text(px + 760, ly, 16, C_ON_VAR, b);
         ly += RUN_ROW_H;
     }
     if (r->ncalls == 0) {
