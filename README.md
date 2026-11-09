@@ -17,8 +17,9 @@ Port del emulador de Xbox original **hakuX** a Nintendo Switch, nativo (homebrew
 | 3e. Hardware simulado | Registros del GPU NV2A (temporizador, vblank, interrupción, cola de comandos sin dibujar), USB, audio y red como registros, puertos de E/S, interrupciones y su hilo | Lista |
 | 3f. Audio | El APU de hakuX/xemu: procesador de voces y DSP56300 (GP y EP) a tiempo virtual, AC97 (el sonido aún no sale por la Switch) | Lista |
 | 3g | Controles | Pendiente |
-| 4a. Pantalla | La imagen que el Xbox muestra (botón X mientras corre), cuadros mostrados, borrado de superficies (CLEAR_SURFACE) por software y lo que cada cuadro pide dibujar | **Esta versión** |
-| 4. Gráficos | Dibujo de triángulos del NV2A en el GPU de la Switch | Pendiente |
+| 4a. Pantalla | La imagen que el Xbox muestra (botón X mientras corre), cuadros mostrados, borrado de superficies (CLEAR_SURFACE) por software y lo que cada cuadro pide dibujar | Lista |
+| 4b. Dibujo por software | Triángulos con el vertex shader del juego (nv2a_vsh_cpu), profundidad, texturas (swizzle, lineales, DXT, YUV), register combiners y mezcla, en la CPU de la Switch | **Esta versión** |
+| 4c. Gráficos | Lo mismo en el GPU de la Switch, rápido | Pendiente |
 | 5. Optimizar | Velocidad en el CPU de la Switch | Pendiente |
 
 ## Cómo usar la etapa 1

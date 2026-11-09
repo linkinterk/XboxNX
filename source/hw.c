@@ -2,6 +2,7 @@
  * XboxNX — hardware del Xbox simulado (etapa 3e). Ver hw.h.
  */
 #include "hw.h"
+#include "nv2a_sw.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -143,6 +144,7 @@ typedef struct Hw {
 } Hw;
 
 static Hw g_hw;
+static uint32_t dma_of_handle(uint32_t handle);
 
 static uint32_t nv_ld(uint32_t off) { return *(uint32_t *)(g_hw.nv + off); }
 static void nv_st(uint32_t off, uint32_t v) { *(uint32_t *)(g_hw.nv + off) = v; }
@@ -160,6 +162,7 @@ bool hw_init(Kernel *k)
     uint8_t *nv = g_hw.nv;
     memset(&g_hw, 0, sizeof(g_hw));
     g_hw.nv = nv;
+    sw_init(k->vm->ram, VM_RAM_SIZE, dma_of_handle);
     nv_st(NV_PMC_BOOT_0, 0x02A000A1u);
     nv_st(NV_PFB_CSTATUS, 64u << 20);
     nv_st(NV_PGRAPH_FIFO, 1);
@@ -234,6 +237,12 @@ static uint32_t ramht_find(uint32_t handle)
 static uint32_t dma_base(uint32_t inst)
 {
     return ((pramin(inst + 8) & 0xFFFFF000u) | (pramin(inst) >> 20)) & 0x07FFFFFFu;
+}
+
+static uint32_t dma_of_handle(uint32_t handle)
+{
+    uint32_t inst = ramht_find(handle);
+    return inst ? dma_base(inst) : 0;
 }
 
 static uint32_t surf_get(uint32_t mask) { return (nv_ld(NV_PGRAPH_SURFACE) & mask) >> __builtin_ctz(mask); }
@@ -410,6 +419,7 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         return PB_GO;
     }
     draw_method(m, v);
+    sw_method(m, v);
     switch (m) { /* Kelvin */
     case NV097_SET_FLIP_READ: surf_set(SURF_READ, v); break;
     case NV097_SET_FLIP_WRITE: surf_set(SURF_WRITE, v); break;

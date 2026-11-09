@@ -10,6 +10,7 @@
 #include "../source/kernel.h"
 #include "../source/disc.h"
 #include "../source/hw.h"
+#include "../source/nv2a_sw.h"
 #include "../source/runner.h"
 
 static int g_fail;
@@ -658,6 +659,41 @@ static void hw_tests(void)
         CHECK(dw->draws == 2 && dw->vertices == 10 && dw->prims == ((1u << 5) | (1u << 6)));
         CHECK(fb[1 * 64 + 2] == 0xFF336699u && fb[31 * 64 + 63] == 0xFF336699u);
         CHECK(fb[0] == 0 && fb[1 * 64 + 1] == 0);
+        /* un dibujo: vertex program MOV oPos, v0; MOV oD0, v3 y un abanico
+         * de vértices inmediatos rojo, de (8, 4) a (24, 12) */
+        {
+            uint32_t q[128];
+            unsigned n = 0;
+            static const uint32_t prog[8] = {0, 0x0020001B, 0x0836106C, 0x2070F800,
+                                             0, 0x0020061B, 0x0836106C, 0x2070F819};
+            q[n++] = (1u << 18) | 0x1E94, q[n++] = 2;              /* modo: programa */
+            q[n++] = (1u << 18) | 0x1E9C, q[n++] = 0;              /* cargar en la ranura 0 */
+            q[n++] = (8u << 18) | 0x0B00;
+            for (int i = 0; i < 8; i++) {
+                q[n++] = prog[i];
+            }
+            q[n++] = (1u << 18) | 0x1EA0, q[n++] = 0;              /* empieza en 0 */
+            q[n++] = (1u << 18) | 0x17FC, q[n++] = 7;              /* abanico */
+            static const float xy[4][2] = {{8, 4}, {24, 4}, {24, 12}, {8, 12}};
+            for (int i = 0; i < 4; i++) {
+                q[n++] = (1u << 18) | (0x1940 + 12), q[n++] = 0xFF0000FFu; /* v3: rojo */
+                q[n++] = (4u << 18) | 0x1A00;
+                float f[4] = {xy[i][0], xy[i][1], 0, 1};
+                for (int j = 0; j < 4; j++) {
+                    memcpy(&q[n++], &f[j], 4);
+                }
+            }
+            q[n++] = (1u << 18) | 0x17FC, q[n++] = 0;
+            uint32_t at = PB + 0x1000;
+            memcpy(vm.ram + at, q, n * 4);
+            v = at;
+            hw_mmio(&k, NV + 0x800044u, 4, true, &v);
+            v = at + n * 4;
+            hw_mmio(&k, NV + 0x800040u, 4, true, &v);
+            CHECK(sw_stats()->skipped_ff == 2 && sw_stats()->triangles == 2 && sw_stats()->pixels == 16 * 8);
+            CHECK(fb[5 * 64 + 9] == 0xFFFF0000u && fb[11 * 64 + 23] == 0xFFFF0000u);
+            CHECK(fb[3 * 64 + 9] == 0xFF336699u && fb[5 * 64 + 25] == 0xFF336699u);
+        }
         /* la pantalla: AvSetDisplayMode con ese búfer, 64 píxeles de ancho */
         hw_set_display(&k, 0x1E, 256, SURF + 0x1000);
         XImage img = {0};

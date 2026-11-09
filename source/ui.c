@@ -13,6 +13,7 @@
 #include "gfx.h"
 #include "hw.h"
 #include "apu/apu.h"
+#include "nv2a_sw.h"
 
 #define C_BG        HEX(0x121212)
 #define C_SURF      HEX(0x1F1F1F)
@@ -91,7 +92,7 @@ static void top_bar(const UiState *s, const char *subtitle)
         gfx_text(104, 52, 18, C_ON_VAR, subtitle);
     }
     char chip[48];
-    snprintf(chip, sizeof(chip), "Etapa 4a  ·  v%s", s->version);
+    snprintf(chip, sizeof(chip), "Etapa 4b  ·  v%s", s->version);
     int w = gfx_text_width(18, chip) + 32;
     gfx_rrect(UI_W - 40 - w, 26, w, 34, 17, C_GREEN_BG);
     gfx_text(UI_W - 40 - w + 16, 33, 18, C_GREEN, chip);
@@ -758,7 +759,7 @@ static void draw_xbox_screen(const UiState *s)
         const HwDraws *dw = &hs->last;
         static const char *pn[16] = {"", "puntos", "líneas", "lazo", "tira-l", "triángulos", "tira", "abanico",
                                      "quads", "tira-q", "polígono", "", "", "", "", ""};
-        char d2[200];
+        char d2[260];
         int o = snprintf(d2, sizeof(d2), "Último cuadro: %u dibujos, %u vértices, %u con shader, %u con textura, %u sueltos",
                          dw->draws, dw->vertices, dw->program, dw->textured, dw->immediate);
         for (int i = 1, first = 1; i < 16 && o < (int)sizeof(d2) - 12; i++) {
@@ -772,6 +773,11 @@ static void draw_xbox_screen(const UiState *s)
             for (unsigned i = 0; i < dw->nformats && o < (int)sizeof(d2) - 6; i++) {
                 o += snprintf(d2 + o, sizeof(d2) - (size_t)o, " %02X", dw->formats[i]);
             }
+        }
+        const SwStats *sw = sw_stats();
+        if (o < (int)sizeof(d2) - 40) {
+            snprintf(d2 + o, sizeof(d2) - (size_t)o, " · dibujado: %llu triángulos, %u sin shader",
+                     (unsigned long long)sw->triangles, sw->skipped_ff);
         }
         gfx_text_fit(20, BOTBAR_Y + 22, 15, 700, C_ON_VAR, d2);
     } else {
