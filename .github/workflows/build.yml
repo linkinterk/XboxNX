@@ -67,7 +67,7 @@ jobs:
 
   switch:
     name: XboxNX.nro (Switch)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     container: devkitpro/devkita64:latest
     steps:
       - uses: actions/checkout@v4
