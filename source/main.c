@@ -21,8 +21,9 @@
 #include "runner.h"
 #include "probe.h"
 #include "ui.h"
+#include "usb/usb.h"
 
-#define APP_VER   "0.13.2"
+#define APP_VER   "0.14.0"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -184,6 +185,35 @@ static int detail_items(void)
     }
 }
 
+/* Los controles de la Switch como el control del Xbox, por posición: B
+ * (abajo) es la A del Xbox, A la B, Y la X, X la Y; L y R el blanco y el
+ * negro; ZL y ZR los gatillos; + Start y - Back. */
+static void pad_to_xbox(PadState *pad, u64 h, NcPadState *ps)
+{
+    memset(ps, 0, sizeof(*ps));
+    if (h & HidNpadButton_Up) ps->buttons |= NC_PAD_DPAD_UP;
+    if (h & HidNpadButton_Down) ps->buttons |= NC_PAD_DPAD_DOWN;
+    if (h & HidNpadButton_Left) ps->buttons |= NC_PAD_DPAD_LEFT;
+    if (h & HidNpadButton_Right) ps->buttons |= NC_PAD_DPAD_RIGHT;
+    if (h & HidNpadButton_Plus) ps->buttons |= NC_PAD_START;
+    if (h & HidNpadButton_Minus) ps->buttons |= NC_PAD_BACK;
+    if (h & HidNpadButton_StickL) ps->buttons |= NC_PAD_LTHUMB;
+    if (h & HidNpadButton_StickR) ps->buttons |= NC_PAD_RTHUMB;
+    ps->analog[0] = (h & HidNpadButton_B) ? 0xFF : 0;  /* A */
+    ps->analog[1] = (h & HidNpadButton_A) ? 0xFF : 0;  /* B */
+    ps->analog[2] = (h & HidNpadButton_Y) ? 0xFF : 0;  /* X */
+    ps->analog[3] = (h & HidNpadButton_X) ? 0xFF : 0;  /* Y */
+    ps->analog[4] = (h & HidNpadButton_R) ? 0xFF : 0;  /* negro */
+    ps->analog[5] = (h & HidNpadButton_L) ? 0xFF : 0;  /* blanco */
+    ps->analog[6] = (h & HidNpadButton_ZL) ? 0xFF : 0; /* gatillo izquierdo */
+    ps->analog[7] = (h & HidNpadButton_ZR) ? 0xFF : 0; /* gatillo derecho */
+    HidAnalogStickState l = padGetStickPos(pad, 0), r = padGetStickPos(pad, 1);
+    ps->lx = (int16_t)l.x;
+    ps->ly = (int16_t)l.y;
+    ps->rx = (int16_t)r.x;
+    ps->ry = (int16_t)r.y;
+}
+
 int main(int argc, char **argv)
 {
     (void)argc;
@@ -216,7 +246,8 @@ int main(int argc, char **argv)
     while (appletMainLoop()) {
         padUpdate(&pad);
         u64 k = padGetButtonsDown(&pad);
-        if (k & HidNpadButton_Plus) {
+        bool playing = g_ui.screen == UI_RUN && g_ui.run_screen;
+        if ((k & HidNpadButton_Plus) && !playing) {
             break;
         }
 
@@ -332,9 +363,27 @@ int main(int argc, char **argv)
             break;
         }
         case UI_RUN: {
-            if (k & HidNpadButton_X) {
-                g_ui.run_screen = !g_ui.run_screen;
-                dirty = true;
+            /* En la pantalla del Xbox los botones son del juego (L3 + R3
+             * juntos vuelven al registro); en el registro, del emulador. */
+            if (g_ui.run_screen) {
+                u64 held = padGetButtons(&pad);
+                NcPadState ps = {0};
+                if ((held & HidNpadButton_StickL) && (held & HidNpadButton_StickR)) {
+                    g_ui.run_screen = false;
+                    dirty = true;
+                } else {
+                    pad_to_xbox(&pad, held, &ps);
+                }
+                nc_pad_set(0, &ps);
+                k = 0;
+            } else {
+                NcPadState none = {0};
+                nc_pad_set(0, &none);
+                if (k & HidNpadButton_X) {
+                    g_ui.run_screen = true;
+                    dirty = true;
+                    k = 0;
+                }
             }
             if (g_run.state == RUN_ACTIVE) {
                 /* ~25 ms de intérprete por cuadro, en tramos de 100.000 */

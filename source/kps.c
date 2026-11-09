@@ -534,7 +534,8 @@ bool kps_next_deadline(const Kernel *k, uint64_t *ns)
         }
     }
     uint64_t hw;
-    if ((k->irq_obj[HW_IRQ_NV2A] || k->irq_obj[HW_IRQ_ACI] || k->irq_obj[HW_IRQ_APU]) && hw_next_event(k, &hw) &&
+    if ((k->irq_obj[HW_IRQ_NV2A] || k->irq_obj[HW_IRQ_ACI] || k->irq_obj[HW_IRQ_APU] || k->irq_obj[HW_IRQ_USB0]) &&
+        hw_next_event(k, &hw) &&
         hw < best) {
         best = hw; /* el vblank (o el audio que avanza) despierta a los ISR */
         any = true;

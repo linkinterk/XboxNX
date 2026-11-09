@@ -24,7 +24,7 @@ jobs:
         run: |
           # El APU (hakuX/xemu) y nv2a_vsh_cpu (dominio público): se compilan aparte, con avisos pero sin -Werror
           mkdir -p build-test/apu
-          for f in source/apu/apu.c source/apu/vp/vp.c source/apu/vp/resample.c source/apu/dsp/dsp.c source/apu/dsp/dsp_cpu.c source/apu/dsp/dsp_dma.c source/apu/dsp/gp_ep.c source/apu/dsp/debug.c source/vsh/nv2a_vsh_cpu.c source/vsh/nv2a_vsh_disassembler.c source/vsh/nv2a_vsh_emulator.c source/vsh/nv2a_vsh_emulator_execution_state.c; do
+          for f in source/apu/apu.c source/apu/vp/vp.c source/apu/vp/resample.c source/apu/dsp/dsp.c source/apu/dsp/dsp_cpu.c source/apu/dsp/dsp_dma.c source/apu/dsp/gp_ep.c source/apu/dsp/debug.c source/vsh/nv2a_vsh_cpu.c source/vsh/nv2a_vsh_disassembler.c source/vsh/nv2a_vsh_emulator.c source/vsh/nv2a_vsh_emulator_execution_state.c source/usb/usb.c source/usb/usb_hub.c source/usb/xid.c source/usb/ohci.c; do
             gcc -std=gnu11 -Wall -fsanitize=address,undefined -g -Isource -c $f -o build-test/apu/$(basename $f .c).o
           done
           gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g -Isource \

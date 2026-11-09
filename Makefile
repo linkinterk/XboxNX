@@ -40,9 +40,9 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET		:=	XboxNX
 APP_TITLE	:=	XboxNX
 APP_AUTHOR	:=	Jairo (basado en hakuX)
-APP_VERSION	:=	0.13.2
+APP_VERSION	:=	0.14.0
 BUILD		:=	build
-SOURCES		:=	source source/apu source/apu/vp source/apu/dsp source/vsh
+SOURCES		:=	source source/apu source/apu/vp source/apu/dsp source/vsh source/usb
 DATA		:=	data
 INCLUDES	:=	include source
 #ROMFS	:=	romfs

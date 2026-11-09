@@ -14,6 +14,7 @@
 #include "hw.h"
 #include "apu/apu.h"
 #include "nv2a_sw.h"
+#include "usb/usb.h"
 
 #define C_BG        HEX(0x121212)
 #define C_SURF      HEX(0x1F1F1F)
@@ -92,7 +93,7 @@ static void top_bar(const UiState *s, const char *subtitle)
         gfx_text(104, 52, 18, C_ON_VAR, subtitle);
     }
     char chip[48];
-    snprintf(chip, sizeof(chip), "Etapa 4b  ·  v%s", s->version);
+    snprintf(chip, sizeof(chip), "Etapa 3g  ·  v%s", s->version);
     int w = gfx_text_width(18, chip) + 32;
     gfx_rrect(UI_W - 40 - w, 26, w, 34, 17, C_GREEN_BG);
     gfx_text(UI_W - 40 - w + 16, 33, 18, C_GREEN, chip);
@@ -807,13 +808,13 @@ static void draw_xbox_screen(const UiState *s)
         gfx_text_center(0, UI_W, 330, 22, C_ON_VAR, "Todavía no hay imagen");
     }
     gfx_text_fit(20, 6, 18, UI_W - 40, C_ON_VAR, b);
-    if (r->state == RUN_ACTIVE) {
-        Hint hh[] = {{"X", "Registro"}, {"B", "Detener"}};
-        bottom_bar(hh, 2);
-    } else {
-        Hint hh[] = {{"X", "Registro"}, {"A", "Otra vez"}, {"B", "Volver"}};
-        bottom_bar(hh, 3);
-    }
+    /* aquí los botones son del juego: L3 + R3 vuelve al registro */
+    gfx_rect(0, BOTBAR_Y, UI_W, 1, C_OUTLINE);
+    gfx_text(UI_W - 470, BOTBAR_Y + 20, 18, C_ON, "Botones del juego · L3 + R3: registro");
+    const UsbStats *us = usb_stats();
+    snprintf(b, sizeof(b), "Control: %s · el juego lo leyó %u veces", us->operational ? "USB activo" : "USB sin iniciar",
+             us->polls);
+    gfx_text_fit(UI_W - 520, 6, 18, 500, us->polls ? C_GREEN : C_ON_VAR, b);
 }
 
 static void draw_run(const UiState *s)

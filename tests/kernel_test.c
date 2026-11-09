@@ -605,6 +605,17 @@ static void hw_tests(void)
     hw_mmio(&k, 0xFE80200Cu, 4, false, &c1);
     CHECK(c1 - c0 == 48);
 
+    /* USB: el control del jugador 1 (su hub) conectado en el puerto raíz 3;
+     * operativo, cada milisegundo virtual es un cuadro (SF) */
+    CHECK(hw_mmio(&k, 0xFED00000u, 4, false, &v) && v == 0x10);
+    CHECK(hw_mmio(&k, 0xFED00054u + 8, 4, false, &v) && (v & 1));
+    v = 2u << 6; /* HCFS operativo */
+    hw_mmio(&k, 0xFED00004u, 4, true, &v);
+    k.now_ns += 3000000u;
+    hw_tick(&k);
+    CHECK(hw_mmio(&k, 0xFED0000Cu, 4, false, &v) && (v & 4));
+    CHECK(hw_mmio(&k, 0xFED0003Cu, 4, false, &v) && v >= 2);
+
     /* GPU: un push buffer que borra un rectángulo de la superficie de color
      * (CLEAR_SURFACE por software) y la pantalla que se ve */
     {

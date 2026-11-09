@@ -3,6 +3,7 @@
  */
 #include "hw.h"
 #include "nv2a_sw.h"
+#include "usb/usb.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -110,14 +111,9 @@
 
 enum { PB_GO, PB_FLIP, PB_TRAP, PB_FIFO, PB_ERROR };
 
-typedef struct Ohci {
-    uint32_t r[0x60 / 4];
-} Ohci;
-
 typedef struct Hw {
     uint8_t *nv;          /* 16 MB de registros del NV2A */
     uint8_t nic[NIC_SIZE];
-    Ohci usb[2];
     uint64_t next_vblank;
     uint64_t alarm_due;
     bool alarm_on;
@@ -168,13 +164,7 @@ bool hw_init(Kernel *k)
     nv_st(NV_PGRAPH_FIFO, 1);
     g_hw.next_vblank = FRAME_NS;
     aci_init(k);
-    for (int i = 0; i < 2; i++) {
-        Ohci *o = &g_hw.usb[i];
-        o->r[0x00 / 4] = 0x10;                   /* HcRevision 1.0 */
-        o->r[0x34 / 4] = 0x27782EDF;             /* HcFmInterval */
-        o->r[0x48 / 4] = 0x02001204 & ~0xFFu;    /* HcRhDescriptorA: power switching */
-        o->r[0x48 / 4] |= 4;                     /* 4 puertos raíz */
-    }
+    usb_init(k->vm->ram, VM_RAM_SIZE);
     return true;
 }
 
@@ -209,6 +199,9 @@ uint32_t hw_irq_lines(const Kernel *k)
     }
     if (apu_irq()) {
         lines |= 1u << HW_IRQ_APU;
+    }
+    if (usb_irq()) {
+        lines |= 1u << HW_IRQ_USB0;
     }
     return lines;
 }
@@ -658,43 +651,6 @@ static void nv_write(Kernel *k, uint32_t off, int size, uint32_t value)
     }
 }
 
-/* ================================================================ USB (OHCI) */
-
-static uint32_t ohci_read(Kernel *k, Ohci *o, uint32_t off)
-{
-    if (off == 0x3C) { /* HcFmNumber: un cuadro por milisegundo */
-        return (uint32_t)(k->now_ns / 1000000u) & 0xFFFF;
-    }
-    if (off == 0x38) { /* HcFmRemaining */
-        return 0x2EDF - (uint32_t)((k->now_ns % 1000000u) * 0x2EDF / 1000000u);
-    }
-    return off < sizeof(o->r) ? o->r[off / 4] : 0;
-}
-
-static void ohci_write(Ohci *o, uint32_t off, uint32_t v)
-{
-    if (off >= sizeof(o->r)) {
-        return;
-    }
-    switch (off) {
-    case 0x00: return; /* HcRevision */
-    case 0x08: /* HcCommandStatus: el reinicio termina al instante */
-        if (v & 1) {
-            uint32_t a = o->r[0x48 / 4];
-            memset(o->r, 0, sizeof(o->r));
-            o->r[0x00 / 4] = 0x10;
-            o->r[0x34 / 4] = 0x27782EDF;
-            o->r[0x48 / 4] = a;
-        }
-        o->r[off / 4] |= v & ~1u;
-        return;
-    case 0x0C: o->r[off / 4] &= ~v; return; /* HcInterruptStatus: 1 borra */
-    case 0x10: o->r[0x10 / 4] |= v; o->r[0x14 / 4] = o->r[0x10 / 4]; return; /* enable */
-    case 0x14: o->r[0x10 / 4] &= ~v; o->r[0x14 / 4] = o->r[0x10 / 4]; return; /* disable */
-    default: o->r[off / 4] = v; return;
-    }
-}
-
 static uint32_t buf_rd(const uint8_t *b, uint32_t off, int size);
 static void buf_wr(uint8_t *b, uint32_t off, int size, uint32_t v);
 
@@ -737,14 +693,17 @@ bool hw_mmio(void *kernel, uint32_t addr, int size, bool write, uint32_t *value)
         } else {
             *value = aci_read(k, addr - ACI_BASE, size);
         }
-    } else if (addr >= USB0_BASE && addr < USB1_BASE + USB_SIZE &&
-               ((addr - USB0_BASE) & 0x7FFF) + (uint32_t)size <= USB_SIZE) {
-        Ohci *o = &g_hw.usb[addr >= USB1_BASE];
+    } else if (addr >= USB0_BASE && addr < USB0_BASE + USB_SIZE) {
         uint32_t off = (addr - USB0_BASE) & 0xFFC;
         if (write) {
-            ohci_write(o, off, *value);
+            usb_write(off, *value);
         } else {
-            *value = ohci_read(k, o, off);
+            *value = usb_read(off) >> (8 * (addr & 3));
+        }
+    } else if (addr >= USB1_BASE && addr < USB1_BASE + USB_SIZE) {
+        if (!write) { /* el segundo controlador: sin nada conectado */
+            uint32_t off = addr - USB1_BASE;
+            *value = off == 0 ? 0x10 : off == 0x48 ? 0x204 : 0;
         }
     } else if (addr >= NIC_BASE && addr - NIC_BASE + (uint32_t)size <= NIC_SIZE) {
         if (write) {
@@ -823,6 +782,7 @@ void hw_tick(Kernel *k)
     }
     aci_tick(k);
     apu_tick(k);
+    usb_tick(k->now_ns);
 }
 
 bool hw_next_event(const Kernel *k, uint64_t *ns)
@@ -837,6 +797,9 @@ bool hw_next_event(const Kernel *k, uint64_t *ns)
     uint64_t f;
     if (k->irq_obj[HW_IRQ_APU] && apu_next_frame(&f) && f < t) {
         t = f; /* el APU avisa al terminar sus cuadros */
+    }
+    if (k->irq_obj[HW_IRQ_USB0] && usb_next_frame(&f) && f < t) {
+        t = f; /* los cuadros USB de 1 ms */
     }
     *ns = t;
     return true;
