@@ -51,6 +51,7 @@ typedef struct UiState {
     /* etapa 2c: ejecución en el intérprete */
     const Runner *run;
     int run_scroll;          /* -1: seguir la última llamada */
+    bool run_screen;         /* X: ver la pantalla del Xbox en vez del registro */
     /* pruebas */
     const ProbeResult *probe;
     bool exc_tried, exc_ok;

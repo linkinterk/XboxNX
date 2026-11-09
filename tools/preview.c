@@ -9,6 +9,7 @@
 
 #include "../source/gfx.h"
 #include "../source/ui.h"
+#include "../source/hw.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -96,7 +97,7 @@ int main(int argc, char **argv)
     }
 
     UiState s = {0};
-    s.version = "0.11.1";
+    s.version = "0.12.0";
     s.cards = cards;
 
     s.screen = UI_LOADING;
@@ -178,6 +179,18 @@ int main(int argc, char **argv)
     s.run_scroll = -1;
     ui_draw(&s);
     save(argv[3], "12_ejecucion");
+    /* la pantalla del Xbox con un degradado de ejemplo */
+    for (uint32_t y = 0; y < 480; y++) {
+        for (uint32_t x = 0; x < 640; x++) {
+            uint32_t *p = (uint32_t *)(vm.ram + 0x02000000u + y * 2560 + x * 4);
+            *p = 0xFF000000u | (x * 255 / 639) << 16 | (y * 255 / 479) << 8 | 0x40;
+        }
+    }
+    hw_set_display(&k, 0x1E, 2560, 0x02000000u);
+    s.run_screen = true;
+    ui_draw(&s);
+    save(argv[3], "13_pantalla");
+    s.run_screen = false;
     vm_free(&vm);
 
     ProbeResult pr = {0};

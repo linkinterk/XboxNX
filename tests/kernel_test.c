@@ -3,6 +3,7 @@
  * (hilos, esperas, tiempo, temporizadores y DPC con código x86 de verdad).
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "../source/cpu.h"
@@ -602,6 +603,58 @@ static void hw_tests(void)
     hw_tick(&k);
     hw_mmio(&k, 0xFE80200Cu, 4, false, &c1);
     CHECK(c1 - c0 == 48);
+
+    /* GPU: un push buffer que borra un rectángulo de la superficie de color
+     * (CLEAR_SURFACE por software) y la pantalla que se ve */
+    {
+        const uint32_t NV = 0xFD000000u, PB = 0x00F00000u, SURF = 0x01000000u;
+        const uint32_t H_KELVIN = 0xBEEF0001u, H_COLOR = 0xBEEF0002u;
+        v = 0x100; /* RAMHT en 0x10000 de PRAMIN, 4 KB */
+        hw_mmio(&k, NV + 0x2210u, 4, true, &v);
+        uint32_t handles[2] = {H_KELVIN, H_COLOR}, insts[2] = {0x2000, 0x2100};
+        for (int i = 0; i < 2; i++) {
+            uint32_t hash = 0;
+            for (uint32_t h = handles[i]; h; h >>= 11) {
+                hash ^= h & 0x7FF;
+            }
+            uint32_t e = 0x10000 + 8 * (hash & 511);
+            v = handles[i];
+            hw_mmio(&k, NV + 0x700000u + e, 4, true, &v);
+            v = 0x80000000u | (insts[i] >> 4);
+            hw_mmio(&k, NV + 0x700000u + e + 4, 4, true, &v);
+        }
+        v = 0x97;
+        hw_mmio(&k, NV + 0x700000u + 0x2000, 4, true, &v);
+        v = 0x3D;
+        hw_mmio(&k, NV + 0x700000u + 0x2100, 4, true, &v);
+        v = SURF;
+        hw_mmio(&k, NV + 0x700000u + 0x2108, 4, true, &v);
+        static const uint32_t pb[] = {
+            (1u << 18) | 0x0000, H_KELVIN,               /* SET_OBJECT */
+            (1u << 18) | 0x0194, H_COLOR,                /* SET_CONTEXT_DMA_COLOR */
+            (6u << 18) | 0x01FC, 0, 64u << 16, 32u << 16, 0x108, 256, 0x1000, /* clip, formato, pitch, offset */
+            (1u << 18) | 0x1D90, 0xFF336699u,            /* SET_COLOR_CLEAR_VALUE */
+            (2u << 18) | 0x1D98, (63u << 16) | 2, (31u << 16) | 1, /* el rectángulo */
+            (1u << 18) | 0x1D94, 0xF0,                   /* CLEAR_SURFACE: R, G, B, A */
+        };
+        memcpy(vm.ram + PB, pb, sizeof(pb));
+        v = 1;
+        hw_mmio(&k, NV + 0x400720u, 4, true, &v);       /* PGRAPH_FIFO abierta */
+        v = PB;
+        hw_mmio(&k, NV + 0x800044u, 4, true, &v);       /* GET */
+        v = PB + (uint32_t)sizeof(pb);
+        hw_mmio(&k, NV + 0x800040u, 4, true, &v);       /* PUT: corre */
+        const uint32_t *fb = (const uint32_t *)(vm.ram + SURF + 0x1000);
+        CHECK(hw_stats()->clears == 1);
+        CHECK(fb[1 * 64 + 2] == 0xFF336699u && fb[31 * 64 + 63] == 0xFF336699u);
+        CHECK(fb[0] == 0 && fb[1 * 64 + 1] == 0);
+        /* la pantalla: AvSetDisplayMode con ese búfer, 64 píxeles de ancho */
+        hw_set_display(&k, 0x1E, 256, SURF + 0x1000);
+        XImage img = {0};
+        CHECK(hw_screen(&k, &img) && img.w == 64 && img.px[(1 * 64 + 2) * 4] == 0x33 &&
+              img.px[(1 * 64 + 2) * 4 + 2] == 0x99);
+        free(img.px);
+    }
 }
 
 int main(int argc, char **argv)

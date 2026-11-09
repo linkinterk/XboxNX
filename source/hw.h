@@ -20,6 +20,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "xpr.h"
 
 struct Kernel;
 
@@ -39,12 +40,20 @@ typedef struct HwStats {
     uint64_t pb_words;      /* palabras del push buffer recorridas */
     unsigned pb_stall;      /* 0 corre, 1 FLIP_STALL, 2 trampa, 3 FIFO cerrada, 4 error */
     unsigned traps, flips, sem_releases;
+    unsigned frames;        /* cambios de PCRTC_START: cuadros mostrados */
+    unsigned clears;        /* CLEAR_SURFACE hechos */
+    unsigned av_modes;      /* llamadas a AvSetDisplayMode */
     /* los registros distintos tocados hace poco (el más reciente primero) */
     struct {
         uint32_t addr, value, count;
         bool write;
     } recent[HW_RECENT];
 } HwStats;
+
+/* El modo de video que pidió el juego (AvSetDisplayMode). */
+void hw_set_display(struct Kernel *k, uint32_t format, uint32_t pitch, uint32_t fb);
+/* La imagen que el Xbox muestra, en RGBA (px con malloc, reutilizado). */
+bool hw_screen(const struct Kernel *k, XImage *out);
 
 /* Prepara el hardware para una ejecución nueva. */
 bool hw_init(struct Kernel *k);

@@ -91,7 +91,7 @@ static void top_bar(const UiState *s, const char *subtitle)
         gfx_text(104, 52, 18, C_ON_VAR, subtitle);
     }
     char chip[48];
-    snprintf(chip, sizeof(chip), "Etapa 3f  ·  v%s", s->version);
+    snprintf(chip, sizeof(chip), "Etapa 4a  ·  v%s", s->version);
     int w = gfx_text_width(18, chip) + 32;
     gfx_rrect(UI_W - 40 - w, 26, w, 34, 17, C_GREEN_BG);
     gfx_text(UI_W - 40 - w + 16, 33, 18, C_GREEN, chip);
@@ -735,8 +735,45 @@ static const char *obj_kind(const Vm *vm, uint32_t o)
     }
 }
 
+/* La pantalla del Xbox: lo que hay en la memoria de video que muestra. */
+static void draw_xbox_screen(const UiState *s)
+{
+    const Runner *r = s->run;
+    const Kernel *kn = r->k;
+    static XImage img;
+    const HwStats *hs = hw_stats();
+    char b[160];
+    gfx_clear(HEX(0x000000));
+    bool ok = kn && hw_screen(kn, &img);
+    if (ok) {
+        int h = BOTBAR_Y - 40, w = img.w * h / img.h;
+        if (w > UI_W - 40) {
+            w = UI_W - 40;
+            h = img.h * w / img.w;
+        }
+        gfx_image(&img, (UI_W - w) / 2, 34, w, h, 0);
+        snprintf(b, sizeof(b), "Pantalla del Xbox  ·  %dx%d  ·  %u cuadros  ·  %u borrados  ·  %u flips  ·  %.2f s del juego",
+                 img.w, img.h, hs->frames, hs->clears, hs->flips, kn->now_ns / 1e9);
+    } else {
+        snprintf(b, sizeof(b), "Pantalla del Xbox: el juego todavía no eligió un modo de video");
+        gfx_text_center(0, UI_W, 330, 22, C_ON_VAR, "Todavía no hay imagen");
+    }
+    gfx_text_fit(20, 6, 18, UI_W - 40, C_ON_VAR, b);
+    if (r->state == RUN_ACTIVE) {
+        Hint hh[] = {{"X", "Registro"}, {"B", "Detener"}};
+        bottom_bar(hh, 2);
+    } else {
+        Hint hh[] = {{"X", "Registro"}, {"A", "Otra vez"}, {"B", "Volver"}};
+        bottom_bar(hh, 3);
+    }
+}
+
 static void draw_run(const UiState *s)
 {
+    if (s->run_screen) {
+        draw_xbox_screen(s);
+        return;
+    }
     const UiCard *c = &s->cards[s->sel];
     const Runner *r = s->run;
     char sub[320];
@@ -930,8 +967,8 @@ static void draw_run(const UiState *s)
     {
         const HwStats *hs = hw_stats();
         static const char *pbs[] = {"corre", "espera flip", "trampa", "FIFO cerrada", "error"};
-        snprintf(b, sizeof(b), "HW %llu accesos  ·  GPU %llu palabras, %u flips, %u sem",
-                 (unsigned long long)hs->accesses, (unsigned long long)hs->pb_words, hs->flips, hs->sem_releases);
+        snprintf(b, sizeof(b), "GPU %llu palabras · %u cuadros · %u borrados · %u flips",
+                 (unsigned long long)hs->pb_words, hs->frames, hs->clears, hs->flips);
         gfx_text_fit(rx + 16, ry, 14, rw - 32, C_ON_VAR, b);
         ry += 19;
         for (int i = 0; i < HW_RECENT; i += 2) {
@@ -1014,11 +1051,11 @@ static void draw_run(const UiState *s)
     }
 
     if (r->state == RUN_ACTIVE) {
-        Hint h[] = {{"B", "Detener"}, {"+", "Salir"}};
-        bottom_bar(h, 2);
-    } else {
-        Hint h[] = {{"A", "Otra vez"}, {"B", "Volver"}, {"+", "Salir"}};
+        Hint h[] = {{"X", "Pantalla"}, {"B", "Detener"}, {"+", "Salir"}};
         bottom_bar(h, 3);
+    } else {
+        Hint h[] = {{"X", "Pantalla"}, {"A", "Otra vez"}, {"B", "Volver"}, {"+", "Salir"}};
+        bottom_bar(h, 4);
     }
 }
 

@@ -86,6 +86,16 @@
 #define NV097_GET_REPORT           0x17D0u
 #define NV097_SET_SEMAPHORE_OFFSET 0x1D6Cu
 #define NV097_SEMAPHORE_RELEASE    0x1D70u
+#define NV097_SET_CONTEXT_DMA_COLOR     0x0194u
+#define NV097_SET_SURFACE_CLIP_HORIZONTAL 0x0200u
+#define NV097_SET_SURFACE_CLIP_VERTICAL 0x0204u
+#define NV097_SET_SURFACE_FORMAT        0x0208u
+#define NV097_SET_SURFACE_PITCH         0x020Cu
+#define NV097_SET_SURFACE_COLOR_OFFSET  0x0210u
+#define NV097_SET_COLOR_CLEAR_VALUE     0x1D90u
+#define NV097_CLEAR_SURFACE             0x1D94u
+#define NV097_SET_CLEAR_RECT_HORIZONTAL 0x1D98u
+#define NV097_SET_CLEAR_RECT_VERTICAL   0x1D9Cu
 
 enum { PB_GO, PB_FLIP, PB_TRAP, PB_FIFO, PB_ERROR };
 
@@ -109,6 +119,11 @@ typedef struct Hw {
     uint32_t obj_inst[8];
     uint8_t obj_class[8];
     uint32_t sem_inst, sem_offset, report_inst;
+    /* la superficie de color (para borrarla por software) */
+    uint32_t color_inst, surf_format, surf_pitch, color_offset, clip_h, clip_v;
+    uint32_t clear_value, clear_h, clear_v;
+    /* lo que se ve: AvSetDisplayMode y PCRTC_START */
+    uint32_t av_format, av_pitch, av_fb;
     int stall;
     HwStats st;
 } Hw;
@@ -221,6 +236,65 @@ static uint32_t *phys32(Kernel *k, uint32_t pa)
     return pa + 4 <= VM_RAM_SIZE ? (uint32_t *)(k->vm->ram + pa) : NULL;
 }
 
+/* CLEAR_SURFACE por software: el rectángulo de la superficie de color
+ * (lineal, de 16 o 32 bits) con el color de borrado. Sin dibujo todavía,
+ * es lo primero que se ve de un juego. */
+static void clear_color(Kernel *k, uint32_t flags)
+{
+    if (!(flags & 0xF0u) || !g_hw.color_inst) {
+        return;
+    }
+    unsigned fmt = g_hw.surf_format & 0xF, type = (g_hw.surf_format >> 8) & 0xF;
+    unsigned aa = (g_hw.surf_format >> 12) & 0xF;
+    if (type != 1) {
+        return; /* swizzle: más adelante */
+    }
+    unsigned bpp = fmt == 1 || fmt == 2 || fmt == 3 ? 2 : (fmt >= 4 && fmt <= 8) ? 4 : 0;
+    uint32_t pitch = g_hw.surf_pitch & 0xFFFF;
+    if (!bpp || !pitch) {
+        return;
+    }
+    unsigned fx = aa ? 2 : 1, fy = aa == 2 ? 2 : 1;
+    uint32_t x1 = (g_hw.clear_h & 0xFFFF) * fx, x2 = ((g_hw.clear_h >> 16) + 1) * fx;
+    uint32_t y1 = (g_hw.clear_v & 0xFFFF) * fy, y2 = ((g_hw.clear_v >> 16) + 1) * fy;
+    uint32_t cw = ((g_hw.clip_h >> 16) ? (g_hw.clip_h >> 16) : 4096) * fx;
+    uint32_t ch = ((g_hw.clip_v >> 16) ? (g_hw.clip_v >> 16) : 4096) * fy;
+    if (x2 > cw) x2 = cw;
+    if (y2 > ch) y2 = ch;
+    if (x2 > pitch / bpp) x2 = pitch / bpp;
+    if (x1 >= x2 || y1 >= y2) {
+        return;
+    }
+    uint32_t mask = 0;
+    if (bpp == 4) {
+        mask = (flags & 0x10 ? 0x00FF0000u : 0) | (flags & 0x20 ? 0x0000FF00u : 0) |
+               (flags & 0x40 ? 0x000000FFu : 0) | (flags & 0x80 ? 0xFF000000u : 0);
+    } else {
+        mask = (flags & 0x10 ? 0xF800u : 0) | (flags & 0x20 ? 0x07E0u : 0) | (flags & 0x40 ? 0x001Fu : 0);
+    }
+    uint32_t base = dma_base(g_hw.color_inst) + g_hw.color_offset;
+    uint32_t val = g_hw.clear_value;
+    for (uint32_t y = y1; y < y2; y++) {
+        uint32_t row = base + y * pitch;
+        if (!phys32(k, row + x2 * bpp - 4)) {
+            break;
+        }
+        uint8_t *p = k->vm->ram + ((row + x1 * bpp) & (VM_RAM_SIZE - 1));
+        if (bpp == 4) {
+            uint32_t *q = (uint32_t *)p;
+            for (uint32_t x = x1; x < x2; x++, q++) {
+                *q = (*q & ~mask) | (val & mask);
+            }
+        } else {
+            uint16_t *q = (uint16_t *)p;
+            for (uint32_t x = x1; x < x2; x++, q++) {
+                *q = (uint16_t)((*q & ~mask) | (val & mask));
+            }
+        }
+    }
+    g_hw.st.clears++;
+}
+
 /* Un método del push buffer. Devuelve PB_GO o el motivo de parar. */
 static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
 {
@@ -266,6 +340,16 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
     case NV097_SET_CONTEXT_DMA_SEMAPHORE: g_hw.sem_inst = ramht_find(v); break;
     case NV097_SET_CONTEXT_DMA_REPORT: g_hw.report_inst = ramht_find(v); break;
     case NV097_SET_SEMAPHORE_OFFSET: g_hw.sem_offset = v; break;
+    case NV097_SET_CONTEXT_DMA_COLOR: g_hw.color_inst = ramht_find(v); break;
+    case NV097_SET_SURFACE_CLIP_HORIZONTAL: g_hw.clip_h = v; break;
+    case NV097_SET_SURFACE_CLIP_VERTICAL: g_hw.clip_v = v; break;
+    case NV097_SET_SURFACE_FORMAT: g_hw.surf_format = v; break;
+    case NV097_SET_SURFACE_PITCH: g_hw.surf_pitch = v; break;
+    case NV097_SET_SURFACE_COLOR_OFFSET: g_hw.color_offset = v; break;
+    case NV097_SET_COLOR_CLEAR_VALUE: g_hw.clear_value = v; break;
+    case NV097_SET_CLEAR_RECT_HORIZONTAL: g_hw.clear_h = v; break;
+    case NV097_SET_CLEAR_RECT_VERTICAL: g_hw.clear_v = v; break;
+    case NV097_CLEAR_SURFACE: clear_color(k, v); break;
     case NV097_SEMAPHORE_RELEASE:
         if (g_hw.sem_inst) {
             uint32_t *p = phys32(k, dma_base(g_hw.sem_inst) + g_hw.sem_offset);
@@ -430,6 +514,12 @@ static void nv_write(Kernel *k, uint32_t off, int size, uint32_t value)
         g_hw.alarm_on = true;
         return;
     }
+    case NV_PCRTC_START:
+        if (value != nv_ld(off)) {
+            g_hw.st.frames++;
+        }
+        nv_st(off, value);
+        return;
     case NV_PGRAPH_INCREMENT:
         if (value & 2) { /* el flip del ISR del vblank: avanza la lectura */
             uint32_t mod = surf_get(SURF_MODULO);
@@ -648,5 +738,74 @@ bool hw_next_event(const Kernel *k, uint64_t *ns)
         t = f; /* el APU avisa al terminar sus cuadros */
     }
     *ns = t;
+    return true;
+}
+
+/* ================================================================ pantalla */
+
+void hw_set_display(Kernel *k, uint32_t format, uint32_t pitch, uint32_t fb)
+{
+    (void)k;
+    g_hw.av_format = format;
+    g_hw.av_pitch = pitch;
+    g_hw.av_fb = fb;
+    g_hw.st.av_modes++;
+    if (fb) {
+        nv_st(NV_PCRTC_START, fb);
+    }
+}
+
+/* La imagen que el Xbox muestra (la de PCRTC_START con el modo de
+ * AvSetDisplayMode), en RGBA. false si todavía no hay modo. */
+bool hw_screen(const Kernel *k, XImage *out)
+{
+    unsigned bpp = g_hw.av_format == 0x10 || g_hw.av_format == 0x11 || g_hw.av_format == 0x1C ? 2 : 4;
+    uint32_t pitch = g_hw.av_pitch;
+    if (!g_hw.nv || !pitch || !k || !k->vm) {
+        return false;
+    }
+    int w = (int)(pitch / bpp);
+    int h = w >= 1920 ? 1080 : w >= 1280 ? 720 : 480;
+    if (w > 1920) {
+        w = 1920;
+    }
+    if (!out->px || out->w != w || out->h != h) {
+        free(out->px);
+        out->px = malloc((size_t)w * h * 4);
+        if (!out->px) {
+            out->w = out->h = 0;
+            return false;
+        }
+        out->w = w;
+        out->h = h;
+    }
+    uint32_t start = nv_ld(NV_PCRTC_START) & (VM_RAM_SIZE - 1);
+    for (int y = 0; y < h; y++) {
+        uint8_t *d = out->px + (size_t)y * w * 4;
+        uint32_t row = start + (uint32_t)y * pitch;
+        if (row + pitch > VM_RAM_SIZE) {
+            memset(d, 0, (size_t)w * 4);
+            continue;
+        }
+        const uint8_t *src = k->vm->ram + row;
+        for (int x = 0; x < w; x++, d += 4) {
+            if (bpp == 4) {
+                d[0] = src[x * 4 + 2];
+                d[1] = src[x * 4 + 1];
+                d[2] = src[x * 4];
+            } else {
+                uint16_t p = (uint16_t)(src[x * 2] | src[x * 2 + 1] << 8);
+                if (g_hw.av_format == 0x11) {
+                    d[0] = (uint8_t)((p >> 11) * 255 / 31);
+                    d[1] = (uint8_t)(((p >> 5) & 63) * 255 / 63);
+                } else {
+                    d[0] = (uint8_t)(((p >> 10) & 31) * 255 / 31);
+                    d[1] = (uint8_t)(((p >> 5) & 31) * 255 / 31);
+                }
+                d[2] = (uint8_t)((p & 31) * 255 / 31);
+            }
+            d[3] = 255;
+        }
+    }
     return true;
 }

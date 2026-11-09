@@ -22,7 +22,7 @@
 #include "probe.h"
 #include "ui.h"
 
-#define APP_VER   "0.11.1"
+#define APP_VER   "0.12.0"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -332,6 +332,10 @@ int main(int argc, char **argv)
             break;
         }
         case UI_RUN: {
+            if (k & HidNpadButton_X) {
+                g_ui.run_screen = !g_ui.run_screen;
+                dirty = true;
+            }
             if (g_run.state == RUN_ACTIVE) {
                 /* ~25 ms de intérprete por cuadro, en tramos de 100.000 */
                 u64 t0 = armGetSystemTick(), spent = 0;

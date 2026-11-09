@@ -17,6 +17,7 @@
 
 #include "disc.h"
 #include "kernel.h"
+#include "hw.h"
 #include "xc_crypto.h"
 
 #define ST_BUFFER_OVERFLOW 0x80000005u
@@ -873,6 +874,7 @@ static uint64_t AvSetDisplayMode(KCall *c)
     char b[64];
     snprintf(b, sizeof(b), "modo %08X, pitch %u, fb %08X", (unsigned)c->a[2], (unsigned)c->a[4], (unsigned)c->a[5]);
     snprintf(c->note, sizeof(c->note), "%s", b);
+    hw_set_display(c->k, c->a[3], c->a[4], c->a[5]);
     return 0;
 }
 
