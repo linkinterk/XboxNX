@@ -12,6 +12,7 @@
 
 #include "gfx.h"
 #include "hw.h"
+#include "apu/apu.h"
 
 #define C_BG        HEX(0x121212)
 #define C_SURF      HEX(0x1F1F1F)
@@ -90,7 +91,7 @@ static void top_bar(const UiState *s, const char *subtitle)
         gfx_text(104, 52, 18, C_ON_VAR, subtitle);
     }
     char chip[48];
-    snprintf(chip, sizeof(chip), "Etapa 3e  ·  v%s", s->version);
+    snprintf(chip, sizeof(chip), "Etapa 3f  ·  v%s", s->version);
     int w = gfx_text_width(18, chip) + 32;
     gfx_rrect(UI_W - 40 - w, 26, w, 34, 17, C_GREEN_BG);
     gfx_text(UI_W - 40 - w + 16, 33, 18, C_GREEN, chip);
@@ -857,8 +858,10 @@ static void draw_run(const UiState *s)
                  (unsigned long long)hs->accesses);
         gfx_text_fit(rx + 16, ry, 14, rw - 32, C_ON_VAR, b);
         ry += 19;
-        snprintf(b, sizeof(b), "vblank %llu  ·  ISR %u  ·  GPU %s, %llu palabras", (unsigned long long)hs->vblanks,
-                 kn ? kn->isrs_run : 0, pbs[hs->pb_stall < 5 ? hs->pb_stall : 4], (unsigned long long)hs->pb_words);
+        const ApuStats *as = apu_stats();
+        snprintf(b, sizeof(b), "vblank %llu · ISR %u · GPU %s · APU %s%s %llu", (unsigned long long)hs->vblanks,
+                 kn ? kn->isrs_run : 0, pbs[hs->pb_stall < 5 ? hs->pb_stall : 4], as->gp_running ? "GP" : "-",
+                 as->ep_running ? "+EP" : "", (unsigned long long)as->frames);
         gfx_text_fit(rx + 16, ry, 14, rw - 32, C_ON_VAR, b);
         ry += 26;
     }

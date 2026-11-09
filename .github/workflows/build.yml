@@ -22,19 +22,24 @@ jobs:
           python3 tests/mkxiso.py build-test/bad.iso --bad-sha
       - name: Compilar y correr
         run: |
-          gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
+          # El APU viene de hakuX/xemu: se compila aparte, con avisos pero sin -Werror
+          mkdir -p build-test/apu
+          for f in source/apu/apu.c source/apu/vp/vp.c source/apu/vp/resample.c source/apu/dsp/dsp.c source/apu/dsp/dsp_cpu.c source/apu/dsp/dsp_dma.c source/apu/dsp/gp_ep.c source/apu/dsp/debug.c; do
+            gcc -std=gnu11 -Wall -fsanitize=address,undefined -g -Isource -c $f -o build-test/apu/$(basename $f .c).o
+          done
+          gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g -Isource \
             -o build-test/host_test tests/host_test.c source/disc.c source/xbe.c source/game.c source/xpr.c
           ./build-test/host_test build-test/t.iso XISO
           ./build-test/host_test build-test/full.iso "Disco completo XGD2"
-          gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
+          gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g -Isource \
             -o build-test/load_test tests/load_test.c source/disc.c source/xbe.c source/game.c source/xpr.c \
-            source/vm.c source/kernel.c source/kmm.c source/kob.c source/kps.c source/kio.c source/ksys.c source/xc_crypto.c source/hw.c source/aci.c source/loader.c source/sha1.c \
-            source/cpu.c source/runner.c -lm
+            source/vm.c source/kernel.c source/kmm.c source/kob.c source/kps.c source/kio.c source/ksys.c source/xc_crypto.c source/hw.c source/aci.c build-test/apu/*.o source/loader.c source/sha1.c \
+            source/cpu.c source/runner.c -lm -lpthread
           ./build-test/load_test build-test/t.iso
           ./build-test/load_test build-test/bad.iso --bad-sha
-          gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
+          gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g -Isource \
             -o build-test/kernel_test tests/kernel_test.c source/vm.c source/kernel.c source/kmm.c source/kob.c \
-            source/kps.c source/kio.c source/ksys.c source/xc_crypto.c source/hw.c source/aci.c source/disc.c source/cpu.c source/runner.c -lm
+            source/kps.c source/kio.c source/ksys.c source/xc_crypto.c source/hw.c source/aci.c build-test/apu/*.o source/disc.c source/cpu.c source/runner.c -lm -lpthread
           ./build-test/kernel_test build-test/t.iso
 
   interprete:

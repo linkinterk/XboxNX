@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "aci.h"
+#include "apu/apu.h"
 #include "kernel.h"
 
 /* ---- ventanas ---- */
@@ -94,7 +95,6 @@ typedef struct Ohci {
 
 typedef struct Hw {
     uint8_t *nv;          /* 16 MB de registros del NV2A */
-    uint8_t *apu;
     uint8_t nic[NIC_SIZE];
     Ohci usb[2];
     uint64_t next_vblank;
@@ -122,18 +122,15 @@ bool hw_init(Kernel *k)
 {
     if (!g_hw.nv) {
         g_hw.nv = calloc(1, NV2A_SIZE);
-        g_hw.apu = calloc(1, APU_SIZE);
     } else {
         memset(g_hw.nv, 0, NV2A_SIZE);
-        memset(g_hw.apu, 0, APU_SIZE);
     }
-    if (!g_hw.nv || !g_hw.apu) {
+    if (!g_hw.nv || !apu_init(k)) {
         return false;
     }
-    uint8_t *nv = g_hw.nv, *apu = g_hw.apu;
+    uint8_t *nv = g_hw.nv;
     memset(&g_hw, 0, sizeof(g_hw));
     g_hw.nv = nv;
-    g_hw.apu = apu;
     nv_st(NV_PMC_BOOT_0, 0x02A000A1u);
     nv_st(NV_PFB_CSTATUS, 64u << 20);
     nv_st(NV_PGRAPH_FIFO, 1);
@@ -177,6 +174,9 @@ uint32_t hw_irq_lines(const Kernel *k)
     }
     if (aci_irq()) {
         lines |= 1u << HW_IRQ_ACI;
+    }
+    if (apu_irq()) {
+        lines |= 1u << HW_IRQ_APU;
     }
     return lines;
 }
@@ -504,55 +504,8 @@ static void ohci_write(Ohci *o, uint32_t off, uint32_t v)
     }
 }
 
-/* ================================================================ APU (mínimo) */
-
-/* Lo justo para que DirectSound arranque (la etapa 3f trae el APU entero,
- * el de xemu que usa hakuX): la cola de métodos del VP siempre vacía, el
- * contador de muestras a 48 kHz, la escritura "mágica" de notificaciones y
- * las interrupciones que se borran escribiendo 1. */
-#define APU_ISTS      0x1000u
-#define APU_FEMEMADDR 0x1324u
-#define APU_FEMEMDATA 0x1334u
-#define APU_XGSCNT    0x200Cu
-#define APU_VP        0x20000u
-#define APU_PIO_FREE  0x10u
-
 static uint32_t buf_rd(const uint8_t *b, uint32_t off, int size);
 static void buf_wr(uint8_t *b, uint32_t off, int size, uint32_t v);
-
-static uint32_t apu_read(Kernel *k, uint32_t off, int size)
-{
-    if (off == APU_VP + APU_PIO_FREE) {
-        return 0x80;
-    }
-    if (off == APU_XGSCNT) {
-        return (uint32_t)(k->now_ns * 6 / 125000) - buf_rd(g_hw.apu, off, 4); /* 48000 / 1e9 */
-    }
-    return buf_rd(g_hw.apu, off, size);
-}
-
-static void apu_write(Kernel *k, uint32_t off, int size, uint32_t v)
-{
-    switch (off) {
-    case APU_ISTS:
-        buf_wr(g_hw.apu, off, 4, buf_rd(g_hw.apu, off, 4) & ~v);
-        return;
-    case APU_FEMEMDATA: { /* la notificación se escribe en FEMEMADDR al momento */
-        uint32_t *p = phys32(k, buf_rd(g_hw.apu, APU_FEMEMADDR, 4));
-        if (p) {
-            *p = v;
-        }
-        buf_wr(g_hw.apu, off, 4, v);
-        return;
-    }
-    case APU_XGSCNT:
-        buf_wr(g_hw.apu, off, 4, (uint32_t)(k->now_ns * 6 / 125000) - v);
-        return;
-    default:
-        buf_wr(g_hw.apu, off, size, v);
-        return;
-    }
-}
 
 /* ================================================================ acceso */
 
@@ -664,17 +617,21 @@ void hw_tick(Kernel *k)
         g_hw.alarm_due += 1ull << 32;
     }
     aci_tick(k);
+    apu_tick(k);
 }
 
 bool hw_next_event(const Kernel *k, uint64_t *ns)
 {
-    (void)k;
     if (!g_hw.nv) {
         return false;
     }
     uint64_t t = g_hw.next_vblank;
     if (g_hw.alarm_on && (nv_ld(NV_PTIMER_INTR_EN_0) & 1) && g_hw.alarm_due < t) {
         t = g_hw.alarm_due;
+    }
+    uint64_t f;
+    if (k->irq_obj[HW_IRQ_APU] && apu_next_frame(&f) && f < t) {
+        t = f; /* el APU avisa al terminar sus cuadros */
     }
     *ns = t;
     return true;

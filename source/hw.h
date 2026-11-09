@@ -25,6 +25,7 @@ struct Kernel;
 
 #define HW_IRQ_USB0 1
 #define HW_IRQ_NV2A 3
+#define HW_IRQ_APU  5
 #define HW_IRQ_ACI  6
 
 typedef struct HwStats {

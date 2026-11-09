@@ -435,6 +435,7 @@ static void sys_tests(void)
     CHECK(kernel_init(&k, &vm));
     CHECK(vm_alloc_at(&vm, SCRATCH, 0x2000));
     kio_set_media(&k, NULL, "build-test/hdd");
+    remove("build-test/hdd/eeprom.bin"); /* una consola nueva en cada prueba */
 
     /* RtlInitAnsiString y la comparación sin mayúsculas */
     vm_write(&vm, SCRATCH + 0x100, "\\Device\\CdRom0", 15);
@@ -588,6 +589,19 @@ static void hw_tests(void)
     hw_tick(&k);
     CHECK(hw_mmio(&k, 0xFEC00116u, 2, false, &v) && (v & 0x08) && (v & 0x01)); /* BCIS y DCH */
     CHECK(hw_irq_lines(&k) & (1u << HW_IRQ_ACI));
+
+    /* APU: la cola del VP libre, la memoria del programa del GP (24 bits) y el
+     * contador de muestras a 48 kHz */
+    CHECK(hw_mmio(&k, 0xFE820010u, 4, false, &v) && v == 0x80);
+    v = 0xAB123456u;
+    hw_mmio(&k, 0xFE830000u + 0xA000u + 4 * 7, 4, true, &v);
+    CHECK(hw_mmio(&k, 0xFE830000u + 0xA000u + 4 * 7, 4, false, &v) && v == 0x123456);
+    uint32_t c0 = 0, c1 = 0;
+    hw_mmio(&k, 0xFE80200Cu, 4, false, &c0);
+    k.now_ns += 1000000u;
+    hw_tick(&k);
+    hw_mmio(&k, 0xFE80200Cu, 4, false, &c1);
+    CHECK(c1 - c0 == 48);
 }
 
 int main(int argc, char **argv)
