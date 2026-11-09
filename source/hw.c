@@ -501,6 +501,56 @@ static void ohci_write(Ohci *o, uint32_t off, uint32_t v)
     }
 }
 
+/* ================================================================ APU (mínimo) */
+
+/* Lo justo para que DirectSound arranque (la etapa 3f trae el APU entero,
+ * el de xemu que usa hakuX): la cola de métodos del VP siempre vacía, el
+ * contador de muestras a 48 kHz, la escritura "mágica" de notificaciones y
+ * las interrupciones que se borran escribiendo 1. */
+#define APU_ISTS      0x1000u
+#define APU_FEMEMADDR 0x1324u
+#define APU_FEMEMDATA 0x1334u
+#define APU_XGSCNT    0x200Cu
+#define APU_VP        0x20000u
+#define APU_PIO_FREE  0x10u
+
+static uint32_t buf_rd(const uint8_t *b, uint32_t off, int size);
+static void buf_wr(uint8_t *b, uint32_t off, int size, uint32_t v);
+
+static uint32_t apu_read(Kernel *k, uint32_t off, int size)
+{
+    if (off == APU_VP + APU_PIO_FREE) {
+        return 0x80;
+    }
+    if (off == APU_XGSCNT) {
+        return (uint32_t)(k->now_ns * 6 / 125000) - buf_rd(g_hw.apu, off, 4); /* 48000 / 1e9 */
+    }
+    return buf_rd(g_hw.apu, off, size);
+}
+
+static void apu_write(Kernel *k, uint32_t off, int size, uint32_t v)
+{
+    switch (off) {
+    case APU_ISTS:
+        buf_wr(g_hw.apu, off, 4, buf_rd(g_hw.apu, off, 4) & ~v);
+        return;
+    case APU_FEMEMDATA: { /* la notificación se escribe en FEMEMADDR al momento */
+        uint32_t *p = phys32(k, buf_rd(g_hw.apu, APU_FEMEMADDR, 4));
+        if (p) {
+            *p = v;
+        }
+        buf_wr(g_hw.apu, off, 4, v);
+        return;
+    }
+    case APU_XGSCNT:
+        buf_wr(g_hw.apu, off, 4, (uint32_t)(k->now_ns * 6 / 125000) - v);
+        return;
+    default:
+        buf_wr(g_hw.apu, off, size, v);
+        return;
+    }
+}
+
 /* ================================================================ acceso */
 
 static uint32_t buf_rd(const uint8_t *b, uint32_t off, int size)
@@ -530,9 +580,9 @@ bool hw_mmio(void *kernel, uint32_t addr, int size, bool write, uint32_t *value)
         }
     } else if (addr >= APU_BASE && addr - APU_BASE + (uint32_t)size <= APU_SIZE) {
         if (write) {
-            buf_wr(g_hw.apu, addr - APU_BASE, size, *value);
+            apu_write(k, addr - APU_BASE, size, *value);
         } else {
-            *value = buf_rd(g_hw.apu, addr - APU_BASE, size);
+            *value = apu_read(k, addr - APU_BASE, size);
         }
     } else if (addr >= ACI_BASE && addr - ACI_BASE + (uint32_t)size <= ACI_SIZE) {
         if (write) {
