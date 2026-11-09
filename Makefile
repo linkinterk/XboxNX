@@ -40,7 +40,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET		:=	XboxNX
 APP_TITLE	:=	XboxNX
 APP_AUTHOR	:=	Jairo (basado en hakuX)
-APP_VERSION	:=	0.11.0
+APP_VERSION	:=	0.11.1
 BUILD		:=	build
 SOURCES		:=	source source/apu source/apu/vp source/apu/dsp
 DATA		:=	data

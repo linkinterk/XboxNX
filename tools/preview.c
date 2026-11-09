@@ -96,7 +96,7 @@ int main(int argc, char **argv)
     }
 
     UiState s = {0};
-    s.version = "0.11.0";
+    s.version = "0.11.1";
     s.cards = cards;
 
     s.screen = UI_LOADING;
@@ -155,6 +155,24 @@ int main(int argc, char **argv)
     runner_boot(&run, &vm, &k, &lr);
     runner_slice(&run, 100000);
     run.ns = 1000000;
+    /* hilos de ejemplo para ver el panel lleno */
+    run.state = RUN_ACTIVE;
+    for (int i = 0, n = 0; i < K_MAX_THREADS && n < 4; i++) {
+        KThread *t = &k.threads[i];
+        if (t->state != KT_FREE) {
+            continue;
+        }
+        t->state = n == 3 ? KT_DEAD : n == 2 ? KT_READY : KT_WAITING;
+        t->id = (uint32_t)(10 + n) * 4;
+        t->priority = 8 + n;
+        t->nwait = 1;
+        t->wait_obj[0] = 0x80012340;
+        t->has_deadline = n == 1;
+        t->ctx.r[R_ESP] = run.cpu.r[R_ESP];
+        t->exit_status = 1;
+        t->instructions = 12345678;
+        n++;
+    }
     s.screen = UI_RUN;
     s.run = &run;
     s.run_scroll = -1;

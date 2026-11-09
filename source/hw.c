@@ -569,6 +569,20 @@ bool hw_mmio(void *kernel, uint32_t addr, int size, bool write, uint32_t *value)
         return false;
     }
     g_hw.st.last_value = *value;
+    {
+        HwStats *st = &g_hw.st;
+        int i = 0;
+        while (i < HW_RECENT - 1 && (st->recent[i].addr != addr || st->recent[i].write != write) &&
+               st->recent[i].count) {
+            i++;
+        }
+        uint32_t cnt = st->recent[i].addr == addr && st->recent[i].write == write ? st->recent[i].count : 0;
+        memmove(&st->recent[1], &st->recent[0], (size_t)i * sizeof(st->recent[0]));
+        st->recent[0].addr = addr;
+        st->recent[0].value = *value;
+        st->recent[0].write = write;
+        st->recent[0].count = cnt + 1;
+    }
     return true;
 }
 

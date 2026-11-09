@@ -666,6 +666,75 @@ static const char *run_state_text(RunState st, uint32_t *bg, uint32_t *fg)
     }
 }
 
+/* Las direcciones de vuelta en la pila de un hilo: valores dentro de la
+ * imagen del XBE con una instrucción CALL justo antes. Dicen desde dónde
+ * se llegó al código en el que está (para ver qué espera un juego). */
+static bool is_ret_addr(const Vm *vm, uint32_t v, uint32_t lo, uint32_t hi)
+{
+    if (v < lo + 8 || v >= hi) {
+        return false;
+    }
+    uint8_t b[8];
+    if (!vm_read(vm, v - 7, b, 7)) {
+        return false;
+    }
+    /* b[6] = v-1 ... b[0] = v-7 */
+    if (b[2] == 0xE8) {
+        return true; /* call rel32 */
+    }
+    if (b[1] == 0xFF && (b[2] & 0x38) == 0x10 && (b[2] & 0xC0) == 0x80) {
+        return true; /* call [reg+disp32] */
+    }
+    if (b[1] == 0xFF && b[2] == 0x15) {
+        return true; /* call [abs] */
+    }
+    if (b[4] == 0xFF && (b[5] & 0x38) == 0x10 && (b[5] & 0xC0) == 0x40) {
+        return true; /* call [reg+disp8] */
+    }
+    if (b[5] == 0xFF && (b[6] & 0xF8) == 0xD0) {
+        return true; /* call reg */
+    }
+    if (b[5] == 0xFF && (b[6] & 0x38) == 0x10 && (b[6] & 0xC0) == 0) {
+        return true; /* call [reg] */
+    }
+    return false;
+}
+
+static int call_chain(const Kernel *k, const Vm *vm, uint32_t esp, uint32_t *out, int max)
+{
+    if (!k || !k->xbe_base) {
+        return 0;
+    }
+    uint32_t lo = k->xbe_base, hi = lo + vm_rd32(vm, lo + 0x10C);
+    int n = 0;
+    for (int i = 0; i < 512 && n < max; i++) {
+        uint32_t v;
+        if (!vm_read(vm, esp + (uint32_t)i * 4, &v, 4)) {
+            break;
+        }
+        if (is_ret_addr(vm, v, lo, hi)) {
+            out[n++] = v;
+        }
+    }
+    return n;
+}
+
+static const char *obj_kind(const Vm *vm, uint32_t o)
+{
+    uint8_t t = 0xFF;
+    vm_read(vm, o, &t, 1);
+    switch (t) {
+    case 0: return "evento";
+    case 1: return "evento s";
+    case 2: return "mutex";
+    case 5: return "semáforo";
+    case 6: return "hilo";
+    case 8:
+    case 9: return "timer";
+    default: return "obj";
+    }
+}
+
 static void draw_run(const UiState *s)
 {
     const UiCard *c = &s->cards[s->sel];
@@ -762,14 +831,21 @@ static void draw_run(const UiState *s)
         gfx_rrect(40, y, UI_W - 80, 58, 14, C_SURF);
         gfx_text_fit(60, y + 8, 16, UI_W - 120, C_ON_VAR, d);
         /* lo que hay en la memoria a la que apuntan los registros */
-        static const int ri[5] = {R_EBX, R_ESI, R_EDI, R_EBP, R_ECX};
-        static const char *rn[5] = {"EBX", "ESI", "EDI", "EBP", "ECX"};
+        static const int ri[4] = {R_EBX, R_ESI, R_EDI, R_ECX};
+        static const char *rn[4] = {"EBX", "ESI", "EDI", "ECX"};
         o = 0;
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 4; i++) {
             uint32_t m[2] = {0, 0};
             bool ok = vm_read(cpu->vm, cpu->r[ri[i]], m, 8);
-            o += snprintf(d + o, sizeof(d) - (size_t)o, "%s[%s] %08X %08X", i ? "   " : "", rn[i],
+            o += snprintf(d + o, sizeof(d) - (size_t)o, "%s[%s] %08X %08X", i ? "  " : "", rn[i],
                           ok ? (unsigned)m[0] : 0, ok ? (unsigned)m[1] : 0);
+        }
+        /* desde dónde se llegó al bucle */
+        uint32_t chain[4];
+        int nc = call_chain(kn, cpu->vm, cpu->r[R_ESP], chain, 4);
+        o += snprintf(d + o, sizeof(d) - (size_t)o, "   pila:");
+        for (int i = 0; i < nc && o < (int)sizeof(d) - 12; i++) {
+            o += snprintf(d + o, sizeof(d) - (size_t)o, " %08X", (unsigned)chain[i]);
         }
         gfx_text_fit(60, y + 31, 16, UI_W - 120, C_ON_VAR, d);
         y += 68;
@@ -854,10 +930,22 @@ static void draw_run(const UiState *s)
     {
         const HwStats *hs = hw_stats();
         static const char *pbs[] = {"corre", "espera flip", "trampa", "FIFO cerrada", "error"};
-        snprintf(b, sizeof(b), "HW %08X %s  ·  %llu accesos", (unsigned)hs->last_addr, hs->last_write ? "esc" : "lect",
-                 (unsigned long long)hs->accesses);
+        snprintf(b, sizeof(b), "HW %llu accesos  ·  GPU %llu palabras, %u flips, %u sem",
+                 (unsigned long long)hs->accesses, (unsigned long long)hs->pb_words, hs->flips, hs->sem_releases);
         gfx_text_fit(rx + 16, ry, 14, rw - 32, C_ON_VAR, b);
         ry += 19;
+        for (int i = 0; i < HW_RECENT; i += 2) {
+            int o2 = 0;
+            for (int j = i; j < i + 2 && hs->recent[j].count; j++) {
+                o2 += snprintf(b + o2, sizeof(b) - (size_t)o2, "%s%08X %c%X x%u", j > i ? "  " : "",
+                               (unsigned)hs->recent[j].addr, hs->recent[j].write ? '=' : ':',
+                               (unsigned)hs->recent[j].value, (unsigned)hs->recent[j].count);
+            }
+            if (o2) {
+                gfx_text_fit(rx + 16, ry, 13, rw - 32, C_ON_VAR, b);
+                ry += 17;
+            }
+        }
         const ApuStats *as = apu_stats();
         snprintf(b, sizeof(b), "vblank %llu · ISR %u · GPU %s · APU %s%s %llu", (unsigned long long)hs->vblanks,
                  kn ? kn->isrs_run : 0, pbs[hs->pb_stall < 5 ? hs->pb_stall : 4], as->gp_running ? "GP" : "-",
@@ -867,31 +955,62 @@ static void draw_run(const UiState *s)
     }
     gfx_rect(rx + 16, ry - 6, rw - 32, 1, C_SURF_HI);
     gfx_text(rx + 20, ry, 18, C_ON, "Hilos");
-    ry += 28;
-    for (int i = 0; kn && i < K_MAX_THREADS && ry + 40 < ly0 + ph; i++) {
+    ry += 26;
+    /* una línea por hilo vivo: estado, qué espera y desde dónde (la
+     * primera dirección de vuelta de su pila); los terminados, juntos */
+    char dead[80];
+    int nd = 0;
+    dead[0] = 0;
+    for (int i = 0; kn && i < K_MAX_THREADS; i++) {
         const KThread *t = &kn->threads[i];
         if (t->state == KT_FREE || (t->system && t->state == KT_WAITING && !kn->in_isr)) {
             continue; /* el hilo de las interrupciones, dormido */
         }
-        static const char *stn[] = {"", "Listo", "Corre", "Espera", "Terminó"};
-        uint32_t col = t->state == KT_RUNNING ? C_GREEN : (t->state == KT_WAITING ? C_WARN : C_ON_VAR);
         if (t->state == KT_DEAD) {
-            col = C_ON_VAR;
+            size_t dl = strlen(dead);
+            snprintf(dead + dl, sizeof(dead) - dl, "%sh%u (0x%X)", nd++ ? ", " : "", (unsigned)t->id / 4,
+                     (unsigned)t->exit_status);
+            continue;
         }
-        gfx_circle(rx + 24, ry + 9, 5, col);
-        snprintf(b, sizeof(b), "h%u  %s%s  ·  %08X", (unsigned)t->id / 4, stn[t->state], t->suspend ? " (pausa)" : "",
-                 (unsigned)t->start);
-        gfx_text_fit(rx + 36, ry, 15, rw - 52, C_ON, b);
-        ry += 19;
-        if (t->state == KT_WAITING && t->wait_what) {
-            snprintf(b, sizeof(b), "%s", t->wait_what);
-        } else if (t->state == KT_DEAD) {
-            snprintf(b, sizeof(b), "salió con 0x%X", (unsigned)t->exit_status);
+        if (ry + 18 > ly0 + ph - 22) {
+            break;
+        }
+        uint32_t col = t->state == KT_RUNNING ? C_GREEN : (t->state == KT_WAITING ? C_WARN : C_ON);
+        gfx_circle(rx + 24, ry + 8, 4, col);
+        uint32_t esp = t->state == KT_RUNNING ? cpu->r[R_ESP] : t->ctx.r[R_ESP];
+        uint32_t chain[2] = {0, 0};
+        int nc = call_chain(kn, cpu->vm, esp, chain, 2);
+        char from[32] = "";
+        if (nc) {
+            if (nc > 1) {
+                snprintf(from, sizeof(from), " · %08X<%08X", (unsigned)chain[0], (unsigned)chain[1]);
+            } else {
+                snprintf(from, sizeof(from), " · %08X", (unsigned)chain[0]);
+            }
+        }
+        if (t->state == KT_WAITING) {
+            char what[40] = "";
+            if (t->wait_cs) {
+                snprintf(what, sizeof(what), "sección %08X", (unsigned)t->wait_cs);
+            } else if (t->nwait) {
+                snprintf(what, sizeof(what), "%s %08X%s", obj_kind(cpu->vm, t->wait_obj[0]), (unsigned)t->wait_obj[0],
+                         t->nwait > 1 ? "+" : "");
+            } else {
+                snprintf(what, sizeof(what), "pausa");
+            }
+            snprintf(b, sizeof(b), "h%u p%d %s%s%s", (unsigned)t->id / 4, t->priority, what,
+                     t->has_deadline ? " (plazo)" : "", from);
         } else {
-            snprintf(b, sizeof(b), "%.2f M instr  ·  prioridad %d", t->instructions / 1e6, t->priority);
+            snprintf(b, sizeof(b), "h%u p%d %s %.1fM%s%s", (unsigned)t->id / 4, t->priority,
+                     t->state == KT_RUNNING ? "corre" : "listo", t->instructions / 1e6, t->suspend ? " pausa" : "",
+                     from);
         }
-        gfx_text_fit(rx + 36, ry, 14, rw - 52, C_ON_VAR, b);
-        ry += 23;
+        gfx_text_fit(rx + 34, ry, 14, rw - 46, C_ON, b);
+        ry += 19;
+    }
+    if (nd) {
+        snprintf(b, sizeof(b), "terminados: %s", dead);
+        gfx_text_fit(rx + 20, ly0 + ph - 24, 13, rw - 36, C_ON_VAR, b);
     }
 
     if (r->state == RUN_ACTIVE) {

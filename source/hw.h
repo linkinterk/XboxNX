@@ -28,6 +28,8 @@ struct Kernel;
 #define HW_IRQ_APU  5
 #define HW_IRQ_ACI  6
 
+#define HW_RECENT 4
+
 typedef struct HwStats {
     uint32_t last_addr;     /* el último acceso a un registro */
     uint32_t last_value;
@@ -37,6 +39,11 @@ typedef struct HwStats {
     uint64_t pb_words;      /* palabras del push buffer recorridas */
     unsigned pb_stall;      /* 0 corre, 1 FLIP_STALL, 2 trampa, 3 FIFO cerrada, 4 error */
     unsigned traps, flips, sem_releases;
+    /* los registros distintos tocados hace poco (el más reciente primero) */
+    struct {
+        uint32_t addr, value, count;
+        bool write;
+    } recent[HW_RECENT];
 } HwStats;
 
 /* Prepara el hardware para una ejecución nueva. */
