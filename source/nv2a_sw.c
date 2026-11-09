@@ -32,6 +32,7 @@ static struct {
     SwDmaFn dma;
     /* objetos DMA */
     uint32_t dma_a, dma_b, dma_color, dma_zeta, dma_va, dma_vb;
+    bool has_color, has_zeta; /* la base de un DMA suele ser 0: toda la memoria */
     /* superficies */
     uint32_t surf_format, surf_pitch, color_off, zeta_off, clip_h, clip_v;
     uint32_t zs_clear, clear_h, clear_v;
@@ -950,7 +951,9 @@ static bool target(Target *t)
     t->fmt = fmt;
     t->bpp = (fmt == 1 || fmt == 2 || fmt == 3) ? 2 : (fmt >= 4 && fmt <= 8) ? 4 : 0;
     t->pitch = S.surf_pitch & 0xFFFF;
-    if (!t->bpp || !t->pitch || type != 1 || !S.dma_color) {
+    S.st.surf_format = S.surf_format, S.st.surf_pitch = S.surf_pitch, S.st.clip_h = S.clip_h, S.st.clip_v = S.clip_v;
+    S.st.no_target_why = !t->bpp ? 1 : !t->pitch ? 2 : type != 1 ? 3 : !S.has_color ? 4 : 0;
+    if (S.st.no_target_why) {
         return false;
     }
     unsigned fx = aa ? 2 : 1, fy = aa == 2 ? 2 : 1;
@@ -962,15 +965,17 @@ static bool target(Target *t)
         t->x1 = (int)(t->pitch / t->bpp);
     }
     if (t->x1 <= t->x0 || t->y1 <= t->y0) {
+        S.st.no_target_why = 5;
         return false;
     }
     t->color = mem(S.dma_color + S.color_off, t->pitch * (uint32_t)t->y1);
     if (!t->color) {
+        S.st.no_target_why = 6;
         return false;
     }
     t->zfmt = (S.surf_format >> 4) & 0xF;
     t->zpitch = S.surf_pitch >> 16;
-    if (S.dma_zeta && t->zpitch && (t->zfmt == 1 || t->zfmt == 2)) {
+    if (S.has_zeta && t->zpitch && (t->zfmt == 1 || t->zfmt == 2)) {
         t->zeta = mem(S.dma_zeta + S.zeta_off, t->zpitch * (uint32_t)t->y1);
         t->zmax = t->zfmt == 1 ? 65535.0f : 16777215.0f;
     }
@@ -1175,8 +1180,8 @@ void sw_method(uint32_t m, uint32_t v)
     switch (m) {
     case 0x0184: S.dma_a = S.dma(v); return;
     case 0x0188: S.dma_b = S.dma(v); return;
-    case 0x0194: S.dma_color = S.dma(v); return;
-    case 0x0198: S.dma_zeta = S.dma(v); return;
+    case 0x0194: S.dma_color = S.dma(v); S.has_color = v != 0; return;
+    case 0x0198: S.dma_zeta = S.dma(v); S.has_zeta = v != 0; return;
     case 0x019C: S.dma_va = S.dma(v); return;
     case 0x01A0: S.dma_vb = S.dma(v); return;
     case 0x0200: S.clip_h = v; return;

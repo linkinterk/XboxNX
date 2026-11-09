@@ -778,11 +778,12 @@ static void draw_xbox_screen(const UiState *s)
         /* el dibujo por software: el último dibujo con lo que dio */
         const SwStats *sw = sw_stats();
         const __typeof__(sw->last) *L = &sw->last;
-        char e[220];
+        char e[300];
         int ly = 40;
-        snprintf(e, sizeof(e), "Software: %llu triángulos, %llu píxeles · sin shader %u · sin destino %u · shader con error %u · se muestra %08X",
+        snprintf(e, sizeof(e), "Software: %llu triángulos, %llu píxeles · sin shader %u · sin destino %u (motivo %u: fmt %X pitch %X clip %X %X) · shader con error %u · se muestra %08X",
                  (unsigned long long)sw->triangles, (unsigned long long)sw->pixels, sw->skipped_ff, sw->no_target,
-                 sw->vs_errors, (unsigned)hw_scanout());
+                 sw->no_target_why, (unsigned)sw->surf_format, (unsigned)sw->surf_pitch, (unsigned)sw->clip_h,
+                 (unsigned)sw->clip_v, sw->vs_errors, (unsigned)hw_scanout());
         gfx_rrect(14, ly - 4, UI_W - 28, 100, 10, WITH_ALPHA(HEX(0x000000), 200));
         gfx_text_fit(24, ly, 16, UI_W - 48, C_ON, e);
         ly += 22;
