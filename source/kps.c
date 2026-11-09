@@ -572,6 +572,7 @@ void kps_dpc_return(Kernel *k, Cpu *c)
 {
     (void)c;
     k->in_dpc = false;
+    k->cpu_not_thread = true;
     wr8(k, K_KPCR_VA + PCR_IRQL, 0);
 }
 
@@ -729,7 +730,12 @@ bool kps_schedule(Kernel *k, Cpu *c, bool preempt)
     }
     KThread *t = cur(k);
     int prev = k->cur;
-    if (t && (t->state == KT_RUNNING || t->state == KT_WAITING)) {
+    bool live = !k->cpu_not_thread;
+    k->cpu_not_thread = false;
+    /* Tras un DPC, la CPU tiene los registros del DPC (EIP en su stub de
+     * vuelta): el hilo ya se guardó antes de empezarlo. Si se guardara otra
+     * vez un hilo que esperaba, al despertar seguiría en el stub (int3). */
+    if (live && t && (t->state == KT_RUNNING || t->state == KT_WAITING)) {
         kps_save(k, c);
         if (t->state == KT_RUNNING) {
             t->state = KT_READY;

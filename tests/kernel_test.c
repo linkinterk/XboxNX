@@ -211,6 +211,33 @@ static void thread_tests(void)
     CHECK(rd(SCRATCH + 0x34) == 0);
     CHECK(k.now_ns >= 5000000u && k.dpcs_run == 1);
 
+    /* 3') el hilo sigue esperando mientras corre un DPC: al volver del DPC no se guarda su CPU en el hilo (v0.17.1
+     * quedaba en el stub de vuelta del DPC: int3 en 0x80010F14) */
+    g_pc = 0;
+    dpc_fn = here();
+    b1(0xC2); b1(0x10); b1(0x00); /* ret 16: no despierta a nadie */
+    main_va = here();
+    push(0); push(0); push(SCRATCH + 0xC0);
+    kcall("KeInitializeEvent"); /* (Event, NotificationEvent, FALSE) */
+    push(SCRATCH + 0x60); push(dpc_fn); push(SCRATCH + 0x40);
+    kcall("KeInitializeDpc");
+    push(0); push(SCRATCH + 0x80);
+    kcall("KeInitializeTimerEx");
+    push(SCRATCH + 0x40); push(0xFFFFFFFFu); push((uint32_t)-50000); push(SCRATCH + 0x80);
+    kcall("KeSetTimer");
+    push(SCRATCH + 0xD0); push(0); push(0); push(0); push(SCRATCH + 0xC0);
+    kcall("KeWaitForSingleObject"); /* evento, 10 ms: sigue esperando cuando corre el DPC (5 ms) */
+    store_eax(SCRATCH + 0x38);
+    push(7);
+    kcall("HalReturnToFirmware");
+    boot(main_va);
+    wr(SCRATCH + 0x38, 0xFFFF);
+    wr(SCRATCH + 0xD0, (uint32_t)-100000);
+    wr(SCRATCH + 0xD4, 0xFFFFFFFFu);
+    CHECK(runner_slice(&g_run, 100000) == RUN_SYSTEM_STOP);
+    CHECK(rd(SCRATCH + 0x38) == 0x102); /* STATUS_TIMEOUT */
+    CHECK(k.dpcs_run == 1);
+
     /* 4) sección crítica disputada entre dos hilos */
     g_pc = 0;
     worker = here();
