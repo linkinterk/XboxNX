@@ -69,6 +69,9 @@ jobs:
         run: |
           CPU_BLOQUES=1 python3 tests/cpu_diff.py ./cpu_diff 30000 3
           CPU_BLOQUES=1 python3 tests/fp_diff.py ./cpu_diff 5000 3
+          CPU_BLOQUES=1 CPU_BLOQUES_N=1000 python3 tests/fp_diff.py ./cpu_diff 8000 4
+          BENCH_MMX=1 ./bench 200
+          BENCH_MMX=1 SIN_BLOQUES=1 ./bench 200
           CPU_BLOQUES=1 CPU_BLOQUES_N=2 python3 tests/flags_pair.py ./cpu_diff 20000 3
       - name: El mismo intérprete compilado para ARM64 (como en la Switch), con qemu
         run: |
@@ -77,6 +80,7 @@ jobs:
           printf '#!/bin/sh\nexec qemu-aarch64 ./cpu_diff_a64 "$@"\n' > cpu_diff_arm && chmod +x cpu_diff_arm
           CPU_BLOQUES=1 python3 tests/cpu_diff.py ./cpu_diff_arm 4000 5
           CPU_BLOQUES=1 python3 tests/fp_diff.py ./cpu_diff_arm 3000 5
+          CPU_BLOQUES=1 CPU_BLOQUES_N=1000 python3 tests/fp_diff.py ./cpu_diff_arm 3000 7
           python3 tests/fp_diff.py ./cpu_diff_arm 3000 6
 
   switch:

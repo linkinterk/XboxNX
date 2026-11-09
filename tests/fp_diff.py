@@ -118,10 +118,14 @@ def gen_mmx():
         body = bytes([0x0F, op]) + src
     k = rnd.random()
     if k < 0.15:
-        body = bytes([0x0F, rnd.choice([0x71, 0x72, 0x73]), 0xC0 | rnd.choice([2, 6]) << 3 | 1, rnd.randrange(70)])
+        sh = rnd.choice([0x71, 0x72, 0x73])
+        sub = rnd.choice([2, 6] if sh == 0x73 else [2, 4, 6])
+        body = bytes([0x0F, sh, 0xC0 | sub << 3 | 1, rnd.randrange(70)])
     elif k < 0.25:
         body = rnd.choice([b"\x0f\x70\xca" + bytes([rnd.randrange(256)]), b"\x0f\xc5\xc1" + bytes([rnd.randrange(4)]),
-                           b"\x0f\xc4\xc8" + bytes([rnd.randrange(4)]), b"\x0f\xd7\xc1", b"\x0f\x7e\xc8"])
+                           b"\x0f\xc4\xc8" + bytes([rnd.randrange(4)]), b"\x0f\xd7\xc1", b"\x0f\x7e\xc8",
+                           b"\x0f\x7e\x4e\x18", b"\x0f\x6e\x4e\x14", b"\x0f\x70\x4e\x10" + bytes([rnd.randrange(256)]),
+                           b"\x0f\xe7\x4e\x18", b"\x0f\x6f\xca" + b"\x0f\xfd\xca" * 2])
     post = bytes.fromhex("0f7f0b" "0f7f5308" "0f77")
     return pre + body + post, "mmx"
 

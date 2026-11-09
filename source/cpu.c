@@ -1693,6 +1693,200 @@ static void x_xchg(Cpu *c, const Insn *in)
     }
 }
 
+/* ---- MMX (etapa 2d.1): el video Bink las usa sin parar ---- */
+
+static inline uint64_t mm_b(Cpu *c, const Insn *in)
+{
+    return in->is_reg ? c->fp.mm[in->rm] : rd64(c, b_ea(c, in));
+}
+
+static inline int sat_s8(int v) { return v < -128 ? -128 : v > 127 ? 127 : v; }
+static inline int sat_s16(int v) { return v < -32768 ? -32768 : v > 32767 ? 32767 : v; }
+static inline int sat_u8(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
+static inline int sat_u16(int v) { return v < 0 ? 0 : v > 65535 ? 65535 : v; }
+
+#define MMX_FN(name, T, N, EXPR)                                  \
+    static void name(Cpu *c, const Insn *in)                      \
+    {                                                             \
+        uint64_t bv = mm_b(c, in);                                \
+        if (c->stop != CPU_RUNNING) {                             \
+            return;                                               \
+        }                                                         \
+        T a[N], b[N];                                             \
+        memcpy(a, &c->fp.mm[in->reg], 8);                         \
+        memcpy(b, &bv, 8);                                        \
+        for (int i = 0; i < N; i++) {                             \
+            EXPR;                                                 \
+        }                                                         \
+        memcpy(&c->fp.mm[in->reg], a, 8);                         \
+    }
+
+MMX_FN(x_paddb, uint8_t, 8, a[i] = (uint8_t)(a[i] + b[i]))
+MMX_FN(x_paddw, uint16_t, 4, a[i] = (uint16_t)(a[i] + b[i]))
+MMX_FN(x_paddd, uint32_t, 2, a[i] += b[i])
+MMX_FN(x_psubb, uint8_t, 8, a[i] = (uint8_t)(a[i] - b[i]))
+MMX_FN(x_psubw, uint16_t, 4, a[i] = (uint16_t)(a[i] - b[i]))
+MMX_FN(x_psubd, uint32_t, 2, a[i] -= b[i])
+MMX_FN(x_paddsb, int8_t, 8, a[i] = (int8_t)sat_s8(a[i] + b[i]))
+MMX_FN(x_paddsw, int16_t, 4, a[i] = (int16_t)sat_s16(a[i] + b[i]))
+MMX_FN(x_psubsb, int8_t, 8, a[i] = (int8_t)sat_s8(a[i] - b[i]))
+MMX_FN(x_psubsw, int16_t, 4, a[i] = (int16_t)sat_s16(a[i] - b[i]))
+MMX_FN(x_paddusb, uint8_t, 8, a[i] = (uint8_t)sat_u8(a[i] + b[i]))
+MMX_FN(x_paddusw, uint16_t, 4, a[i] = (uint16_t)sat_u16(a[i] + b[i]))
+MMX_FN(x_psubusb, uint8_t, 8, a[i] = (uint8_t)sat_u8(a[i] - b[i]))
+MMX_FN(x_psubusw, uint16_t, 4, a[i] = (uint16_t)sat_u16(a[i] - b[i]))
+MMX_FN(x_pmullw, uint16_t, 4, a[i] = (uint16_t)((uint32_t)a[i] * b[i]))
+MMX_FN(x_pmulhw, int16_t, 4, a[i] = (int16_t)(((int32_t)a[i] * b[i]) >> 16))
+MMX_FN(x_pmulhuw, uint16_t, 4, a[i] = (uint16_t)(((uint32_t)a[i] * b[i]) >> 16))
+MMX_FN(x_pcmpeqb, uint8_t, 8, a[i] = a[i] == b[i] ? 0xFF : 0)
+MMX_FN(x_pcmpeqw, uint16_t, 4, a[i] = a[i] == b[i] ? 0xFFFF : 0)
+MMX_FN(x_pcmpeqd, uint32_t, 2, a[i] = a[i] == b[i] ? 0xFFFFFFFFu : 0)
+MMX_FN(x_pcmpgtb, int8_t, 8, a[i] = a[i] > b[i] ? -1 : 0)
+MMX_FN(x_pcmpgtw, int16_t, 4, a[i] = a[i] > b[i] ? -1 : 0)
+MMX_FN(x_pcmpgtd, int32_t, 2, a[i] = a[i] > b[i] ? -1 : 0)
+MMX_FN(x_pminub, uint8_t, 8, a[i] = a[i] < b[i] ? a[i] : b[i])
+MMX_FN(x_pmaxub, uint8_t, 8, a[i] = a[i] > b[i] ? a[i] : b[i])
+MMX_FN(x_pminsw, int16_t, 4, a[i] = a[i] < b[i] ? a[i] : b[i])
+MMX_FN(x_pmaxsw, int16_t, 4, a[i] = a[i] > b[i] ? a[i] : b[i])
+MMX_FN(x_pavgb, uint8_t, 8, a[i] = (uint8_t)((a[i] + b[i] + 1) >> 1))
+MMX_FN(x_pavgw, uint16_t, 4, a[i] = (uint16_t)((a[i] + b[i] + 1) >> 1))
+
+static void x_mmx_logic(Cpu *c, const Insn *in)
+{
+    uint64_t b = mm_b(c, in);
+    if (c->stop != CPU_RUNNING) {
+        return;
+    }
+    uint64_t *a = &c->fp.mm[in->reg];
+    switch (in->aop) {
+    case 0xDB: *a &= b; break;
+    case 0xDF: *a = ~*a & b; break;
+    case 0xEB: *a |= b; break;
+    default: *a ^= b; break;
+    }
+}
+
+static void x_pmaddwd(Cpu *c, const Insn *in)
+{
+    uint64_t bv = mm_b(c, in);
+    if (c->stop != CPU_RUNNING) {
+        return;
+    }
+    int16_t a[4], b[4];
+    memcpy(a, &c->fp.mm[in->reg], 8);
+    memcpy(b, &bv, 8);
+    uint32_t r[2];
+    for (int i = 0; i < 2; i++) {
+        r[i] = (uint32_t)((int32_t)a[2 * i] * b[2 * i]) + (uint32_t)((int32_t)a[2 * i + 1] * b[2 * i + 1]);
+    }
+    memcpy(&c->fp.mm[in->reg], r, 8);
+}
+
+static void x_punpck(Cpu *c, const Insn *in)
+{
+    uint64_t b = mm_b(c, in);
+    if (c->stop != CPU_RUNNING) {
+        return;
+    }
+    uint64_t *a = &c->fp.mm[in->reg];
+    int bits = (in->aop & 3) == 0 ? 8 : (in->aop & 3) == 1 ? 16 : 32;
+    *a = unpack(*a, b, bits, in->aop >= 0x68);
+}
+
+static void x_pack(Cpu *c, const Insn *in)
+{
+    uint64_t b = mm_b(c, in);
+    if (c->stop != CPU_RUNNING) {
+        return;
+    }
+    uint64_t *a = &c->fp.mm[in->reg];
+    *a = pack(*a, b, in->aop == 0x6B ? 32 : 16, in->aop == 0x67);
+}
+
+/* desplazamientos: imm (0F 71/72/73, cuenta en in->imm) o por mm/m64 */
+static void x_mmx_shift_i(Cpu *c, const Insn *in)
+{
+    c->fp.mm[in->rm] = mmx_shift(in->reg, in->sz * 8, c->fp.mm[in->rm], in->imm);
+}
+
+static void x_mmx_shift_r(Cpu *c, const Insn *in)
+{
+    uint64_t cnt = mm_b(c, in);
+    if (c->stop != CPU_RUNNING) {
+        return;
+    }
+    uint8_t kind = in->aop < 0xE0 ? 2 : in->aop < 0xF0 ? 4 : 6;
+    int bits = 16 << ((in->aop & 3) - 1);
+    c->fp.mm[in->reg] = mmx_shift(kind, bits, c->fp.mm[in->reg], cnt);
+}
+
+static void x_movq_load(Cpu *c, const Insn *in) /* 0F 6F */
+{
+    uint64_t v = mm_b(c, in);
+    if (c->stop != CPU_RUNNING) {
+        return;
+    }
+    c->fp.mm[in->reg] = v;
+    c->fp.mmx = true;
+}
+
+static void x_movq_store(Cpu *c, const Insn *in) /* 0F 7F, 0F E7 */
+{
+    uint64_t v = c->fp.mm[in->reg];
+    if (in->is_reg) {
+        c->fp.mm[in->rm] = v;
+    } else {
+        wr64(c, b_ea(c, in), v);
+    }
+}
+
+static void x_movd_load(Cpu *c, const Insn *in) /* 0F 6E */
+{
+    uint32_t v = e_get(c, in, 4);
+    if (c->stop != CPU_RUNNING) {
+        return;
+    }
+    c->fp.mm[in->reg] = v;
+    c->fp.mmx = true;
+}
+
+static void x_movd_store(Cpu *c, const Insn *in) /* 0F 7E */
+{
+    e_set(c, in, 4, (uint32_t)c->fp.mm[in->reg]);
+}
+
+static void x_emms(Cpu *c, const Insn *in)
+{
+    (void)in;
+    c->fp.empty = 0xFF;
+    c->fp.mmx = false;
+}
+
+static void x_pshufw(Cpu *c, const Insn *in)
+{
+    uint64_t bv = mm_b(c, in);
+    if (c->stop != CPU_RUNNING) {
+        return;
+    }
+    uint16_t b[4], r[4];
+    memcpy(b, &bv, 8);
+    for (int i = 0; i < 4; i++) {
+        r[i] = b[(in->imm >> (2 * i)) & 3];
+    }
+    memcpy(&c->fp.mm[in->reg], r, 8);
+}
+
+/* Cualquier otra instrucción sin salto propio: la hace el intérprete
+ * sin salir del bloque. Si el largo decodificado no era el real, el EIP
+ * no coincide con in->next y el bloque se corta ahí (no pasa nada). */
+static void x_interp(Cpu *c, const Insn *in)
+{
+    c->eip = in->start;
+    if (step(c) == CPU_RUNNING) {
+        c->icount--; /* run_blocks la cuenta */
+    }
+}
+
 /* ---- decodificar ---- */
 
 typedef struct Rd {
@@ -1756,19 +1950,106 @@ static void dec_modrm(Rd *r, Insn *in, uint8_t m)
     }
 }
 
+static InsnFn mmx_fn(uint8_t op)
+{
+    switch (op) {
+    case 0xFC: return x_paddb;
+    case 0xFD: return x_paddw;
+    case 0xFE: return x_paddd;
+    case 0xF8: return x_psubb;
+    case 0xF9: return x_psubw;
+    case 0xFA: return x_psubd;
+    case 0xEC: return x_paddsb;
+    case 0xED: return x_paddsw;
+    case 0xE8: return x_psubsb;
+    case 0xE9: return x_psubsw;
+    case 0xDC: return x_paddusb;
+    case 0xDD: return x_paddusw;
+    case 0xD8: return x_psubusb;
+    case 0xD9: return x_psubusw;
+    case 0xD5: return x_pmullw;
+    case 0xE5: return x_pmulhw;
+    case 0xE4: return x_pmulhuw;
+    case 0x74: return x_pcmpeqb;
+    case 0x75: return x_pcmpeqw;
+    case 0x76: return x_pcmpeqd;
+    case 0x64: return x_pcmpgtb;
+    case 0x65: return x_pcmpgtw;
+    case 0x66: return x_pcmpgtd;
+    case 0xDA: return x_pminub;
+    case 0xDE: return x_pmaxub;
+    case 0xEA: return x_pminsw;
+    case 0xEE: return x_pmaxsw;
+    case 0xE0: return x_pavgb;
+    case 0xE3: return x_pavgw;
+    case 0xDB: case 0xDF: case 0xEB: case 0xEF: return x_mmx_logic;
+    case 0xF5: return x_pmaddwd;
+    case 0x60: case 0x61: case 0x62: case 0x68: case 0x69: case 0x6A: return x_punpck;
+    case 0x63: case 0x67: case 0x6B: return x_pack;
+    case 0xD1: case 0xD2: case 0xD3: case 0xE1: case 0xE2: case 0xF1: case 0xF2: case 0xF3: return x_mmx_shift_r;
+    case 0x6F: return x_movq_load;
+    case 0x7F: case 0xE7: return x_movq_store;
+    case 0x6E: return x_movd_load;
+    case 0x7E: return x_movd_store;
+    default: return NULL;
+    }
+}
+
+/* El largo de una 0F que hace el intérprete (sin saltos). false: no. */
+static bool dec_interp_0f(Rd *r, Insn *in, uint8_t op2)
+{
+    bool modrm, imm8 = false;
+    if (op2 == 0x77 || op2 == 0x31 || op2 == 0xA2 || (op2 >= 0xC8 && op2 <= 0xCF)) {
+        modrm = false;
+    } else if ((op2 >= 0x10 && op2 <= 0x1F) || (op2 >= 0x28 && op2 <= 0x2F) || (op2 >= 0x40 && op2 <= 0x7F) ||
+               (op2 >= 0x90 && op2 <= 0x9F) || op2 == 0xA3 || op2 == 0xA4 || op2 == 0xA5 ||
+               (op2 >= 0xAB && op2 <= 0xB1) || op2 == 0xB3 || (op2 >= 0xB6 && op2 <= 0xB7) ||
+               (op2 >= 0xBA && op2 <= 0xC6) || op2 >= 0xD0) {
+        modrm = true;
+        imm8 = (op2 >= 0x70 && op2 <= 0x73) || op2 == 0xA4 || op2 == 0xAC || op2 == 0xBA ||
+               (op2 >= 0xC2 && op2 <= 0xC6 && op2 != 0xC3);
+    } else {
+        return false;
+    }
+    if (modrm) {
+        dec_modrm(r, in, rd8(r));
+    }
+    if (imm8) {
+        rd8(r);
+    }
+    in->fn = x_interp;
+    return true;
+}
+
+/* El largo de una de un byte que hace el intérprete (sin saltos). */
+static bool dec_interp_1(Rd *r, Insn *in, uint8_t op)
+{
+    if ((op >= 0xD8 && op <= 0xDF) || op == 0x8F) {
+        dec_modrm(r, in, rd8(r));
+    } else if (!((op >= 0xA4 && op <= 0xA7) || (op >= 0xAA && op <= 0xAF) || (op >= 0x91 && op <= 0x98) ||
+                 (op >= 0x9B && op <= 0x9F) || op == 0x60 || op == 0x61 || op == 0x90 || op == 0xF5 ||
+                 op == 0xF8 || op == 0xF9 || op == 0xFC || op == 0xFD)) {
+        return false;
+    }
+    in->fn = x_interp;
+    return true;
+}
+
 /* Una instrucción con función propia; false: la hace el intérprete. */
 static bool decode(Rd *r, uint32_t page_va, Insn *in)
 {
     uint32_t start = r->pos;
     bool o16 = false, fs = false;
-    uint8_t op;
+    uint8_t op, rep_ = 0;
     for (;;) {
         op = rd8(r);
         if (op == 0x66) {
             o16 = true;
         } else if (op == 0x64) {
             fs = true;
-        } else if (op == 0x3E || op == 0x26 || op == 0x2E || op == 0x36) {
+        } else if (op == 0xF2 || op == 0xF3) {
+            rep_ = op;
+        } else if (op == 0x3E || op == 0x26 || op == 0x2E || op == 0x36 || op == 0xF0) {
             /* segmentos planos */
         } else {
             break;
@@ -1782,7 +2063,15 @@ static bool decode(Rd *r, uint32_t page_va, Insn *in)
     in->start = page_va + start;
     in->fs = fs;
     in->base = in->index = NOREG;
-    if (op < 0x40 && (op & 7) < 6) { /* ALU 00-3D */
+    if (rep_) { /* rep, movss...: siempre el intérprete */
+        if (op == 0x0F) {
+            if (!dec_interp_0f(r, in, rd8(r))) {
+                return false;
+            }
+        } else if (!dec_interp_1(r, in, op)) {
+            return false;
+        }
+    } else if (op < 0x40 && (op & 7) < 6) { /* ALU 00-3D */
         int form = op & 7;
         in->aop = op >> 3;
         in->sz = (uint8_t)((form & 1) ? osz : 1);
@@ -1911,11 +2200,12 @@ static bool decode(Rd *r, uint32_t page_va, Insn *in)
     } else if (op == 0xF6 || op == 0xF7) {
         in->sz = (uint8_t)(op == 0xF6 ? 1 : osz);
         dec_modrm(r, in, rd8(r));
-        if (in->reg != 0) {
-            return false; /* not, neg, mul, div: el intérprete */
+        if (in->reg >= 2) {
+            in->fn = x_interp; /* not, neg, mul, imul, div, idiv */
+        } else {
+            in->imm = rdn(r, in->sz);
+            in->fn = x_test_ei;
         }
-        in->imm = rdn(r, in->sz);
-        in->fn = x_test_ei;
     } else if (op == 0xFE || op == 0xFF) {
         in->sz = (uint8_t)(op == 0xFE ? 1 : osz);
         dec_modrm(r, in, rd8(r));
@@ -1962,10 +2252,26 @@ static bool decode(Rd *r, uint32_t page_va, Insn *in)
             dec_modrm(r, in, rd8(r));
             in->aop = 0;
             in->fn = x_imul;
-        } else {
+        } else if (!o16 && mmx_fn(op2)) {
+            in->aop = op2;
+            dec_modrm(r, in, rd8(r));
+            in->fn = mmx_fn(op2);
+        } else if (!o16 && op2 >= 0x71 && op2 <= 0x73) {
+            dec_modrm(r, in, rd8(r));
+            in->imm = rd8(r);
+            in->sz = (uint8_t)(op2 == 0x71 ? 2 : op2 == 0x72 ? 4 : 8);
+            bool ok = in->is_reg && (in->reg == 2 || in->reg == 4 || in->reg == 6) && !(op2 == 0x73 && in->reg == 4);
+            in->fn = ok ? x_mmx_shift_i : x_interp;
+        } else if (!o16 && op2 == 0x70) {
+            dec_modrm(r, in, rd8(r));
+            in->imm = rd8(r);
+            in->fn = x_pshufw;
+        } else if (!o16 && op2 == 0x77) {
+            in->fn = x_emms;
+        } else if (!dec_interp_0f(r, in, op2)) {
             return false;
         }
-    } else {
+    } else if (!dec_interp_1(r, in, op)) {
         return false;
     }
     if (r->bad) {

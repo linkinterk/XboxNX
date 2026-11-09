@@ -1203,7 +1203,7 @@ static const Stage k_stages[] = {
     {"5b", "Optimización 2", "Flags perezosos: el intérprete ~70% más rápido que al principio", 0},
     {"5c", "Optimización 3", "El audio (DSP) en su propio núcleo, junto al intérprete", 0},
     {"3h", "Sonido", "Sacar el audio del Xbox por la Switch", 2},
-    {"2d.1", "Bloques decodificados", "Cada trozo de código se entiende una vez y se guarda: ~1,8x", 1},
+    {"2d.1", "Bloques decodificados", "Código entendido una vez y guardado: ~1,8x; MMX del video 2,4x", 1},
     {"2d.2", "JIT a ARM64", "Las instrucciones más comunes, traducidas a código de la Switch", 2},
     {"2d.3", "JIT ampliado", "Más instrucciones en el JIT (x87, SSE) según lo que use Halo 2", 2},
     {"4c", "Gráficos por GPU", "El dibujo en el GPU de la Switch, rápido", 2},
