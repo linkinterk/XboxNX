@@ -188,6 +188,11 @@ typedef struct Kernel {
     char hdd_root[192];          /* carpeta del disco duro virtual */
     unsigned files_open, reads, writes;
     uint64_t bytes_read;
+    /* sistema (ksys.c) */
+    uint32_t xbe_base, xbe_sector, xbe_size;  /* el XBE en memoria y en el disco */
+    uint64_t boot_filetime;      /* hora real al arrancar (100 ns desde 1601) */
+    int64_t time_offset;         /* lo que NtSetSystemTime movió el reloj */
+    uint32_t av_saved;
 } Kernel;
 
 bool kernel_init(Kernel *k, Vm *vm);
@@ -220,6 +225,14 @@ void kio_set_media(Kernel *k, const struct XDisc *disc, const char *hdd_root);
 void kio_close(Kernel *k, uint32_t object);
 /* El evento del objeto archivo (para esperar sobre su handle). */
 #define K_FO_EVENT 0x38u
+
+/* ksys.c: Rtl, configuración (EEPROM), cerrojos de lectura/escritura,
+ * secciones del XBE, HAL, AV y criptografía Xc (etapa 3d) */
+void ksys_register(Kernel *k);
+/* Hora del sistema del Xbox (FILETIME). */
+uint64_t kps_system_time(const Kernel *k);
+/* Espera un objeto (para las funciones de otros módulos que bloquean). */
+uint64_t kps_wait_one(KCall *c, uint32_t object, const char *what);
 
 /* Un objeto quedó señalado: despierta a quien lo espera y, si es de más
  * prioridad que el hilo actual, pide replanificar. */

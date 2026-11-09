@@ -425,6 +425,94 @@ static void io_tests(const char *iso)
     xdisc_close(&disc);
 }
 
+/* ---- etapa 3d: sistema ---- */
+static void sys_tests(void)
+{
+    vm_free(&vm);
+    memset(&k, 0, sizeof(k));
+    CHECK(vm_init(&vm));
+    CHECK(kernel_init(&k, &vm));
+    CHECK(vm_alloc_at(&vm, SCRATCH, 0x2000));
+    kio_set_media(&k, NULL, "build-test/hdd");
+
+    /* RtlInitAnsiString y la comparación sin mayúsculas */
+    vm_write(&vm, SCRATCH + 0x100, "\\Device\\CdRom0", 15);
+    uint32_t a2[2] = {SCRATCH, SCRATCH + 0x100};
+    calln("RtlInitAnsiString", 2, a2);
+    CHECK((rd(SCRATCH) & 0xFFFF) == 14 && (rd(SCRATCH) >> 16) == 15 && rd(SCRATCH + 4) == SCRATCH + 0x100);
+    vm_write(&vm, SCRATCH + 0x120, "\\device\\cdrom0", 15);
+    uint32_t b2[2] = {SCRATCH + 8, SCRATCH + 0x120};
+    calln("RtlInitAnsiString", 2, b2);
+    uint32_t eq[3] = {SCRATCH, SCRATCH + 8, 1};
+    CHECK(calln("RtlEqualString", 3, eq) == 1);
+    eq[2] = 0;
+    CHECK(calln("RtlEqualString", 3, eq) == 0);
+    /* a Unicode con su búfer del pool, y de vuelta */
+    uint32_t u[3] = {SCRATCH + 0x10, SCRATCH, 1};
+    CHECK(calln("RtlAnsiStringToUnicodeString", 3, u) == ST_SUCCESS && (rd(SCRATCH + 0x10) & 0xFFFF) == 28);
+    CHECK((rd(rd(SCRATCH + 0x14) + 2) & 0xFFFF) == 'D');
+    uint32_t f1[1] = {SCRATCH + 0x10};
+    calln("RtlFreeUnicodeString", 1, f1);
+    CHECK(rd(SCRATCH + 0x14) == 0);
+    /* errores */
+    uint32_t e1[1] = {0xC0000034u};
+    CHECK(calln("RtlNtStatusToDosError", 1, e1) == 2);
+    /* tiempo: ida y vuelta */
+    wr(SCRATCH + 0x40, 0x5A4D5000u);
+    wr(SCRATCH + 0x44, 0x01DB1C2Au);
+    uint32_t t1[2] = {SCRATCH + 0x40, SCRATCH + 0x50};
+    calln("RtlTimeToTimeFields", 2, t1);
+    uint32_t t2[2] = {SCRATCH + 0x50, SCRATCH + 0x60};
+    CHECK(calln("RtlTimeFieldsToTime", 2, t2) == 1);
+    CHECK(rd(SCRATCH + 0x64) == 0x01DB1C2Au && rd(SCRATCH + 0x60) / 10000 == 0x5A4D5000u / 10000);
+    /* memoria que cruza páginas */
+    uint32_t m1[3] = {SCRATCH + 0xFF0, 0x40, 0xAB};
+    calln("RtlFillMemory", 3, m1);
+    CHECK((rd(SCRATCH + 0x1000) & 0xFF) == 0xAB);
+    uint32_t m2[3] = {SCRATCH + 0xFF8, SCRATCH + 0xFF0, 0x40};
+    calln("RtlMoveMemory", 3, m2);
+    uint32_t m3[3] = {SCRATCH + 0xFF0, SCRATCH + 0xFF8, 0x40};
+    CHECK(calln("RtlCompareMemory", 3, m3) == 0x40);
+
+    /* configuración: idioma inglés, región NTSC */
+    uint32_t q[5] = {7, SCRATCH + 0x70, SCRATCH + 0x74, 4, SCRATCH + 0x78};
+    CHECK(calln("ExQueryNonVolatileSetting", 5, q) == ST_SUCCESS && rd(SCRATCH + 0x74) == 1 &&
+          rd(SCRATCH + 0x70) == 4 && rd(SCRATCH + 0x78) == 4);
+    uint32_t q2[5] = {0x11, 0, SCRATCH + 0x74, 4, 0};
+    CHECK(calln("ExQueryNonVolatileSetting", 5, q2) == ST_SUCCESS);
+    uint32_t q3[5] = {0x999, 0, SCRATCH + 0x74, 4, 0};
+    CHECK(calln("ExQueryNonVolatileSetting", 5, q3) == 0xC0000034u);
+    /* guardar el idioma (español = 3) y leerlo */
+    wr(SCRATCH + 0x7C, 3);
+    uint32_t sv[4] = {7, 4, SCRATCH + 0x7C, 4};
+    CHECK(calln("ExSaveNonVolatileSetting", 4, sv) == ST_SUCCESS);
+    CHECK(calln("ExQueryNonVolatileSetting", 5, q) == ST_SUCCESS && rd(SCRATCH + 0x74) == 3);
+
+    /* SHA-1("abc") = a9993e36... */
+    vm_write(&vm, SCRATCH + 0x200, "abc", 3);
+    uint32_t s1[1] = {SCRATCH + 0x300};
+    calln("XcSHAInit", 1, s1);
+    uint32_t s2[3] = {SCRATCH + 0x300, SCRATCH + 0x200, 3};
+    calln("XcSHAUpdate", 3, s2);
+    uint32_t s3[2] = {SCRATCH + 0x300, SCRATCH + 0x380};
+    calln("XcSHAFinal", 2, s3);
+    CHECK(rd(SCRATCH + 0x380) == 0x363E99A9u);
+    /* RC4 dos veces = el original */
+    vm_write(&vm, SCRATCH + 0x200, "Halo", 4);
+    vm_write(&vm, SCRATCH + 0x210, "clave", 5);
+    uint32_t r1[3] = {SCRATCH + 0x400, 5, SCRATCH + 0x210};
+    uint32_t r2[3] = {SCRATCH + 0x400, 4, SCRATCH + 0x200};
+    calln("XcRC4Key", 3, r1);
+    calln("XcRC4Crypt", 3, r2);
+    CHECK(rd(SCRATCH + 0x200) != 0x6F6C6148u);
+    calln("XcRC4Key", 3, r1);
+    calln("XcRC4Crypt", 3, r2);
+    CHECK(rd(SCRATCH + 0x200) == 0x6F6C6148u);
+    /* la clave del disco duro quedó en XboxHDKey */
+    CHECK(rd(kernel_data_va(&k, "XboxHDKey")) == 0x30303030u);
+    printf("3d sistema: %u funciones reales\n", kernel_real_count(&k));
+}
+
 int main(int argc, char **argv)
 {
     CHECK(vm_init(&vm));
@@ -564,6 +652,7 @@ int main(int argc, char **argv)
     if (argc > 1) {
         io_tests(argv[1]);
     }
+    sys_tests();
 
     vm_free(&vm);
     printf(g_fail ? "%d fallos\n" : "todo bien\n", g_fail);

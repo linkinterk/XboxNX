@@ -9,6 +9,7 @@
  * ke.c y timer.c, GPL-3.0-or-later); implementación propia.
  */
 #include <string.h>
+#include <time.h>
 
 #include "cpu.h"
 #include "kernel.h"
@@ -87,7 +88,13 @@ static uint64_t rd64(Kernel *k, uint32_t va) { return (uint64_t)rd(k, va) | ((ui
 static KThread *cur(Kernel *k) { return k->cur >= 0 ? &k->threads[k->cur] : NULL; }
 static uint32_t me(Kernel *k) { return k->cur >= 0 ? k->threads[k->cur].ethread : 0; }
 
-static uint64_t system_time(Kernel *k) { return BOOT_FILETIME + k->now_ns / 100; }
+uint64_t kps_system_time(const Kernel *k)
+{
+    uint64_t boot = k->boot_filetime ? k->boot_filetime : BOOT_FILETIME;
+    return boot + (uint64_t)k->time_offset + k->now_ns / 100;
+}
+
+static uint64_t system_time(Kernel *k) { return kps_system_time(k); }
 
 void kps_update_tick(Kernel *k)
 {
@@ -837,6 +844,25 @@ static uint64_t NtSignalAndWaitForSingleObjectEx(KCall *c)
     return wait_begin(c, &wo, 1, false, c->a[4], 0, "NtSignalAndWaitForSingleObjectEx");
 }
 
+uint64_t kps_wait_one(KCall *c, uint32_t object, const char *what)
+{
+    return wait_begin(c, &object, 1, false, 0, 0, what);
+}
+
+/* NtSetSystemTime(SystemTime, PreviousTime) */
+static uint64_t NtSetSystemTime(KCall *c)
+{
+    uint64_t old = system_time(c->k);
+    if (c->a[1]) {
+        wr(c->k, c->a[1], (uint32_t)old);
+        wr(c->k, c->a[1] + 4, (uint32_t)(old >> 32));
+    }
+    if (c->a[0]) {
+        c->k->time_offset += (int64_t)(rd64(c->k, c->a[0]) - old);
+    }
+    return ST_SUCCESS;
+}
+
 /* KeDelayExecutionThread(WaitMode, Alertable, *Interval) */
 static uint64_t KeDelayExecutionThread(KCall *c)
 {
@@ -1142,6 +1168,10 @@ static uint64_t KeQueryPerformanceFrequency(KCall *c)
 
 void kps_register(Kernel *k)
 {
+    time_t now = time(NULL);
+    if (now > 1000000000) { /* el reloj real: las partidas guardadas llevan fecha */
+        k->boot_filetime = ((uint64_t)now + 11644473600ull) * 10000000ull;
+    }
     kernel_impl(k, "PsCreateSystemThreadEx", PsCreateSystemThreadEx);
     kernel_impl(k, "PsTerminateSystemThread", PsTerminateSystemThread);
     kernel_impl(k, "NtResumeThread", NtResumeThread);
@@ -1192,6 +1222,7 @@ void kps_register(Kernel *k)
     kernel_impl(k, "KeRemoveQueueDpc", KeRemoveQueueDpc);
     kernel_impl(k, "KeIsExecutingDpc", KeIsExecutingDpc);
     kernel_impl(k, "KeQuerySystemTime", KeQuerySystemTime);
+    kernel_impl(k, "NtSetSystemTime", NtSetSystemTime);
     kernel_impl(k, "KeQueryInterruptTime", KeQueryInterruptTime);
     kernel_impl(k, "KeQueryPerformanceCounter", KeQueryPerformanceCounter);
     kernel_impl(k, "KeQueryPerformanceFrequency", KeQueryPerformanceFrequency);
