@@ -2367,6 +2367,9 @@ static CpuStop run_blocks(Cpu *c, uint64_t max)
 {
     uint64_t done = 0;
     while (done < max) {
+        if (c->yield && *c->yield) {
+            return CPU_LIMIT; /* el hardware pidió una interrupción */
+        }
         Block *b = get_block(c, c->eip);
         if (!b || !b->n) {
             if (step(c) != CPU_RUNNING) {

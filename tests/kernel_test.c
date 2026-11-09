@@ -821,6 +821,20 @@ static void hw_tests(void)
         CHECK(hw_screen(&k, &img) && img.w == 64 && img.px[(1 * 64 + 2) * 4] == 0x33 &&
               img.px[(1 * 64 + 2) * 4 + 2] == 0x99);
         free(img.px);
+        /* NO_OPERATION con argumento: trampa para el ISR de D3D, y la CPU
+         * avisada para atenderla ya (irq_kick); al borrarla, sigue */
+        static const uint32_t pbt[] = {(1u << 18) | 0x0100, 5, (1u << 18) | 0x0100, 0};
+        memcpy(vm.ram + PB + 0x800, pbt, sizeof(pbt));
+        k.irq_kick = 0;
+        v = PB + 0x800;
+        hw_mmio(&k, NV + 0x800044u, 4, true, &v);
+        v = PB + 0x800 + (uint32_t)sizeof(pbt);
+        hw_mmio(&k, NV + 0x800040u, 4, true, &v);
+        CHECK(k.irq_kick == 1 && hw_stats()->pb_stall == 2);
+        v = 1u << 20;
+        hw_mmio(&k, NV + 0x400100u, 4, true, &v);       /* PGRAPH_INTR: atendida */
+        CHECK(hw_stats()->pb_stall == 0);
+        k.irq_kick = 0;
     }
 }
 

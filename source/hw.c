@@ -419,6 +419,7 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         nv_st(NV_PGRAPH_NSOURCE, 1);
         nv_st(NV_PGRAPH_INTR, nv_ld(NV_PGRAPH_INTR) | (1u << 20));
         g_hw.st.traps++;
+        k->irq_kick = 1; /* que el ISR de D3D la atienda ya, no al final del turno */
         return PB_TRAP;
     }
     if (g_hw.obj_class[subch] != 0x97) {

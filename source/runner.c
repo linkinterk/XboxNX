@@ -74,6 +74,7 @@ bool runner_boot(Runner *r, Vm *vm, Kernel *k, const LoadReport *load)
     cpu_init(&r->cpu, vm);
     r->cpu.use_blocks = true;
     r->cpu.jit_hot = 2; /* JIT a ARM64 (solo en aarch64): a la segunda vez */
+    r->cpu.yield = &r->k->irq_kick;
     r->cpu.mmio = hw_mmio;
     r->cpu.port_in = hw_port_in;
     r->cpu.port_out = hw_port_out;
@@ -261,6 +262,14 @@ RunState runner_slice(Runner *r, uint64_t max)
             k->threads[k->cur].instructions += done;
         }
         if (st == CPU_LIMIT) {
+            if (k->irq_kick) {
+                /* una interrupción del hardware (la trampa del GPU): su ISR ya,
+                 * sin esperar al final del turno; luego sus DPC y el mismo hilo */
+                k->irq_kick = 0;
+                if (r->quantum_left && kps_interrupt(k, &r->cpu)) {
+                    r->cpu.stop = CPU_RUNNING;
+                }
+            }
             if (!r->quantum_left) {
                 reschedule(r, true);
             }

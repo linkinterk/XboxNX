@@ -794,7 +794,9 @@ bool kps_schedule(Kernel *k, Cpu *c, bool preempt)
         int f = k->isr_from - 1;
         k->isr_from = 0;
         KThread *x = &k->threads[f];
-        if (x->state == KT_READY && !x->suspend) {
+        /* a DISPATCH_LEVEL o más, directo a él; si no, primero los DPC y
+         * luego el de más prioridad (como siempre) */
+        if (x->state == KT_READY && !x->suspend && x->ctx.irql >= 2) {
             k->cur = f;
             x->state = KT_RUNNING;
             kps_load(k, c);

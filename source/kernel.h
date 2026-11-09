@@ -189,6 +189,7 @@ typedef struct Kernel {
     uint32_t dpc_queue[K_MAX_DPCS];
     unsigned ndpc;
     bool in_dpc;
+    volatile uint8_t irq_kick;   /* el hardware levantó una interrupción: que la CPU vuelva pronto */
     bool cpu_not_thread; /* la CPU tiene lo de un DPC que ya volvió: no guardarlo en el hilo */
     KCtx dpc_saved;              /* contexto interrumpido por el DPC */
     uint32_t dpc_stack_top;
