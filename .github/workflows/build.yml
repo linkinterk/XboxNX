@@ -110,7 +110,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: OpenGL para la Switch (mesa/nouveau, etapa 4c)
-        run: dkp-pacman -Sy --noconfirm --needed switch-mesa switch-libdrm_nouveau
+        run: dkp-pacman -S --noconfirm --needed switch-mesa switch-libdrm_nouveau || dkp-pacman -Sy --noconfirm --needed switch-mesa switch-libdrm_nouveau || ls /opt/devkitpro/portlibs/switch/lib/libEGL.a
       - name: Compilar
         run: make -j"$(nproc)"
       - uses: actions/upload-artifact@v4
