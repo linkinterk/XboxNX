@@ -2471,7 +2471,9 @@ void cpu_jit_stats(CpuJitStats *s)
 #endif
     s->decodes = g_decodes;
     s->compile_ticks = g_compile_ticks;
-#if defined(__aarch64__)
+#if defined(__SWITCH__)
+    s->ticks_per_s = 19200000ull; /* el reloj del sistema de la Switch */
+#elif defined(__aarch64__)
     uint64_t f;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
     s->ticks_per_s = f;
@@ -2563,7 +2565,11 @@ void cpu_jit_range(uintptr_t *rx, size_t *size)
 /* El reloj de la CPU del host (para medir dónde se va el tiempo). */
 static inline uint64_t cpu_tick(void)
 {
-#if defined(__aarch64__)
+#if defined(__SWITCH__)
+    uint64_t v; /* en Horizon solo cntpct_el0 se puede leer (como armGetSystemTick) */
+    __asm__ volatile("mrs %0, cntpct_el0" : "=r"(v));
+    return v;
+#elif defined(__aarch64__)
     uint64_t v;
     __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
     return v;
