@@ -10,6 +10,7 @@
 #define XBOXNX_CPU_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "vm.h"
@@ -116,5 +117,7 @@ typedef struct CpuJitStats {
     uint64_t decodes;  /* bloques decodificados (con o sin JIT) */
 } CpuJitStats;
 void cpu_jit_stats(CpuJitStats *s);
+/* Dónde está el código traducido (para el informe de un cierre). */
+void cpu_jit_range(uintptr_t *rx, size_t *size);
 
 #endif

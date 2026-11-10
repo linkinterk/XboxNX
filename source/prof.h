@@ -23,5 +23,10 @@ void prof_pop(void);
 /* El reparto desde la última llamada, en milésimas del total; y lo reinicia. */
 void prof_take(unsigned permille[PROF_N]);
 const char *prof_name(ProfPart p);
+/* La parte que corre ahora (para el informe de un cierre). */
+const char *prof_current(void);
+/* Profundidad de la pila de partes; volver a una (tras un cierre atrapado). */
+int prof_depth(void);
+void prof_reset(int depth);
 
 #endif

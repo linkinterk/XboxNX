@@ -2423,6 +2423,18 @@ void cpu_jit_stats(CpuJitStats *s)
     s->decodes = g_decodes;
 }
 
+void cpu_jit_range(uintptr_t *rx, size_t *size)
+{
+    *rx = 0;
+    *size = 0;
+#ifdef HAVE_JIT
+    if (g_jit.ok) {
+        *rx = (uintptr_t)g_jit.rx;
+        *size = g_jit.size;
+    }
+#endif
+}
+
 /* Hasta max instrucciones por bloques; las demás, una a una en step(). */
 static CpuStop run_blocks(Cpu *c, uint64_t max)
 {

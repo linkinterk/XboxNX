@@ -126,7 +126,9 @@ jobs:
           name: XboxNX ${{ steps.ver.outputs.v }}
           target_commitish: ${{ github.sha }}
           make_latest: true
-          files: XboxNX.nro
+          files: |
+            XboxNX.nro
+            XboxNX.elf
           body: |
             Instalar: copia XboxNX.nro a sd:/switch/ y tu ISO de Xbox a sd:/xbox/.
             Abrelo desde el Homebrew Menu manteniendo R sobre un juego.

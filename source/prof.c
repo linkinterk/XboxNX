@@ -63,3 +63,20 @@ const char *prof_name(ProfPart p)
     static const char *n[PROF_N] = {"CPU", "kernel", "audio", "GPU", "hardware", "pantalla"};
     return p < PROF_N ? n[p] : "?";
 }
+
+const char *prof_current(void)
+{
+    if (g_depth <= 0) {
+        return "fuera";
+    }
+    return prof_name(g_stack[(g_depth > 16 ? 16 : g_depth) - 1]);
+}
+
+void prof_reset(int depth)
+{
+    if (depth >= 0 && depth < g_depth) {
+        g_depth = depth;
+    }
+}
+
+int prof_depth(void) { return g_depth; }

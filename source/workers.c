@@ -10,7 +10,10 @@
 #define MAX_HELPERS 2
 
 #ifdef __SWITCH__
+#include <setjmp.h>
 #include <switch.h>
+
+#include "crash.h"
 typedef Mutex WMutex;
 typedef CondVar WCond;
 #define wm_init(m) mutexInit(m)
@@ -55,7 +58,18 @@ static void helper(void *p)
         void *arg = g_arg;
         int n = g_helpers + 1;
         wm_unlock(&g_m);
+#ifdef __SWITCH__
+        /* si el trabajo falla (un acceso inválido), se abandona y el hilo
+         * sigue: el principal ve g_crash y para el juego */
+        jmp_buf jb;
+        if (setjmp(jb) == 0) {
+            crash_guard_push(&jb, false);
+            fn(arg, me, n);
+        }
+        crash_guard_pop();
+#else
         fn(arg, me, n);
+#endif
         wm_lock(&g_m);
         if (--g_pending == 0) {
             wc_all(&g_done);

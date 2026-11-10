@@ -13,6 +13,8 @@
  */
 #include "probe.h"
 
+#include "crash.h"
+
 #include <malloc.h>
 #include <setjmp.h>
 #include <stdlib.h>
@@ -21,30 +23,7 @@
 
 /* ---- excepciones ---- */
 
-__attribute__((aligned(16))) u8 __nx_exception_stack[0x4000];
-u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
-
-static volatile int g_exc_armed;
-static volatile u32 g_exc_desc;
-static volatile u64 g_exc_far;
 static volatile uintptr_t g_bad_addr = 0x10;
-static jmp_buf g_exc_jb;
-
-/*
- * libnx llama a esta función después de svcReturnFromException, ya en el
- * contexto normal del hilo (sobre __nx_exception_stack) y con el estado del
- * fallo en ctx. Si vuelve, libnx hace svcBreak (el informe de error de
- * siempre). Para seguir hay que saltar fuera: longjmp al punto de la prueba.
- */
-void __libnx_exception_handler(ThreadExceptionDump *ctx)
-{
-    if (g_exc_armed) {
-        g_exc_armed = 0;
-        g_exc_desc = ctx->error_desc;
-        g_exc_far = ctx->far.x;
-        longjmp(g_exc_jb, 1);
-    }
-}
 
 __attribute__((noinline)) static u32 bad_read(void)
 {
@@ -52,18 +31,22 @@ __attribute__((noinline)) static u32 bad_read(void)
     return *p;
 }
 
+/* El manejador está en crash.c: con una guardia "quiet" vuelve aquí. */
 bool probe_exception(uint32_t *desc, uint64_t *far)
 {
-    bool hit = false;
-    if (setjmp(g_exc_jb) == 0) {
-        g_exc_armed = 1;
+    static jmp_buf jb;
+    volatile bool hit = false;
+    g_crash.valid = false;
+    if (setjmp(jb) == 0) {
+        crash_guard_push(&jb, true);
         (void)bad_read();
-        g_exc_armed = 0;   /* no falló: el acceso no se atrapó */
     } else {
         hit = true;
     }
-    *desc = g_exc_desc;
-    *far = g_exc_far;
+    crash_guard_pop();
+    *desc = g_crash.desc;
+    *far = g_crash.far;
+    g_crash.valid = false;
     return hit;
 }
 

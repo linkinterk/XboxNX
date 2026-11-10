@@ -253,18 +253,24 @@ typedef struct Tex {
     uint32_t *xm, *ym;   /* direcciones swizzle por x y por y */
 } Tex;
 
-static uint32_t *g_swz_x, *g_swz_y;
-static uint32_t g_swz_w, g_swz_h;
+/* Las tablas swizzle de cada etapa de textura: cada etapa las suyas (si se
+ * compartían, una textura de otro tamaño en otra etapa liberaba las de la
+ * primera y esta leía memoria liberada: direcciones basura, cierre). */
+static struct {
+    uint32_t *x, *y;
+    uint32_t w, h;
+} g_swz[4];
 
-static void swz_tables(uint32_t w, uint32_t h, uint32_t **xm, uint32_t **ym)
+static void swz_tables(int s, uint32_t w, uint32_t h, uint32_t **xm, uint32_t **ym)
 {
-    if (w != g_swz_w || h != g_swz_h || !g_swz_x) {
-        free(g_swz_x);
-        free(g_swz_y);
-        g_swz_x = malloc(w * 4);
-        g_swz_y = malloc(h * 4);
-        g_swz_w = w;
-        g_swz_h = h;
+    if (w != g_swz[s].w || h != g_swz[s].h || !g_swz[s].x || !g_swz[s].y) {
+        free(g_swz[s].x);
+        free(g_swz[s].y);
+        uint32_t *tx = malloc(w * 4), *ty = malloc(h * 4);
+        g_swz[s].x = tx;
+        g_swz[s].y = ty;
+        g_swz[s].w = w;
+        g_swz[s].h = h;
         uint32_t mx = 0, my = 0;
         for (uint32_t i = 1, bit = 1; i < w || i < h; i <<= 1) {
             if (i < w) {
@@ -276,27 +282,27 @@ static void swz_tables(uint32_t w, uint32_t h, uint32_t **xm, uint32_t **ym)
                 bit <<= 1;
             }
         }
-        for (uint32_t x = 0; g_swz_x && x < w; x++) {
+        for (uint32_t x = 0; tx && x < w; x++) {
             uint32_t r = 0;
-            for (uint32_t b = 1, s = 0; b <= mx; b <<= 1) {
+            for (uint32_t b = 1, sh = 0; b <= mx; b <<= 1) {
                 if (mx & b) {
-                    r |= ((x >> s++) & 1) ? b : 0;
+                    r |= ((x >> sh++) & 1) ? b : 0;
                 }
             }
-            g_swz_x[x] = r;
+            tx[x] = r;
         }
-        for (uint32_t y = 0; g_swz_y && y < h; y++) {
+        for (uint32_t y = 0; ty && y < h; y++) {
             uint32_t r = 0;
-            for (uint32_t b = 1, s = 0; b <= my; b <<= 1) {
+            for (uint32_t b = 1, sh = 0; b <= my; b <<= 1) {
                 if (my & b) {
-                    r |= ((y >> s++) & 1) ? b : 0;
+                    r |= ((y >> sh++) & 1) ? b : 0;
                 }
             }
-            g_swz_y[y] = r;
+            ty[y] = r;
         }
     }
-    *xm = g_swz_x;
-    *ym = g_swz_y;
+    *xm = g_swz[s].x;
+    *ym = g_swz[s].y;
 }
 
 static bool fmt_linear(uint32_t f)
@@ -340,6 +346,9 @@ static bool tex_setup(int s, Tex *t)
     if (dxt) {
         bytes = ((t->w + 3) / 4) * ((t->h + 3) / 4) * (t->fmt == 0x0C ? 8 : 16);
     } else if (t->linear) {
+        if (t->pitch < t->w * fmt_bpp(t->fmt)) {
+            return false; /* el pitch no alcanza para una fila: se leería fuera */
+        }
         bytes = t->pitch * t->h;
     } else {
         bytes = t->w * t->h * fmt_bpp(t->fmt);
@@ -349,7 +358,7 @@ static bool tex_setup(int s, Tex *t)
         return false;
     }
     if (!t->linear && !dxt) {
-        swz_tables(t->w, t->h, &t->xm, &t->ym);
+        swz_tables(s, t->w, t->h, &t->xm, &t->ym);
         if (!t->xm || !t->ym) {
             return false;
         }
@@ -1022,7 +1031,8 @@ static bool target(Target *t)
     }
     t->zfmt = (S.surf_format >> 4) & 0xF;
     t->zpitch = S.surf_pitch >> 16;
-    if (S.has_zeta && t->zpitch && (t->zfmt == 1 || t->zfmt == 2)) {
+    if (S.has_zeta && t->zpitch && (t->zfmt == 1 || t->zfmt == 2) &&
+        t->zpitch >= (uint32_t)t->x1 * (t->zfmt == 1 ? 2u : 4u)) {
         t->zeta = mem(S.dma_zeta + S.zeta_off, t->zpitch * (uint32_t)t->y1);
         t->zmax = t->zfmt == 1 ? 65535.0f : 16777215.0f;
     }

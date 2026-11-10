@@ -48,6 +48,10 @@ static inline void fetch_value(float* out, const Nv2aVshExecutionState* state,
     case NV2ART_TEMPORARY:
       if (input->index == 12) {
         in = state->output_regs;
+      } else if (input->index > 12) {
+        /* XboxNX: r13-r15 no existen; sin esto se lee fuera del arreglo */
+        static const float kZeroT[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        in = kZeroT;
       } else {
         in = &state->temp_regs[input->index * 4];
       }
@@ -112,17 +116,18 @@ static inline void apply_operation(Nv2aVshExecutionState* state,
         continue;
 
       case NV2ART_OUTPUT:
-        assert(out->index < 13 && "Invalid result register target.");
+        /* XboxNX: índices fuera de rango se ignoran (escribían fuera del arreglo) */
+        if (out->index >= 13) continue;
         outreg = &state->output_regs[out->index * 4];
         break;
 
       case NV2ART_TEMPORARY:
-        assert(out->index < 12 && "Invalid temp register target.");
+        if (out->index >= 12) continue;
         outreg = &state->temp_regs[out->index * 4];
         break;
 
       case NV2ART_CONTEXT:
-        assert(out->index < 192 && "Invalid context register target.");
+        if (out->index >= 192) continue;
         outreg = &state->context_regs[out->index * 4];
         break;
 

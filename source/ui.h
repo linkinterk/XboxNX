@@ -56,6 +56,7 @@ typedef struct UiState {
     int stage_back;          /* la pantalla a la que vuelve */
     bool run_screen;         /* X: ver la pantalla del Xbox en vez del registro */
     char toast[160];         /* un aviso en el registro (el volcado) */
+    char last_crash[240];    /* el cierre de la vez anterior (cierre.txt) */
     /* pruebas */
     const ProbeResult *probe;
     bool exc_tried, exc_ok;

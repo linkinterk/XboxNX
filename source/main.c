@@ -7,6 +7,7 @@
  * Basado en hakuX (https://github.com/rfandango/hakuX), GPL-3.0-or-later.
  */
 #include <dirent.h>
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,12 +22,13 @@
 #include "runner.h"
 #include "dump.h"
 #include "probe.h"
+#include "crash.h"
 #include "ui.h"
 #include "usb/usb.h"
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.14"
+#define APP_VER   "0.18.15"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -45,6 +47,7 @@ static Kernel g_kernel;
 static void present(void);
 static LoadReport g_load;
 static Runner g_run;
+const char *g_app_version = APP_VER;
 
 static void load_into_memory(void);
 
@@ -54,6 +57,37 @@ static void load_into_memory(void);
  * (sus esperas activas terminan antes) aunque crea tener una CPU lenta. */
 static unsigned g_nspi = 2;
 
+/* El intérprete por budget ns. Si XboxNX falla (un acceso inválido en este
+ * hilo o en un ayudante), el juego se detiene con el informe en pantalla en
+ * vez de cerrarse la app. */
+static u64 run_guarded(u64 budget)
+{
+    static jmp_buf jb;
+    static int depth;
+    static u64 t0;
+    depth = prof_depth();
+    t0 = armGetSystemTick();
+    g_crash.valid = false;
+    if (setjmp(jb) == 0) {
+        crash_guard_push(&jb, false);
+        u64 spent;
+        do {
+            runner_slice(&g_run, 100000);
+            spent = armTicksToNs(armGetSystemTick() - t0);
+        } while (g_run.state == RUN_ACTIVE && spent < budget && !g_crash.valid);
+    } else {
+        prof_reset(depth);
+    }
+    crash_guard_pop();
+    if (g_crash.valid) {
+        g_run.state = RUN_CPU_STOP;
+        crash_summary(g_run.end, sizeof(g_run.end));
+        snprintf(g_ui.toast, sizeof(g_ui.toast), "%s", g_run.end);
+        g_crash.valid = false;
+    }
+    return armTicksToNs(armGetSystemTick() - t0);
+}
+
 static void start_run(void)
 {
     load_into_memory();
@@ -62,6 +96,7 @@ static void start_run(void)
     }
     g_kernel.ns_per_instr = g_nspi;
     runner_boot(&g_run, &g_vm, &g_kernel, &g_load);
+    crash_set_eip(&g_run.cpu.eip);
     g_ui.run = &g_run;
     g_ui.run_scroll = -1;
     g_ui.screen = UI_RUN;
@@ -256,6 +291,10 @@ int main(int argc, char **argv)
     g_ui.cards = g_cards;
     g_ui.probe = &g_probe;
     scan_games();
+    if (crash_last(g_ui.last_crash, sizeof(g_ui.last_crash))) {
+        remove("sdmc:/switch/XboxNX/cierre.txt.ant");
+        rename("sdmc:/switch/XboxNX/cierre.txt", "sdmc:/switch/XboxNX/cierre.txt.ant");
+    }
     bool dirty = true;
 
     while (appletMainLoop()) {
@@ -420,11 +459,7 @@ int main(int argc, char **argv)
                 /* intérprete entre dibujos de la pantalla (dibujarla cuesta):
                  * ~60 ms viendo la del Xbox, ~150 ms en el registro */
                 u64 budget = g_ui.run_screen ? 60000000ull : 150000000ull;
-                u64 t0 = armGetSystemTick(), spent = 0;
-                do {
-                    runner_slice(&g_run, 100000);
-                    spent = armTicksToNs(armGetSystemTick() - t0);
-                } while (g_run.state == RUN_ACTIVE && spent < budget);
+                u64 spent = run_guarded(budget);
                 g_run.ns += spent;
                 dirty = true;
                 if (k & HidNpadButton_B) {

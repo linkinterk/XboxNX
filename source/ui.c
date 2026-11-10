@@ -1317,7 +1317,14 @@ void ui_draw(const UiState *s)
     gfx_clear(C_BG);
     switch (s->screen) {
     case UI_LOADING: draw_loading(s); break;
-    case UI_LIBRARY: draw_library(s); break;
+    case UI_LIBRARY:
+        draw_library(s);
+        if (s->last_crash[0]) {
+            gfx_rrect(20, BOTBAR_Y - 64, UI_W - 40, 56, 12, C_SURF_HI);
+            gfx_text_fit(36, BOTBAR_Y - 58, 15, UI_W - 72, C_GREEN, "La vez anterior XboxNX se cerró (sd:/switch/XboxNX/cierre.txt):");
+            gfx_text_fit(36, BOTBAR_Y - 36, 15, UI_W - 72, C_ON, s->last_crash);
+        }
+        break;
     case UI_DETAIL: draw_detail(s); break;
     case UI_PROBE: draw_probe(s); break;
     case UI_MEMORY: draw_memory(s); break;
