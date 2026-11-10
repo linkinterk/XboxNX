@@ -1042,6 +1042,10 @@ int main(int argc, char **argv)
     CHECK(st >= 0xD0000000u && vm_phys(&vm, st) != VM_NO_PHYS && vm_phys(&vm, st - 1) == VM_NO_PHYS);
 
     thread_tests();
+    hw_tests();
+    if (argc > 1) {
+        io_tests(argv[1]);
+    }
     {
         /* el volcado (botón − en la Switch): RAM, páginas y estado en texto */
         char msg[160];
@@ -1059,10 +1063,7 @@ int main(int argc, char **argv)
             fclose(f);
         }
     }
-    hw_tests();
-    if (argc > 1) {
-        io_tests(argv[1]);
-    }
+
     block_tests();
     sys_tests();
 

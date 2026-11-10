@@ -127,11 +127,8 @@ bool dump_state(const Runner *r, const XDisc *disc, const char *dir, char *msg, 
 {
     mkdir(dir, 0777);
     const Vm *vm = r->cpu.vm;
-    if (!write_file(dir, "ram.bin", vm->ram, VM_RAM_SIZE) ||
-        !write_file(dir, "paginas.bin", vm->pt, (size_t)(1u << 20) * sizeof(uint32_t))) {
-        snprintf(msg, n, "No se pudo escribir en %s (%s)", dir, strerror(errno));
-        return false;
-    }
+    /* primero el texto (lo más útil), sección a sección: si algo falla
+     * después, lo escrito queda en la SD */
     char path[512];
     snprintf(path, sizeof(path), "%s/estado.txt", dir);
     FILE *f = fopen(path, "w");
@@ -139,8 +136,14 @@ bool dump_state(const Runner *r, const XDisc *disc, const char *dir, char *msg, 
         snprintf(msg, n, "No se pudo crear %s", path);
         return false;
     }
+    setvbuf(f, NULL, _IOLBF, 4096);
     text(f, r);
     fclose(f);
+    if (!write_file(dir, "ram.bin", vm->ram, VM_RAM_SIZE) ||
+        !write_file(dir, "paginas.bin", vm->pt, (size_t)(1u << 20) * sizeof(uint32_t))) {
+        snprintf(msg, n, "No se pudo escribir en %s (%s)", dir, strerror(errno));
+        return false;
+    }
     /* el default.xbe del disco */
     XDiscFile xf;
     if (disc && xdisc_find(disc, "default.xbe", &xf)) {
