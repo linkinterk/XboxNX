@@ -511,8 +511,25 @@ static uint64_t file_size(const KFile *f)
     if (f->kind == F_DISC) {
         return f->disc.size;
     }
+    if (f->kind != F_HOST || f->is_dir) {
+        return 0;
+    }
+    if (f->fp) {
+        /* del archivo abierto: en la Switch, stat() de un archivo abierto
+         * para escribir falla (el sistema no lo deja abrir otra vez) y daba
+         * tamaño 0: las lecturas de la caché de Halo 2 eran fin de archivo */
+        FILE *fp = f->fp;
+        off_t cur = ftello(fp);
+        if (fseeko(fp, 0, SEEK_END) == 0) {
+            off_t end = ftello(fp);
+            fseeko(fp, cur, SEEK_SET);
+            if (end >= 0) {
+                return (uint64_t)end;
+            }
+        }
+    }
     struct stat st;
-    return f->kind == F_HOST && !f->is_dir && stat(f->host, &st) == 0 ? (uint64_t)st.st_size : 0;
+    return stat(f->host, &st) == 0 ? (uint64_t)st.st_size : 0;
 }
 
 /* Nombre relativo a RootDirectory: \?? para las rutas DOS de XAPI ("D:\x"),
@@ -989,8 +1006,14 @@ static void file_facts(const KFile *f, uint64_t t[4], uint64_t *size, uint32_t *
         t[0] = host_time(st.st_ctime);
         t[1] = host_time(st.st_atime);
         t[2] = t[3] = host_time(st.st_mtime);
-        *size = S_ISDIR(st.st_mode) ? 0 : (uint64_t)st.st_size;
+        *size = S_ISDIR(st.st_mode) ? 0 : (f->fp ? file_size(f) : (uint64_t)st.st_size);
         *attrs = S_ISDIR(st.st_mode) ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+        return;
+    }
+    if (f->kind == F_HOST && !f->is_dir && f->fp) { /* abierto para escribir (Switch): sin stat */
+        t[0] = t[1] = t[2] = t[3] = host_time(time(NULL));
+        *size = file_size(f);
+        *attrs = FILE_ATTRIBUTE_NORMAL;
         return;
     }
     t[0] = t[1] = t[2] = t[3] = DISC_TIME;

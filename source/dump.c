@@ -14,6 +14,7 @@ static bool write_file(const char *dir, const char *name, const void *p, size_t 
 {
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", dir, name);
+    remove(path); /* el de un volcado anterior (en la Switch, escribir encima cerraba el programa) */
     FILE *f = fopen(path, "wb");
     if (!f) {
         return false;
@@ -131,6 +132,7 @@ bool dump_state(const Runner *r, const XDisc *disc, const char *dir, char *msg, 
      * después, lo escrito queda en la SD */
     char path[512];
     snprintf(path, sizeof(path), "%s/estado.txt", dir);
+    remove(path);
     FILE *f = fopen(path, "w");
     if (!f) {
         snprintf(msg, n, "No se pudo crear %s", path);
@@ -148,6 +150,7 @@ bool dump_state(const Runner *r, const XDisc *disc, const char *dir, char *msg, 
     XDiscFile xf;
     if (disc && xdisc_find(disc, "default.xbe", &xf)) {
         snprintf(path, sizeof(path), "%s/default.xbe", dir);
+        remove(path);
         FILE *o = fopen(path, "wb");
         static uint8_t buf[1u << 16];
         for (uint64_t off = 0; o && off < xf.size;) {
