@@ -38,6 +38,64 @@ static uint32_t g_shadow[UI_W * UI_H];
 static Framebuffer g_fb;
 static bool g_use_fb = true; /* false: la pantalla va por OpenGL (etapa 4c) */
 
+/* ---- registro del arranque del GPU (sd:/switch/XboxNX/gpu.txt) ---- */
+#define GPU_LOG "sdmc:/switch/XboxNX/gpu.txt"
+#define GPU_FALLO "sdmc:/switch/XboxNX/gpu_fallo.txt"
+static FILE *g_gpu_log;
+static int g_gpu_frames; /* cuadros mostrados por OpenGL hasta escribir "listo" */
+
+static void gpu_log_line(const char *t)
+{
+    if (g_gpu_log) {
+        fprintf(g_gpu_log, "%s\n", t);
+        fflush(g_gpu_log);
+    }
+}
+
+static void gpu_log_close(void)
+{
+    if (g_gpu_log) {
+        fclose(g_gpu_log);
+        g_gpu_log = NULL;
+    }
+    gpu_log = NULL;
+}
+
+/* true: se puede intentar el GPU */
+static bool gpu_check_previous(bool forzar)
+{
+    if (forzar) {
+        remove(GPU_FALLO);
+    }
+    FILE *f = fopen(GPU_FALLO, "r");
+    if (f) {
+        fclose(f);
+        gpu_set_info("apagada: la vez pasada se cerró al iniciarla (ZR al abrir para reintentar)");
+        return false;
+    }
+    f = fopen(GPU_LOG, "r");
+    if (!f) {
+        return true;
+    }
+    char line[200], last[200] = "";
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        if (line[0]) {
+            snprintf(last, sizeof(last), "%s", line);
+        }
+    }
+    fclose(f);
+    if (strcmp(last, "listo") == 0) {
+        return true;
+    }
+    rename(GPU_LOG, GPU_FALLO);
+    char t[260];
+    snprintf(t, sizeof(t), "apagada: se cerró en \"%.100s\" (ZR al abrir para reintentar)", last);
+    gpu_set_info(t);
+    return false;
+}
+
+
 static UiCard g_cards[MAX_GAMES];
 static int g_ncards;
 static Game g_game;       /* el juego abierto en el detalle */
@@ -274,63 +332,6 @@ static void pad_to_xbox(PadState *pad, u64 h, NcPadState *ps)
     ps->ly = (int16_t)l.y;
     ps->rx = (int16_t)r.x;
     ps->ry = (int16_t)r.y;
-}
-
-/* ---- registro del arranque del GPU (sd:/switch/XboxNX/gpu.txt) ---- */
-#define GPU_LOG "sdmc:/switch/XboxNX/gpu.txt"
-#define GPU_FALLO "sdmc:/switch/XboxNX/gpu_fallo.txt"
-static FILE *g_gpu_log;
-static int g_gpu_frames; /* cuadros mostrados por OpenGL hasta escribir "listo" */
-
-static void gpu_log_line(const char *t)
-{
-    if (g_gpu_log) {
-        fprintf(g_gpu_log, "%s\n", t);
-        fflush(g_gpu_log);
-    }
-}
-
-static void gpu_log_close(void)
-{
-    if (g_gpu_log) {
-        fclose(g_gpu_log);
-        g_gpu_log = NULL;
-    }
-    gpu_log = NULL;
-}
-
-/* true: se puede intentar el GPU */
-static bool gpu_check_previous(bool forzar)
-{
-    if (forzar) {
-        remove(GPU_FALLO);
-    }
-    FILE *f = fopen(GPU_FALLO, "r");
-    if (f) {
-        fclose(f);
-        gpu_set_info("apagada: la vez pasada se cerró al iniciarla (ZR al abrir para reintentar)");
-        return false;
-    }
-    f = fopen(GPU_LOG, "r");
-    if (!f) {
-        return true;
-    }
-    char line[200], last[200] = "";
-    while (fgets(line, sizeof(line), f)) {
-        line[strcspn(line, "\r\n")] = 0;
-        if (line[0]) {
-            snprintf(last, sizeof(last), "%s", line);
-        }
-    }
-    fclose(f);
-    if (strcmp(last, "listo") == 0) {
-        return true;
-    }
-    rename(GPU_LOG, GPU_FALLO);
-    char t[260];
-    snprintf(t, sizeof(t), "apagada: se cerró en \"%.100s\" (ZR al abrir para reintentar)", last);
-    gpu_set_info(t);
-    return false;
 }
 
 int main(int argc, char **argv)
