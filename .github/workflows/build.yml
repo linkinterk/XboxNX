@@ -102,6 +102,8 @@ jobs:
           qemu-aarch64 ./kernel_test_a64 build-test/t.iso
           qemu-aarch64 ./bench_a64 100
           SIN_JIT=1 qemu-aarch64 ./bench_a64 100
+          BENCH_FP=1 qemu-aarch64 ./bench_a64 50
+          CPU_JIT=1 CPU_BLOQUES=1 python3 tests/cpu_diff.py ./cpu_diff_arm 3000 9
 
   switch:
     name: XboxNX.nro (Switch)

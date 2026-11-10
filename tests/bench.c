@@ -27,8 +27,16 @@ int main(int argc, char **argv)
         0x0F, 0x72, 0xD2, 0x03, 0x0F, 0xE5, 0xCA, 0x0F, 0x7F, 0x0F, 0x0F, 0x67, 0xCA, 0x0F, 0xEF, 0xDB,
         0x49, 0x75, 0xDD, 0xF4,
     };
-    bool use_mmx = getenv("BENCH_MMX") != NULL;
-    if (use_mmx) {
+    /* x87 + SSE + prefetch + shl/dec/jnz como en el código de Halo 2 (13 por vuelta) */
+    static const uint8_t fp[] = {
+        0xD9, 0x06, 0xD8, 0x4E, 0x04, 0xD8, 0xC0, 0xD9, 0x5F, 0x08, 0x0F, 0x10, 0x06, 0x0F, 0x10, 0x4E,
+        0x10, 0x0F, 0x59, 0xC1, 0x0F, 0x58, 0xC1, 0x0F, 0x11, 0x47, 0x20, 0x0F, 0x18, 0x46, 0x40, 0xC1,
+        0xE0, 0x03, 0x49, 0x75, 0xDB, 0xF4,
+    };
+    bool use_mmx = getenv("BENCH_MMX") != NULL, use_fp = getenv("BENCH_FP") != NULL;
+    if (use_fp) {
+        vm_write(&vm, 0x1000, fp, sizeof(fp));
+    } else if (use_mmx) {
         vm_write(&vm, 0x1000, mmx, sizeof(mmx));
     } else {
         vm_write(&vm, 0x1000, code, sizeof(code));
@@ -39,7 +47,10 @@ int main(int argc, char **argv)
     c.use_blocks = getenv("SIN_BLOQUES") == NULL;
     c.jit_hot = getenv("SIN_JIT") == NULL && c.use_blocks ? 2 : 0; /* solo en ARM64 */
     c.eip = 0x1000;
-    c.r[R_ECX] = (uint32_t)(mi * 1e6 / (use_mmx ? 12 : 16));
+    c.r[R_ECX] = (uint32_t)(mi * 1e6 / (use_fp ? 13 : use_mmx ? 12 : 16));
+    if (use_fp) {
+        c.fpu_cw = 0x007F; /* precisión de 24 bits, como Direct3D */
+    }
     c.r[R_ESI] = c.r[R_EDI] = 0x100000;
     c.r[R_ESP] = 0x200000;
     struct timespec a, b;

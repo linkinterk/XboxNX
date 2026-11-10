@@ -31,7 +31,13 @@ def reg_rm():
 
 
 def producer():
-    k = rnd.randrange(4)
+    k = rnd.randrange(5)
+    if k == 4:  # shl / shr / sar con inmediato (el JIT los deja con flags perezosos)
+        sub = rnd.choice([4, 5, 7, 6])
+        rm = rnd.choice([0, 1, 2, 3, 5, 6, 7])
+        if rnd.random() < 0.2:
+            return bytes([0xD1, 0xC0 | sub << 3 | rm])
+        return bytes([0xC1, 0xC0 | sub << 3 | rm, rnd.choice([1, 2, 7, 8, 15, 16, 24, 31, rnd.randrange(32)])])
     if k == 0:
         op = rnd.choice([0x00, 0x01, 0x08, 0x09, 0x10, 0x11, 0x18, 0x19, 0x20, 0x21, 0x28, 0x29, 0x30, 0x31,
                          0x38, 0x39])
@@ -44,14 +50,19 @@ def producer():
     return bytes([0x66, rnd.choice([0x01, 0x29, 0x39, 0x21]), reg_rm()])
 
 
-def consumer():
+def cc(no_of):
+    # tras un desplazamiento de más de un bit el OF es indefinido: sin o/no/l/ge/le/g
+    return rnd.randrange(2, 12) if no_of else rnd.randrange(16)
+
+
+def consumer(no_of=False):
     k = rnd.randrange(8)
     if k == 0:
-        return bytes([0x70 | rnd.randrange(16), 0x00])
+        return bytes([0x70 | cc(no_of), 0x00])
     if k == 1:
-        return bytes([0x0F, 0x90 | rnd.randrange(16), 0xC0 | rnd.choice([0, 1, 2, 3])])
+        return bytes([0x0F, 0x90 | cc(no_of), 0xC0 | rnd.choice([0, 1, 2, 3])])
     if k == 2:
-        return bytes([0x0F, 0x40 | rnd.randrange(16), reg_rm()])
+        return bytes([0x0F, 0x40 | cc(no_of), reg_rm()])
     if k == 3:
         return bytes([rnd.choice([0x11, 0x13, 0x19, 0x1B]), reg_rm()])
     if k == 4:
@@ -63,12 +74,41 @@ def consumer():
     return bytes([rnd.choice([0x40, 0x48]) | rnd.choice([0, 1, 2, 3])])
 
 
+def multi_shift(prod):
+    """¿El último que pone flags es un desplazamiento de más de un bit?"""
+    i, last = 0, False
+    while i < len(prod):
+        b = prod[i]
+        if b == 0xC1:
+            last = (prod[i + 2] & 31) != 1
+            i += 3
+        elif b == 0xD1:
+            last = False
+            i += 2
+        elif b == 0x83:
+            last = False
+            i += 3
+        elif b == 0x66:
+            last = False
+            i += 3
+        elif 0x40 <= b <= 0x4F:
+            i += 1  # inc/dec: no tocan el CF... pero sí el OF
+            last = False
+        else:
+            last = False
+            i += 2
+    return last
+
+
 def main():
     proc = subprocess.Popen([sys.argv[1]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     cases = int(sys.argv[2]) if len(sys.argv) > 2 else 5000
     fails = 0
     for _ in range(cases):
-        code = producer() + consumer()
+        two = rnd.random() < 0.3
+        prod = producer() + (producer() if two else b"")
+        no_of = multi_shift(prod)
+        code = prod + consumer(no_of)
         regs = [r32() for _ in range(8)]
         regs[4] = STACK
         flags = 0x2 | (rnd.getrandbits(12) & 0x8D5)
@@ -82,7 +122,7 @@ def main():
         for r, v in zip(REGS, regs):
             mu.reg_write(r, v)
         mu.reg_write(UC_X86_REG_EFLAGS, flags)
-        mu.emu_start(CODE, 0xFFFFFFFF, count=2)
+        mu.emu_start(CODE, 0xFFFFFFFF, count=3 if two else 2)
         ref = [mu.reg_read(r) for r in REGS]
         rflags = mu.reg_read(UC_X86_REG_EFLAGS)
         rstk = bytes(mu.mem_read(STACK - 16, 32))
@@ -101,11 +141,12 @@ def main():
             got[0] &= ~(AF << 8)
         if got != ref:
             bad.append("regs %s != %s" % ([hex(x) for x in got], [hex(x) for x in ref]))
-        if (gflags ^ rflags) & MASK:
+        mask = MASK & ~0x800 if no_of else MASK
+        if (gflags ^ rflags) & mask:
             bad.append("flags %x != %x" % (gflags, rflags))
         if code[-1] == 0x9C:
-            g = int.from_bytes(gstk[12:16], "little") & ~AF
-            r = int.from_bytes(rstk[12:16], "little") & ~AF
+            g = int.from_bytes(gstk[12:16], "little") & ~AF & ~(0x800 if no_of else 0)
+            r = int.from_bytes(rstk[12:16], "little") & ~AF & ~(0x800 if no_of else 0)
             if g != r:
                 bad.append("pushf %x != %x" % (g, r))
         if bad:

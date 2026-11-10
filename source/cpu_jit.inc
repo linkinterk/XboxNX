@@ -780,6 +780,8 @@ static bool emit_more(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned 
     return false;
 }
 
+#include "cpu_jit_fp.inc"
+
 /* Una instrucción; true si puede quedar en código nativo (EIP sin poner;
  * su camino lento pone el mismo next). false: la función, que pone el EIP. */
 static bool emit_insn(Em *e, const Block *b, unsigned i, const Vm *vm)
@@ -803,6 +805,13 @@ static bool emit_insn(Em *e, const Block *b, unsigned i, const Vm *vm)
     }
     if (emit_more(e, b, i, vm, prev_kind)) {
         return f != x_jcc; /* el jcc pone el EIP él mismo */
+    }
+    if (emit_x87(e, b, i, vm) || emit_sse(e, b, i, vm)) {
+        return true;
+    }
+    bool nat;
+    if (emit_int(e, b, i, vm, prev_kind, &nat)) {
+        return nat;
     }
     if (f == x_mov_eg && r32) {
         ldrw(e, W12, XC, ROFF(in->reg));

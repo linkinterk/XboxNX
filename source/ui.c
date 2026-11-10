@@ -1291,8 +1291,8 @@ static const Stage k_stages[] = {
     {"5c", "Optimización 3", "El audio (DSP) en su propio núcleo, junto al intérprete", 0},
     {"3h", "Sonido", "Sacar el audio del Xbox por la Switch", 2},
     {"2d.1", "Bloques decodificados", "Código entendido una vez y guardado: ~1,8x; MMX del video 2,4x", 0},
-    {"2d.2", "JIT a ARM64", "Bloques traducidos a código de la Switch (mov, alu, pila, memoria)", 1},
-    {"2d.3", "JIT ampliado", "Más instrucciones en el JIT (x87, SSE) según lo que use Halo 2", 2},
+    {"2d.2", "JIT a ARM64", "Bloques traducidos a código de la Switch (mov, alu, pila, memoria)", 0},
+    {"2d.3", "JIT ampliado", "x87, SSE, MMX, inc/dec, desplazamientos, call/ret en el JIT", 1},
     {"4c", "Gráficos por GPU", "Primera versión: triángulos, texturas y combiners en el GPU (L3)", 1},
     {"5", "Optimizar", "Velocidad general hasta que Halo 2 se pueda jugar", 2},
 };

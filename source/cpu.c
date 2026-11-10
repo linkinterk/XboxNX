@@ -254,7 +254,20 @@ static uint32_t pop(Cpu *c, int sz)
  * lee; casi siempre la siguiente instrucción los vuelve a pisar. FL(c) da
  * los flags ya calculados; fuera del intérprete (cpu_run, cpu_step) están
  * siempre calculados. */
-enum { LF_NONE, LF_ADD, LF_SUB, LF_LOGIC, LF_INC, LF_DEC };
+/* LF_SHL/SHR/SAR (solo los pone el JIT, 32 bits, cuenta 1..31): a = valor,
+ * b = cuenta, res = resultado; AF a cero como en shift(). */
+enum { LF_NONE, LF_ADD, LF_SUB, LF_LOGIC, LF_INC, LF_DEC, LF_SHL, LF_SHR, LF_SAR };
+static inline uint32_t shift_cf(unsigned op, uint32_t a, uint32_t cnt, unsigned bits)
+{
+    if (op == LF_SHL) {
+        return cnt <= bits ? (a >> (bits - cnt)) & 1 : 0;
+    }
+    if (op == LF_SHR) {
+        return cnt <= bits ? (a >> (cnt - 1)) & 1 : 0;
+    }
+    int32_t sa = (int32_t)(a << (32 - bits)) >> (32 - bits);
+    return cnt >= bits ? (uint32_t)(sa < 0) : (uint32_t)((sa >> (cnt - 1)) & 1);
+}
 
 static void flags_sync(Cpu *c)
 {
@@ -286,6 +299,18 @@ static void flags_sync(Cpu *c)
         break;
     case LF_LOGIC:
         break;
+    case LF_SHL:
+    case LF_SHR:
+    case LF_SAR: {
+        uint32_t cf = shift_cf(c->lf_op, a, b, sz * 8u);
+        f |= cf ? F_CF : 0;
+        if (c->lf_op == LF_SHL) {
+            f |= (((res & s) != 0) != (cf != 0)) ? F_OF : 0;
+        } else if (c->lf_op == LF_SHR) {
+            f |= (a & s) ? F_OF : 0;
+        }
+        break;
+    }
     default:
         return;
     }
@@ -308,6 +333,9 @@ static inline uint32_t lazy_cf(Cpu *c)
     case LF_INC:
     case LF_DEC: return c->lf_cin;
     case LF_LOGIC: return 0;
+    case LF_SHL:
+    case LF_SHR:
+    case LF_SAR: return shift_cf(c->lf_op, c->lf_a, c->lf_b, c->lf_sz * 8u);
     default: return (c->flags & F_CF) ? 1 : 0;
     }
 }
@@ -2020,8 +2048,17 @@ static InsnFn mmx_fn(uint8_t op)
     }
 }
 
+/* Las que hace el intérprete quedan marcadas para el JIT (2d.3, x87 y SSE):
+ * aop = el opcode (el segundo byte en las 0F), sz = INTERP_MARK | INTERP_0F
+ * si es 0F | los prefijos (P66, PF3, PF2), imm = el inmediato de 8 bits. */
+#define INTERP_MARK 0x80u
+#define INTERP_0F 0x40u
+#define INTERP_P66 1u
+#define INTERP_PF3 2u
+#define INTERP_PF2 4u
+
 /* El largo de una 0F que hace el intérprete (sin saltos). false: no. */
-static bool dec_interp_0f(Rd *r, Insn *in, uint8_t op2)
+static bool dec_interp_0f(Rd *r, Insn *in, uint8_t op2, unsigned pfx)
 {
     bool modrm, imm8 = false;
     if (op2 == 0x77 || op2 == 0x31 || op2 == 0xA2 || (op2 >= 0xC8 && op2 <= 0xCF)) {
@@ -2039,15 +2076,15 @@ static bool dec_interp_0f(Rd *r, Insn *in, uint8_t op2)
     if (modrm) {
         dec_modrm(r, in, rd8(r));
     }
-    if (imm8) {
-        rd8(r);
-    }
+    in->imm = imm8 ? rd8(r) : 0;
     in->fn = x_interp;
+    in->aop = op2;
+    in->sz = (uint8_t)(INTERP_MARK | INTERP_0F | pfx);
     return true;
 }
 
 /* El largo de una de un byte que hace el intérprete (sin saltos). */
-static bool dec_interp_1(Rd *r, Insn *in, uint8_t op)
+static bool dec_interp_1(Rd *r, Insn *in, uint8_t op, unsigned pfx)
 {
     if ((op >= 0xD8 && op <= 0xDF) || op == 0x8F) {
         dec_modrm(r, in, rd8(r));
@@ -2057,6 +2094,8 @@ static bool dec_interp_1(Rd *r, Insn *in, uint8_t op)
         return false;
     }
     in->fn = x_interp;
+    in->aop = op;
+    in->sz = (uint8_t)(INTERP_MARK | pfx);
     return true;
 }
 
@@ -2088,12 +2127,13 @@ static bool decode(Rd *r, uint32_t page_va, Insn *in)
     in->start = page_va + start;
     in->fs = fs;
     in->base = in->index = NOREG;
+    unsigned pfx = (o16 ? INTERP_P66 : 0) | (rep_ == 0xF3 ? INTERP_PF3 : 0) | (rep_ == 0xF2 ? INTERP_PF2 : 0);
     if (rep_) { /* rep, movss...: siempre el intérprete */
         if (op == 0x0F) {
-            if (!dec_interp_0f(r, in, rd8(r))) {
+            if (!dec_interp_0f(r, in, rd8(r), pfx)) {
                 return false;
             }
-        } else if (!dec_interp_1(r, in, op)) {
+        } else if (!dec_interp_1(r, in, op, pfx)) {
             return false;
         }
     } else if (op < 0x40 && (op & 7) < 6) { /* ALU 00-3D */
@@ -2293,10 +2333,10 @@ static bool decode(Rd *r, uint32_t page_va, Insn *in)
             in->fn = x_pshufw;
         } else if (!o16 && op2 == 0x77) {
             in->fn = x_emms;
-        } else if (!dec_interp_0f(r, in, op2)) {
+        } else if (!dec_interp_0f(r, in, op2, pfx)) {
             return false;
         }
-    } else if (!dec_interp_1(r, in, op)) {
+    } else if (!dec_interp_1(r, in, op, pfx)) {
         return false;
     }
     if (r->bad) {
