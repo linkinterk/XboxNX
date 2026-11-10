@@ -93,6 +93,7 @@ typedef struct Em {
     uint32_t *exits[512]; /* "b epílogo" por parchear */
     unsigned nexits;
     bool full;
+    bool fallback; /* emitiendo el camino de respaldo (no cuenta como lento) */
 } Em;
 
 static inline void E(Em *e, uint32_t ins)
@@ -240,7 +241,9 @@ static void emit_page(Em *e, bool write, uint32_t **slow1, uint32_t **slow2, uin
 static void emit_call(Em *e, const Block *b, unsigned i, const Vm *vm)
 {
     const Insn *in = &b->in[i];
-    ((Block *)b)->slow |= 1ull << (i & 63); /* para el perfil */
+    if (!e->fallback) {
+        ((Block *)b)->slow |= 1ull << (i & 63); /* para el perfil (no el camino de respaldo) */
+    }
     /* el intérprete (rdtsc, por ejemplo) ve icount como si fuera de una en una */
     bool icnt = in->fn == x_interp && i > 0;
     if (icnt) {
@@ -327,7 +330,9 @@ static void emit_load_or_call(Em *e, const Block *b, unsigned i, const Vm *vm, v
     uint32_t *done = fwd_b(e);
     patch(e, s1);
     patch(e, s2);
+    e->fallback = true;
     emit_call(e, b, i, vm);
+    e->fallback = false;
     patch(e, done);
 }
 
@@ -353,8 +358,251 @@ static void emit_store_or_call(Em *e, const Block *b, unsigned i, const Vm *vm)
     patch(e, s1);
     patch(e, s2);
     patch(e, s3);
+    e->fallback = true;
     emit_call(e, b, i, vm);
+    e->fallback = false;
     patch(e, done);
+}
+
+/* ---- MMX en NEON (2d.3): los registros mm viven en c->fp.mm; v0 = destino,
+ * v1 = fuente, v2 de paso. Halo 2 usa MMX sin parar. ---- */
+
+#define MMOFF(n) (OFF(fp.mm) + 8u * (uint32_t)(n))
+
+static void ldrd(Em *e, int vt, int rn, uint32_t off) { E(e, 0xFD400000u | ((off / 8) << 10) | (uint32_t)rn << 5 | (uint32_t)vt); }
+static void strd(Em *e, int vt, int rn, uint32_t off) { E(e, 0xFD000000u | ((off / 8) << 10) | (uint32_t)rn << 5 | (uint32_t)vt); }
+static void ldrd_r(Em *e, int vt, int rn, int rm) { E(e, 0xFC606800u | (uint32_t)rm << 16 | (uint32_t)rn << 5 | (uint32_t)vt); }
+static void strd_r(Em *e, int vt, int rn, int rm) { E(e, 0xFC206800u | (uint32_t)rm << 16 | (uint32_t)rn << 5 | (uint32_t)vt); }
+
+/* Como emit_page, para 8 bytes. */
+static void emit_page8(Em *e, bool write, uint32_t **slow1, uint32_t **slow2, uint32_t **slow3)
+{
+    lsrw(e, W10, W9, 12);
+    ldrw_lsl2(e, W10, XPT, W10);
+    *slow1 = fwd_cb(e, J_CBZ, W10);
+    ubfx12(e, W11, W9);
+    cmpwi(e, W11, 0xFF8);
+    *slow2 = fwd_bcond(e, COND_HI);
+    subwi(e, W10, W10, 1);
+    *slow3 = NULL;
+    if (write) {
+        ldrb_r(e, W13, XCODE, W10);
+        *slow3 = fwd_cb(e, J_CBNZ, W13);
+    }
+    addx_lsl(e, W10, XRAM, W10, 12);
+}
+
+/* La operación NEON de 64 bits sobre v0 (y v1); false si no la hay. */
+static bool neon_op(Em *e, InsnFn f, const Insn *in)
+{
+#define V3(U, size, opc) (0x0E200400u | (uint32_t)(U) << 29 | (uint32_t)(size) << 22 | 1u << 16 | (uint32_t)(opc) << 11)
+    uint32_t op = 0;
+    if (f == x_paddb) op = V3(0, 0, 0x10);
+    else if (f == x_paddw) op = V3(0, 1, 0x10);
+    else if (f == x_paddd) op = V3(0, 2, 0x10);
+    else if (f == x_psubb) op = V3(1, 0, 0x10);
+    else if (f == x_psubw) op = V3(1, 1, 0x10);
+    else if (f == x_psubd) op = V3(1, 2, 0x10);
+    else if (f == x_paddsb) op = V3(0, 0, 0x01);
+    else if (f == x_paddsw) op = V3(0, 1, 0x01);
+    else if (f == x_psubsb) op = V3(0, 0, 0x05);
+    else if (f == x_psubsw) op = V3(0, 1, 0x05);
+    else if (f == x_paddusb) op = V3(1, 0, 0x01);
+    else if (f == x_paddusw) op = V3(1, 1, 0x01);
+    else if (f == x_psubusb) op = V3(1, 0, 0x05);
+    else if (f == x_psubusw) op = V3(1, 1, 0x05);
+    else if (f == x_pmullw) op = V3(0, 1, 0x13);
+    else if (f == x_pcmpeqb) op = V3(1, 0, 0x11);
+    else if (f == x_pcmpeqw) op = V3(1, 1, 0x11);
+    else if (f == x_pcmpeqd) op = V3(1, 2, 0x11);
+    else if (f == x_pcmpgtb) op = V3(0, 0, 0x06);
+    else if (f == x_pcmpgtw) op = V3(0, 1, 0x06);
+    else if (f == x_pcmpgtd) op = V3(0, 2, 0x06);
+    else if (f == x_pminub) op = V3(1, 0, 0x0D);
+    else if (f == x_pmaxub) op = V3(1, 0, 0x0C);
+    else if (f == x_pminsw) op = V3(0, 1, 0x0D);
+    else if (f == x_pmaxsw) op = V3(0, 1, 0x0C);
+    else if (f == x_pavgb) op = V3(1, 0, 0x02);
+    else if (f == x_pavgw) op = V3(1, 1, 0x02);
+#undef V3
+    if (op) {
+        /* el campo Rm de V3 era 1 (v1); Rn = v0, Rd = v0 */
+        E(e, op);
+        return true;
+    }
+    if (f == x_mmx_logic) {
+        switch (in->aop) {
+        case 0xDB: E(e, 0x0E201C00u | 1u << 16); return true;           /* and v0, v0, v1 */
+        case 0xDF: E(e, 0x0E601C00u | 0u << 16 | 1u << 5); return true; /* bic v0, v1, v0: ~a & b */
+        case 0xEB: E(e, 0x0EA01C00u | 1u << 16); return true;           /* orr */
+        default: E(e, 0x2E201C00u | 1u << 16); return true;             /* eor */
+        }
+    }
+    if (f == x_pmulhw || f == x_pmulhuw) {
+        E(e, (f == x_pmulhw ? 0x0E60C000u : 0x2E60C000u) | 1u << 16 | 0u << 5 | 2u); /* s/umull v2.4s, v0.4h, v1.4h */
+        E(e, 0x0F108400u | 2u << 5 | 0u);                                         /* shrn v0.4h, v2.4s, #16 */
+        return true;
+    }
+    if (f == x_pmaddwd) {
+        E(e, 0x0E60C000u | 1u << 16 | 0u << 5 | 2u); /* smull v2.4s, v0.4h, v1.4h */
+        E(e, 0x4EA0BC00u | 2u << 16 | 2u << 5 | 0u); /* addp v0.4s, v2.4s, v2.4s */
+        return true;
+    }
+    if (f == x_punpck) {
+        uint32_t size = (in->aop & 3) == 0 ? 0 : (in->aop & 3) == 1 ? 1 : 2;
+        E(e, (in->aop >= 0x68 ? 0x0E007800u : 0x0E003800u) | size << 22 | 1u << 16); /* zip2 / zip1 v0, v0, v1 */
+        return true;
+    }
+    if (f == x_pack) {
+        E(e, 0x6E180400u | 1u << 5 | 0u); /* ins v0.d[1], v1.d[0] */
+        if (in->aop == 0x63) {
+            E(e, 0x0E214800u);            /* sqxtn v0.8b, v0.8h */
+        } else if (in->aop == 0x67) {
+            E(e, 0x2E212800u);            /* sqxtun v0.8b, v0.8h */
+        } else {
+            E(e, 0x0E614800u);            /* sqxtn v0.4h, v0.4s */
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool is_mmx_op(InsnFn f)
+{
+    return f == x_paddb || f == x_paddw || f == x_paddd || f == x_psubb || f == x_psubw || f == x_psubd ||
+           f == x_paddsb || f == x_paddsw || f == x_psubsb || f == x_psubsw || f == x_paddusb || f == x_paddusw ||
+           f == x_psubusb || f == x_psubusw || f == x_pmullw || f == x_pmulhw || f == x_pmulhuw || f == x_pcmpeqb ||
+           f == x_pcmpeqw || f == x_pcmpeqd || f == x_pcmpgtb || f == x_pcmpgtw || f == x_pcmpgtd || f == x_pminub ||
+           f == x_pmaxub || f == x_pminsw || f == x_pmaxsw || f == x_pavgb || f == x_pavgw || f == x_mmx_logic ||
+           f == x_pmaddwd || f == x_punpck || f == x_pack;
+}
+
+/* La fuente de 64 bits en v1 (registro mm o memoria); con memoria deja en
+ * *slow los saltos al camino de respaldo. */
+static void mmx_src(Em *e, const Insn *in, uint32_t **s1, uint32_t **s2)
+{
+    *s1 = *s2 = NULL;
+    if (in->is_reg) {
+        ldrd(e, 1, XC, MMOFF(in->rm));
+        return;
+    }
+    uint32_t *s3;
+    emit_ea(e, in, true);
+    emit_page8(e, false, s1, s2, &s3);
+    ldrd_r(e, 1, W10, W11);
+}
+
+static void mmx_tail(Em *e, const Block *b, unsigned i, const Vm *vm, uint32_t *s1, uint32_t *s2)
+{
+    if (!s1) {
+        return;
+    }
+    uint32_t *done = fwd_b(e);
+    patch(e, s1);
+    patch(e, s2);
+    e->fallback = true;
+    emit_call(e, b, i, vm);
+    e->fallback = false;
+    patch(e, done);
+}
+
+static bool emit_mmx(Em *e, const Block *b, unsigned i, const Vm *vm)
+{
+    const Insn *in = &b->in[i];
+    InsnFn f = in->fn;
+    uint32_t *s1, *s2, *s3;
+    if (is_mmx_op(f)) {
+        mmx_src(e, in, &s1, &s2);
+        ldrd(e, 0, XC, MMOFF(in->reg));
+        neon_op(e, f, in);
+        strd(e, 0, XC, MMOFF(in->reg));
+        mmx_tail(e, b, i, vm, s1, s2);
+        return true;
+    }
+    if (f == x_movq_load) {
+        mmx_src(e, in, &s1, &s2);
+        strd(e, 1, XC, MMOFF(in->reg));
+        movw(e, W12, 1);
+        strb(e, W12, XC, OFF(fp.mmx));
+        mmx_tail(e, b, i, vm, s1, s2);
+        return true;
+    }
+    if (f == x_movq_store) {
+        ldrd(e, 0, XC, MMOFF(in->reg));
+        if (in->is_reg) {
+            strd(e, 0, XC, MMOFF(in->rm));
+            return true;
+        }
+        emit_ea(e, in, true);
+        emit_page8(e, true, &s1, &s2, &s3);
+        strd_r(e, 0, W10, W11);
+        uint32_t *done = fwd_b(e);
+        patch(e, s1);
+        patch(e, s2);
+        patch(e, s3);
+        e->fallback = true;
+        emit_call(e, b, i, vm);
+        e->fallback = false;
+        patch(e, done);
+        return true;
+    }
+    if (f == x_movd_load) {
+        if (in->is_reg) {
+            ldrw(e, W12, XC, ROFF(in->rm));
+            E(e, 0x1E270000u | (uint32_t)W12 << 5 | 0u); /* fmov s0, w12 (el resto en 0) */
+            strd(e, 0, XC, MMOFF(in->reg));
+            s1 = s2 = NULL;
+        } else {
+            emit_ea(e, in, true);
+            emit_page(e, false, &s1, &s2, &s3);
+            ldrw_r(e, W12, W10, W11);
+            E(e, 0x1E270000u | (uint32_t)W12 << 5 | 0u);
+            strd(e, 0, XC, MMOFF(in->reg));
+        }
+        movw(e, W12, 1);
+        strb(e, W12, XC, OFF(fp.mmx));
+        mmx_tail(e, b, i, vm, s1, s2);
+        return true;
+    }
+    if (f == x_movd_store) {
+        ldrw(e, W12, XC, MMOFF(in->reg)); /* la mitad baja */
+        if (in->is_reg) {
+            strw(e, W12, XC, ROFF(in->rm));
+            return true;
+        }
+        emit_ea(e, in, true);
+        emit_store_or_call(e, b, i, vm);
+        return true;
+    }
+    if (f == x_mmx_shift_i) {
+        unsigned bits = in->sz * 8u, cnt = in->imm, kind = in->reg;
+        ldrd(e, 0, XC, MMOFF(in->rm));
+        if (bits == 64) {
+            if (cnt >= 64) {
+                E(e, 0x2F00E400u); /* movi d0, #0 */
+            } else if (cnt) {
+                if (kind == 2) {
+                    E(e, 0x7F000400u | (128u - cnt) << 16); /* ushr d0, d0, #cnt */
+                } else {
+                    E(e, 0x5F005400u | (64u + cnt) << 16);  /* shl d0, d0, #cnt */
+                }
+            }
+        } else if (cnt >= bits && kind != 4) {
+            E(e, 0x2F00E400u);
+        } else {
+            unsigned c2 = cnt >= bits ? bits - 1 : cnt;
+            if (c2) {
+                if (kind == 6) {
+                    E(e, 0x0F005400u | (bits + c2) << 16);      /* shl v0.4h/2s, v0, #c2 */
+                } else {
+                    E(e, (kind == 4 ? 0x0F000400u : 0x2F000400u) | (2 * bits - c2) << 16); /* sshr / ushr */
+                }
+            }
+        }
+        strd(e, 0, XC, MMOFF(in->rm));
+        return true;
+    }
+    return false;
 }
 
 /* Una instrucción; true si puede quedar en código nativo (EIP sin poner;
@@ -365,6 +613,9 @@ static bool emit_insn(Em *e, const Block *b, unsigned i, const Vm *vm)
     InsnFn f = in->fn;
     bool r32 = in->sz == 4;
     if (f == x_nop) {
+        return true;
+    }
+    if (emit_mmx(e, b, i, vm)) {
         return true;
     }
     if (f == x_mov_eg && r32) {
@@ -453,7 +704,9 @@ static bool emit_insn(Em *e, const Block *b, unsigned i, const Vm *vm)
             patch(e, s1);
             patch(e, s2);
             patch(e, s3);
+            e->fallback = true;
             emit_call(e, b, i, vm);
+            e->fallback = false;
             patch(e, done);
             return true;
         }
@@ -469,7 +722,9 @@ static bool emit_insn(Em *e, const Block *b, unsigned i, const Vm *vm)
         uint32_t *done = fwd_b(e);
         patch(e, s1);
         patch(e, s2);
+        e->fallback = true;
         emit_call(e, b, i, vm);
+        e->fallback = false;
         patch(e, done);
         return true;
     }
@@ -491,6 +746,7 @@ static bool jit_compile(Cpu *c, Block *b)
         e.end = (uint32_t *)(g_jit.rw + g_jit.size);
         e.nexits = 0;
         e.full = false;
+        e.fallback = false;
         uint32_t *start = e.p;
         /* prólogo: x19 = c, x20 = ram, x21 = tabla de páginas, x22 = code[] */
         E(&e, 0xA9BD7BFDu); /* stp x29, x30, [sp, #-48]! */

@@ -29,7 +29,7 @@
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.20"
+#define APP_VER   "0.18.21"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
