@@ -106,7 +106,7 @@ static void text(FILE *f, const Runner *r)
     for (unsigned o = 0; o < K_ORDINAL_MAX; o++) {
         if (r->counts[o]) {
             const KExport *x = kernel_export(o);
-            fprintf(f, "  %4u %-36s %u\n", o, x ? x->name : "?", r->counts[o]);
+            fprintf(f, "  %4u %-36s %u  %.3f s\n", o, x ? x->name : "?", r->counts[o], r->kns[o] / 1e9);
         }
     }
     fprintf(f, "\nARCHIVOS ABIERTOS\n");

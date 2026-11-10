@@ -80,3 +80,5 @@ void prof_reset(int depth)
 }
 
 int prof_depth(void) { return g_depth; }
+
+uint64_t prof_now_ns(void) { return now(); }

@@ -364,7 +364,14 @@ RunState runner_slice(Runner *r, uint64_t max)
         }
         if (st == CPU_KCALL) {
             prof_push(PROF_KERNEL);
+            unsigned ord = r->cpu.kcall_ordinal;
+            uint64_t t0 = prof_now_ns();
             kernel_call(r);
+            uint64_t dt = prof_now_ns() - t0;
+            if (ord < K_ORDINAL_MAX) {
+                r->kns[ord] += dt;
+            }
+            r->kns_total += dt;
             prof_pop();
             continue;
         }

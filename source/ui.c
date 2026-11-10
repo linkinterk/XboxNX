@@ -827,17 +827,19 @@ static void draw_xbox_screen(const UiState *s)
             int top[5] = {-1, -1, -1, -1, -1};
             for (int o = 0; o < (int)K_ORDINAL_MAX; o++) {
                 for (int t = 0; t < 5; t++) {
-                    if (top[t] < 0 || r->counts[o] > r->counts[top[t]]) {
+                    if (top[t] < 0 || r->kns[o] > r->kns[top[t]]) {
                         memmove(&top[t + 1], &top[t], (size_t)(4 - t) * sizeof(int));
                         top[t] = o;
                         break;
                     }
                 }
             }
-            int o2 = snprintf(e, sizeof(e), "Más llamadas:");
+            int o2 = snprintf(e, sizeof(e), "Kernel (más tiempo, %.1f s):", r->kns_total / 1e9);
             for (int t = 0; t < 5 && top[t] >= 0 && r->counts[top[t]]; t++) {
                 const KExport *x = kernel_export((unsigned)top[t]);
-                o2 += snprintf(e + o2, sizeof(e) - (size_t)o2, " %s %u", x ? x->name : "?", (unsigned)r->counts[top[t]]);
+                o2 += snprintf(e + o2, sizeof(e) - (size_t)o2, " %s %u %.1fs %.1fus", x ? x->name : "?",
+                               (unsigned)r->counts[top[t]], r->kns[top[t]] / 1e9,
+                               r->counts[top[t]] ? r->kns[top[t]] / 1e3 / r->counts[top[t]] : 0.0);
                 if (o2 >= (int)sizeof(e)) {
                     break;
                 }
