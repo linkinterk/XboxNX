@@ -36,7 +36,7 @@ typedef struct SwStats {
         uint32_t first_px;           /* el primer píxel escrito (ARGB) */
         uint64_t pixels, tris;
         uint32_t cctl, fcw0, fcw1;
-        unsigned culled, depth_fail;
+        unsigned culled, depth_fail, alpha_fail;
     } last;
 } SwStats;
 

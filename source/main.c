@@ -29,7 +29,7 @@
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.17"
+#define APP_VER   "0.18.18"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -452,6 +452,17 @@ int main(int argc, char **argv)
                     /* y el cuadro siguiente entero, para repetirlo en la PC */
                     hw_capture_arm("sdmc:/switch/XboxNX/volcado");
                     g_cap_seen = 1;
+                    dirty = true;
+                }
+                if (k & HidNpadButton_StickR) { /* R3: JIT sí/no (para saber si un fallo es del JIT) */
+                    g_run.cpu.jit_hot = g_run.cpu.jit_hot ? 0 : 4;
+                    snprintf(g_ui.toast, sizeof(g_ui.toast), "JIT %s", g_run.cpu.jit_hot ? "activado" : "apagado (más lento)");
+                    dirty = true;
+                }
+                if (k & HidNpadButton_StickL) { /* L3: bloques sí/no: sin bloques ni JIT, solo el intérprete */
+                    g_run.cpu.use_blocks = !g_run.cpu.use_blocks;
+                    snprintf(g_ui.toast, sizeof(g_ui.toast), "%s", g_run.cpu.use_blocks ? "Bloques activados"
+                                                                                       : "Solo el intérprete (sin bloques ni JIT, mucho más lento)");
                     dirty = true;
                 }
                 if (k & HidNpadButton_Y) {

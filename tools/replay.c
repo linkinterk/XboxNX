@@ -80,6 +80,13 @@ int main(int argc, char **argv)
     unsigned stop = argc > 8 ? (unsigned)atoi(argv[8]) : 0;
     bool list = getenv("LISTA") != NULL;
     sw_init(g_ram, RAM, dma_rec);
+    /* lo que suele venir de antes del cuadro: el modo del vertex shader y los
+     * objetos DMA (en D3D todos con base 0) */
+    g_base = 0;
+    sw_method(0x1E94, 2);
+    for (uint32_t m = 0x0184; m <= 0x01A0; m += 4) {
+        sw_method(m, 1);
+    }
     unsigned draws = 0;
     uint32_t tex_fmt[4] = {0}, tex_off[4] = {0}, shader = 0, cctl = 0, prim = 0;
     for (size_t i = 0; i < n; i++) {
@@ -106,6 +113,12 @@ int main(int argc, char **argv)
         if (m == 0x17FC && v) {
             prim = v;
         }
+        if (getenv("SIN_CULL") && m == 0x0308) {
+            v = 0;
+        }
+        if (getenv("CULL_INV") && m == 0x03A0) {
+            v ^= 1;
+        }
         sw_method(m, v);
         if (m == 0x17FC && !v) {
             draws++;
@@ -116,7 +129,10 @@ int main(int argc, char **argv)
                 for (int s = 0; s < 4; s++) {
                     fprintf(stderr, " %02X@%08X", (tex_fmt[s] >> 8) & 0xFF, tex_off[s]);
                 }
-                fprintf(stderr, " cctl %X px %llu\n", cctl, (unsigned long long)sw_stats()->last.pixels);
+                const __typeof__(sw_stats()->last) *L = &sw_stats()->last;
+                fprintf(stderr, " cctl %X v %u tri %llu px %llu ocultos %u z %u alfa %u pos %.1f %.1f %.1f %.1f\n", cctl, L->nverts,
+                        (unsigned long long)L->tris, (unsigned long long)L->pixels, L->culled, L->depth_fail, L->alpha_fail, L->pos[0], L->pos[1],
+                        L->pos[2], L->pos[3]);
             }
             if (stop && draws >= stop) {
                 break;

@@ -835,7 +835,7 @@ static unsigned g_tex_mode[4];
 /* Lo que cuenta cada hilo del dibujo (se suma al final). */
 typedef struct Count {
     uint64_t pixels;
-    unsigned depth_fail;
+    unsigned depth_fail, alpha_fail;
     uint32_t first_px;
 } Count;
 
@@ -923,6 +923,7 @@ static void shade(const Target *t, int x, int y, const float l[3], const OutVert
         }
     }
     if (S.atest && !cmp_func(S.afunc, floorf(c[3] * 255 + 0.5f), (float)(S.aref & 0xFF))) {
+        k->alpha_fail++;
         return;
     }
     if (k->first_px == 0xFFFFFFFFu) {
@@ -1014,9 +1015,80 @@ static void raster(const Target *t, const OutVert *a, const OutVert *b, const Ou
     for (int i = 0; i < n; i++) {
         S.st.pixels += j.cnt[i].pixels;
         S.st.last.depth_fail += j.cnt[i].depth_fail;
+        S.st.last.alpha_fail += j.cnt[i].alpha_fail;
         if (S.st.last.first_px == 0xFFFFFFFFu && i == 0) {
             S.st.last.first_px = j.cnt[0].first_px;
         }
+    }
+}
+
+/* Un triángulo recortado contra el plano cercano (w > 0). El vertex shader
+ * del XDK ya dividió x, y, z entre w; para recortar se vuelve al espacio
+ * homogéneo (x·w, y·w, z·w, w), donde todo es lineal. Sin esto, los
+ * triángulos que cruzan la cámara salían como franjas estiradas. */
+#define OV_FLOATS ((int)(sizeof(OutVert) / sizeof(float)))
+
+static void ov_hom(const OutVert *v, float *h)
+{
+    memcpy(h, v, sizeof(OutVert));
+    h[0] *= v->pos[3], h[1] *= v->pos[3], h[2] *= v->pos[3];
+}
+
+static void ov_back(const float *h, OutVert *v)
+{
+    memcpy(v, h, sizeof(OutVert));
+    float w = h[3];
+    v->pos[0] = h[0] / w, v->pos[1] = h[1] / w, v->pos[2] = h[2] / w;
+}
+
+static void tri(const Target *t, const OutVert *a, const OutVert *b, const OutVert *c)
+{
+    const OutVert *v[3] = {a, b, c};
+    float wmax = fmaxf(fabsf(a->pos[3]), fmaxf(fabsf(b->pos[3]), fabsf(c->pos[3])));
+    if (!isfinite(wmax)) {
+        return;
+    }
+    float eps = wmax * 1e-6f;
+    if (!(eps > 0)) {
+        eps = 1e-30f;
+    }
+    int in = 0;
+    for (int i = 0; i < 3; i++) {
+        in += v[i]->pos[3] > eps;
+    }
+    if (in == 3) {
+        raster(t, a, b, c);
+        return;
+    }
+    if (in == 0) {
+        return;
+    }
+    float hv[3][OV_FLOATS], out[4][OV_FLOATS];
+    for (int i = 0; i < 3; i++) {
+        ov_hom(v[i], hv[i]);
+    }
+    int n = 0;
+    for (int i = 0; i < 3; i++) {
+        const float *p = hv[i], *q = hv[(i + 1) % 3];
+        bool pin = p[3] > eps, qin = q[3] > eps;
+        if (pin) {
+            memcpy(out[n++], p, sizeof(out[0]));
+        }
+        if (pin != qin) {
+            float tt = (p[3] - eps) / (p[3] - q[3]);
+            for (int k = 0; k < OV_FLOATS; k++) {
+                out[n][k] = p[k] + (q[k] - p[k]) * tt;
+            }
+            out[n][3] = eps;
+            n++;
+        }
+    }
+    OutVert o[4];
+    for (int i = 0; i < n; i++) {
+        ov_back(out[i], &o[i]);
+    }
+    for (int i = 1; i + 1 < n; i++) {
+        raster(t, &o[0], &o[i], &o[i + 1]);
     }
 }
 
@@ -1203,34 +1275,34 @@ static void draw(void)
     switch (S.prim) {
     case 5: /* triángulos */
         for (unsigned i = 0; i + 2 < n; i += 3) {
-            raster(&t, &ov[i], &ov[i + 1], &ov[i + 2]);
+            tri(&t, &ov[i], &ov[i + 1], &ov[i + 2]);
         }
         break;
     case 6: /* tira */
         for (unsigned i = 0; i + 2 < n; i++) {
             if (i & 1) {
-                raster(&t, &ov[i + 1], &ov[i], &ov[i + 2]);
+                tri(&t, &ov[i + 1], &ov[i], &ov[i + 2]);
             } else {
-                raster(&t, &ov[i], &ov[i + 1], &ov[i + 2]);
+                tri(&t, &ov[i], &ov[i + 1], &ov[i + 2]);
             }
         }
         break;
     case 7:  /* abanico */
     case 10: /* polígono */
         for (unsigned i = 1; i + 1 < n; i++) {
-            raster(&t, &ov[0], &ov[i], &ov[i + 1]);
+            tri(&t, &ov[0], &ov[i], &ov[i + 1]);
         }
         break;
     case 8: /* quads */
         for (unsigned i = 0; i + 3 < n; i += 4) {
-            raster(&t, &ov[i], &ov[i + 1], &ov[i + 2]);
-            raster(&t, &ov[i], &ov[i + 2], &ov[i + 3]);
+            tri(&t, &ov[i], &ov[i + 1], &ov[i + 2]);
+            tri(&t, &ov[i], &ov[i + 2], &ov[i + 3]);
         }
         break;
     case 9: /* tira de quads */
         for (unsigned i = 0; i + 3 < n; i += 2) {
-            raster(&t, &ov[i], &ov[i + 1], &ov[i + 3]);
-            raster(&t, &ov[i], &ov[i + 3], &ov[i + 2]);
+            tri(&t, &ov[i], &ov[i + 1], &ov[i + 3]);
+            tri(&t, &ov[i], &ov[i + 3], &ov[i + 2]);
         }
         break;
     default: /* puntos y líneas: todavía no */
