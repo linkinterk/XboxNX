@@ -1886,3 +1886,19 @@ void kio_register(Kernel *k)
     kernel_impl(k, "IoStartNextPacket", IoNothing);
     kernel_impl(k, "IoMarkIrpMustComplete", IoNothing);
 }
+
+/* Para el volcado: los archivos abiertos. */
+void kio_dump(struct Kernel *k, void *fp)
+{
+    FILE *f = fp;
+    for (int i = 0; i < MAX_FILES; i++) {
+        KFile *x = &g_files[i];
+        if (!x->used) {
+            continue;
+        }
+        fprintf(f, "  [%d] %s%s%s%s pos %llu tam %llu %s\n", i, x->path, x->is_dir ? " (carpeta)" : "",
+                x->async ? " async" : "", x->can_write ? " escribe" : "", (unsigned long long)x->pos,
+                (unsigned long long)(x->is_dir ? 0 : file_size(x)), x->kind == F_HOST ? x->host : "");
+    }
+    (void)k;
+}

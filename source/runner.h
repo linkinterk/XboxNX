@@ -60,6 +60,23 @@ typedef struct Runner {
     char launch_path[96];
 } Runner;
 
+/* Registro de E/S de archivos (para el volcado): las últimas RUN_IO_LOG. */
+#define RUN_IO_LOG 4096
+typedef struct RunIoRec {
+    uint32_t num;          /* número de llamada */
+    uint16_t ordinal;
+    uint16_t thread;
+    uint32_t caller;
+    uint32_t a[8];
+    uint32_t ret;
+    uint32_t iosb[2];      /* el IO_STATUS_BLOCK al volver (si hay) */
+    uint32_t buf[4];       /* los primeros 16 bytes del búfer de información (Set/QueryInformationFile) */
+    char note[48];
+} RunIoRec;
+/* La entrada j (0 = la más vieja) del registro de E/S, o NULL. */
+const RunIoRec *runner_io_at(unsigned j);
+unsigned runner_io_len(void);
+
 /* Registro visible: las primeras RUN_LOG_HEAD y las últimas RUN_LOG_TAIL. */
 unsigned runner_log_len(const Runner *r);
 /* Entrada j del registro visible; *number = número de llamada (desde 0). */

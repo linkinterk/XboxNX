@@ -139,6 +139,62 @@ static void read_launch(Runner *r)
     r->launch_path[i] = 0;
 }
 
+/* ---- registro de E/S (el volcado lo escribe) ---- */
+
+static RunIoRec g_io[RUN_IO_LOG];
+static unsigned g_io_n;
+
+const RunIoRec *runner_io_at(unsigned j)
+{
+    unsigned len = runner_io_len();
+    if (j >= len) {
+        return NULL;
+    }
+    unsigned first = g_io_n > RUN_IO_LOG ? g_io_n - RUN_IO_LOG : 0;
+    return &g_io[(first + j) % RUN_IO_LOG];
+}
+
+unsigned runner_io_len(void) { return g_io_n < RUN_IO_LOG ? g_io_n : RUN_IO_LOG; }
+
+static void io_log(Runner *r, unsigned ord, const KCall *kc, uint32_t ret, uint32_t caller, uint32_t thread)
+{
+    int iosb = -1, info = -1;
+    switch (ord) {
+    case 190: iosb = 3; break;                 /* NtCreateFile */
+    case 202: iosb = 3; break;                 /* NtOpenFile */
+    case 219: case 220: case 236: iosb = 4; info = 7; break; /* NtReadFile, NtReadFileScatter, NtWriteFile (info: ByteOffset) */
+    case 211: iosb = 1; info = 2; break;       /* NtQueryInformationFile */
+    case 226: iosb = 1; info = 2; break;       /* NtSetInformationFile */
+    case 198: iosb = 1; break;                 /* NtFlushBuffersFile */
+    case 218: iosb = 1; info = 2; break;       /* NtQueryVolumeInformationFile */
+    case 207: iosb = 4; break;                 /* NtQueryDirectoryFile */
+    case 196: case 200: iosb = 4; break;       /* NtDeviceIoControlFile, NtFsControlFile */
+    case 187: case 210: break;                 /* NtClose, NtQueryFullAttributesFile */
+    default: return;
+    }
+    RunIoRec *x = &g_io[g_io_n++ % RUN_IO_LOG];
+    memset(x, 0, sizeof(*x));
+    x->num = r->ncalls;
+    x->ordinal = (uint16_t)ord;
+    x->thread = (uint16_t)(thread / 4);
+    x->caller = caller;
+    memcpy(x->a, kc->a, sizeof(x->a));
+    x->ret = ret;
+    Vm *vm = r->cpu.vm;
+    if (iosb >= 0 && kc->a[iosb] && vm_host(vm, kc->a[iosb])) {
+        x->iosb[0] = vm_rd32(vm, kc->a[iosb]);
+        x->iosb[1] = vm_rd32(vm, kc->a[iosb] + 4);
+    }
+    if (info >= 0 && kc->a[info] && vm_host(vm, kc->a[info])) {
+        for (int i = 0; i < 4; i++) {
+            x->buf[i] = vm_host(vm, kc->a[info] + 4 * (uint32_t)i) ? vm_rd32(vm, kc->a[info] + 4 * (uint32_t)i) : 0;
+        }
+    }
+    size_t nl = strnlen(kc->note, sizeof(kc->note)), cap = sizeof(x->note) - 1;
+    const char *from = nl > cap ? kc->note + nl - cap : kc->note; /* el final de la ruta */
+    memcpy(x->note, from, nl > cap ? cap : nl);
+}
+
 static void kernel_call(Runner *r)
 {
     Cpu *c = &r->cpu;
@@ -226,6 +282,7 @@ static void kernel_call(Runner *r)
     rec->real = fn != NULL;
     rec->ret = (uint32_t)ret;
     memcpy(rec->note, kc.note, sizeof(rec->note));
+    io_log(r, ord, &kc, (uint32_t)ret, rec->caller, rec->thread);
     if (kc.ended) { /* el hilo terminó: no vuelve */
         reschedule(r, false);
         return;

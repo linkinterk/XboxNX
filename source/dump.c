@@ -98,6 +98,17 @@ static void text(FILE *f, const Runner *r)
             fprintf(f, "  %4u %-36s %u\n", o, x ? x->name : "?", r->counts[o]);
         }
     }
+    fprintf(f, "\nARCHIVOS ABIERTOS\n");
+    kio_dump(r->k, f);
+    fprintf(f, "\nE/S DE ARCHIVOS (últimas %u)\n", runner_io_len());
+    for (unsigned j = 0; j < runner_io_len(); j++) {
+        const RunIoRec *x = runner_io_at(j);
+        const KExport *e = kernel_export(x->ordinal);
+        fprintf(f, "%u h%u %s(%08X %08X %08X %08X %08X %08X %08X %08X) = %08X iosb %08X %08X info %08X %08X %08X %08X desde %08X %s\n",
+                x->num, x->thread, e ? e->name : "?", x->a[0], x->a[1], x->a[2], x->a[3], x->a[4], x->a[5], x->a[6],
+                x->a[7], x->ret, x->iosb[0], x->iosb[1], x->buf[0], x->buf[1], x->buf[2], x->buf[3], x->caller,
+                x->note);
+    }
     fprintf(f, "\nÚLTIMAS LLAMADAS\n");
     unsigned n = runner_log_len(r);
     for (unsigned j = n > 250 ? n - 250 : 0; j < n; j++) {

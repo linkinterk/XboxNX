@@ -258,6 +258,7 @@ void kio_register(Kernel *k);
 void kio_set_media(Kernel *k, const struct XDisc *disc, const char *hdd_root);
 /* Se cerró el último handle de un objeto archivo. */
 void kio_close(Kernel *k, uint32_t object);
+void kio_dump(struct Kernel *k, void *file); /* los archivos abiertos (FILE *) */
 /* El evento del objeto archivo (para esperar sobre su handle). */
 #define K_FO_EVENT 0x38u
 
