@@ -13,7 +13,29 @@
  * o escribió en el código del bloque, se sale tras ella.
  */
 
-typedef uint32_t (*JitFn)(Cpu *c);
+/* (c, cuántas instrucciones puede hacer como mucho): las que hizo, entre
+ * este bloque y los que encadenó */
+typedef uint32_t (*JitFn)(Cpu *c, uint64_t budget);
+
+/* Encadenar: al terminar, un bloque traducido busca el siguiente (por su
+ * EIP) en esta tabla y salta a su entrada sin volver a run_blocks. Cada
+ * entrada comprueba presupuesto, interrupción, página y generación del
+ * código antes de correr; si algo no va, vuelve a run_blocks. */
+#define JTAB (1u << 16)
+typedef struct JSlot {
+    uint32_t eip, pad;
+    void *entry;
+} JSlot;
+static JSlot g_jtab[JTAB];
+/* veces que corrió cada bloque traducido (para el perfil) */
+#define JCNT (1u << 19)
+static uint32_t g_jcnt[JCNT];
+static uint32_t g_jcnt_next = 1;
+
+static void jit_table_clear(void)
+{
+    memset(g_jtab, 0, sizeof(g_jtab));
+}
 
 #define JIT_SIZE_MAX (128u << 20) /* con 32 MB, Halo 2 lo vaciaba decenas de veces */
 
@@ -90,6 +112,7 @@ static void jit_publish(size_t off, size_t len)
 
 typedef struct Em {
     uint32_t *p, *end;
+    const Insn *insn_rx; /* las Insn del bloque copiadas junto al código */
     uint32_t *exits[512]; /* "b epílogo" por parchear */
     unsigned nexits;
     bool full;
@@ -252,27 +275,32 @@ static void emit_call(Em *e, const Block *b, unsigned i, const Vm *vm)
         E(e, 0x91000400u | 9u << 5 | 9u); /* add x9, x9, #1 */
         E(e, 0xF9000000u | (o / 8) << 10 | (uint32_t)XC << 5 | 9u);
     }
-    /* el intérprete (rdtsc, por ejemplo) ve icount como si fuera de una en una */
-    bool icnt = in->fn == x_interp && i > 0;
-    if (icnt) {
-        ldrx(e, W9, XC, OFF(icount));
+    /* la función (rdtsc, los relojes del hardware) ve icount al día: las de
+     * los bloques encadenados antes (x24) y las i de este */
+    ldrx(e, W9, XC, OFF(icount));
+    E(e, 0x8B180129u); /* add x9, x9, x24 */
+    if (i) {
         E(e, 0x91000000u | i << 10 | 9u << 5 | 9u); /* add x9, x9, #i */
-        E(e, 0xF9000000u | (OFF(icount) / 8) << 10 | (uint32_t)XC << 5 | 9u); /* str x9 */
     }
+    E(e, 0xF9000000u | (OFF(icount) / 8) << 10 | (uint32_t)XC << 5 | 9u); /* str x9 */
     movw(e, W9, in->next);
     strw(e, W9, XC, OFF(eip));
     movx_r(e, X0, XC);
-    movx(e, X1, (uint64_t)(uintptr_t)in);
+    /* la copia de la Insn junto al código: sigue valiendo aunque el bloque se libere */
+    movx(e, X1, (uint64_t)(uintptr_t)(e->insn_rx + i));
     movx(e, W9, (uint64_t)(uintptr_t)in->fn);
     E(e, 0xD63F0000u | 9u << 5); /* blr x9 */
-    if (icnt) {
-        ldrx(e, W9, XC, OFF(icount));
+    ldrx(e, W9, XC, OFF(icount));
+    E(e, 0xCB180129u); /* sub x9, x9, x24 */
+    if (i) {
         E(e, 0xD1000000u | i << 10 | 9u << 5 | 9u); /* sub x9, x9, #i */
-        E(e, 0xF9000000u | (OFF(icount) / 8) << 10 | (uint32_t)XC << 5 | 9u);
     }
-    /* paró: se hicieron i */
+    E(e, 0xF9000000u | (OFF(icount) / 8) << 10 | (uint32_t)XC << 5 | 9u);
+    /* paró: se hicieron i (y se dice en cuál) */
     ldrw(e, W9, XC, OFF(stop));
     uint32_t *ok = fwd_cb(e, J_CBZ, W9);
+    movw(e, W9, in->start);
+    strw(e, W9, XC, OFF(jit_stop_eip));
     exit_k(e, i);
     patch(e, ok);
     /* saltó: sale tras ella */
@@ -944,22 +972,64 @@ static bool jit_compile(Cpu *c, Block *b)
     for (int attempt = 0; attempt < 2; attempt++) {
         b->slow = 0;
         Em e;
-        e.p = (uint32_t *)(g_jit.rw + g_jit.used);
+        /* primero las Insn (las funciones de C las reciben) y luego el código */
+        size_t ibytes = ((size_t)b->n * sizeof(Insn) + 15) & ~(size_t)15;
+        if (g_jit.used + ibytes + 4096 > g_jit.size) {
+            g_jit.used = 0;
+            g_jit.epoch++;
+            jit_table_clear();
+            memset(g_jcnt, 0, sizeof(g_jcnt));
+            g_jcnt_next = 1;
+        }
+        size_t data_off = g_jit.used;
+        memcpy(g_jit.rw + data_off, b->in, (size_t)b->n * sizeof(Insn));
+        e.insn_rx = (const Insn *)(g_jit.rx + data_off);
+        e.p = (uint32_t *)(g_jit.rw + data_off + ibytes);
         e.end = (uint32_t *)(g_jit.rw + g_jit.size);
         e.nexits = 0;
         e.full = false;
         e.fallback = false;
         e.lf_kind = 0;
         uint32_t *start = e.p;
-        /* prólogo: x19 = c, x20 = ram, x21 = tabla de páginas, x22 = code[] */
-        E(&e, 0xA9BD7BFDu); /* stp x29, x30, [sp, #-48]! */
+        Slow bx = {{0}, 0}; /* no se puede entrar: vuelve a run_blocks */
+        /* prólogo: x19 = c, x20 = ram, x21 = tabla de páginas, x22 = code[],
+         * x23 = presupuesto que queda, x24 = instrucciones de los bloques encadenados */
+        E(&e, 0xA9BC7BFDu); /* stp x29, x30, [sp, #-64]! */
         E(&e, 0xA90153F3u); /* stp x19, x20, [sp, #16] */
         E(&e, 0xA9025BF5u); /* stp x21, x22, [sp, #32] */
+        E(&e, 0xA90363F7u); /* stp x23, x24, [sp, #48] */
         movx_r(&e, XC, X0);
+        movx_r(&e, 23, X1);
+        movx(&e, 24, 0);
         ldrx(&e, W9, XC, OFF(vm));
         ldrx(&e, XRAM, W9, (uint32_t)offsetof(Vm, ram));
         ldrx(&e, XPT, W9, (uint32_t)offsetof(Vm, pt));
         ldrx(&e, XCODE, W9, (uint32_t)offsetof(Vm, code));
+        /* entrada desde otro bloque */
+        uint32_t *chain = e.p;
+        E(&e, 0xF100001Fu | b->n << 10 | 23u << 5); /* cmp x23, #n */
+        slow_bcond(&e, &bx, 3);                      /* b.lo: no alcanza */
+        E(&e, 0xD1000000u | b->n << 10 | 23u << 5 | 23u); /* sub x23, x23, #n */
+        ldrx(&e, W9, XC, OFF(yield));
+        ldrb_i(&e, W9, W9, 0);
+        slow_add(&e, &bx, fwd_cb(&e, J_CBNZ, W9));   /* una interrupción */
+        movw(&e, W9, b->eip >> 12);
+        ldrw_lsl2(&e, W10, XPT, W9);
+        movw(&e, W11, b->ppage + 1);
+        cmpw(&e, W10, W11);
+        slow_bcond(&e, &bx, COND_NE);                /* la página ya es otra */
+        movx(&e, W9, (uint64_t)(uintptr_t)&c->vm->gen[b->ppage]);
+        ldrw(&e, W10, W9, 0);
+        movw(&e, W11, b->gen);
+        cmpw(&e, W10, W11);
+        slow_bcond(&e, &bx, COND_NE);                /* el código cambió */
+        uint32_t cnt = g_jcnt_next < JCNT ? g_jcnt_next++ : 0;
+        if (cnt) {
+            movx(&e, W9, (uint64_t)(uintptr_t)&g_jcnt[cnt]);
+            ldrw(&e, W10, W9, 0);
+            addwi(&e, W10, W10, 1);
+            strw(&e, W10, W9, 0);
+        }
         bool stale = false;
         for (unsigned i = 0; i < b->n; i++) {
             stale = emit_insn(&e, b, i, c->vm);
@@ -968,25 +1038,53 @@ static bool jit_compile(Cpu *c, Block *b)
             movw(&e, W9, b->in[b->n - 1].next);
             strw(&e, W9, XC, OFF(eip));
         }
-        movw(&e, X0, b->n);
+        /* terminó: el siguiente en la tabla */
+        E(&e, 0x91000000u | b->n << 10 | 24u << 5 | 24u); /* add x24, x24, #n */
+        ldrw(&e, W9, XC, OFF(eip));
+        E(&e, 0x4A49412Au);                          /* eor w10, w9, w9, lsr #16 */
+        E(&e, 0x12003D4Au);                          /* and w10, w10, #0xFFFF */
+        movx(&e, W11, (uint64_t)(uintptr_t)g_jtab);
+        E(&e, 0x8B0A116Bu);                          /* add x11, x11, x10, lsl #4 */
+        ldrw(&e, W12, W11, 0);
+        cmpw(&e, W12, W9);
+        uint32_t *miss1 = fwd_bcond(&e, COND_NE);
+        ldrx(&e, W13, W11, 8);
+        uint32_t *miss2 = fwd_cb(&e, J_CBZ | 0x80000000u, W13); /* cbz x13 */
+        E(&e, 0xD61F0000u | 13u << 5);               /* br x13 */
+        /* no se pudo entrar: el EIP es el de este bloque y nada hecho */
+        for (unsigned k = 0; k < bx.n; k++) {
+            patch(&e, bx.at[k]);
+        }
+        movw(&e, W9, b->eip);
+        strw(&e, W9, XC, OFF(eip));
+        patch(&e, miss1);
+        patch(&e, miss2);
+        movw(&e, X0, 0);
         uint32_t *epi = e.p;
+        E(&e, 0x0B180000u); /* add w0, w0, w24 */
+        E(&e, 0xA94363F7u); /* ldp x23, x24, [sp, #48] */
         E(&e, 0xA9425BF5u); /* ldp x21, x22, [sp, #32] */
         E(&e, 0xA94153F3u); /* ldp x19, x20, [sp, #16] */
-        E(&e, 0xA8C37BFDu); /* ldp x29, x30, [sp], #48 */
+        E(&e, 0xA8C47BFDu); /* ldp x29, x30, [sp], #64 */
         E(&e, 0xD65F03C0u); /* ret */
         if (e.full) {
             /* sin espacio: se vacía todo y se intenta otra vez */
             g_jit.used = 0;
             g_jit.epoch++;
+            jit_table_clear();
+            memset(g_jcnt, 0, sizeof(g_jcnt));
+            g_jcnt_next = 1;
             continue;
         }
         for (unsigned k = 0; k < e.nexits; k++) {
             *e.exits[k] |= (uint32_t)(epi - e.exits[k]) & 0x3FFFFFFu;
         }
         size_t off = (size_t)((uint8_t *)start - g_jit.rw), len = (size_t)((uint8_t *)e.p - (uint8_t *)start);
-        jit_publish(off, len);
+        jit_publish(data_off, off + len - data_off);
         g_jit.used = (off + len + 15) & ~(size_t)15;
         b->jit = (void *)(g_jit.rx + off);
+        b->jit_chain = (void *)(g_jit.rx + off + (size_t)((uint8_t *)chain - (uint8_t *)start));
+        b->jcnt = cnt;
         b->jit_epoch = g_jit.epoch;
         g_jit.compiled++;
         return true;

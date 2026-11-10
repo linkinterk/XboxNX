@@ -1460,6 +1460,8 @@ typedef struct Block {
     uint32_t eip, ppage, gen;
     unsigned n;
     void *jit;            /* su traducción a ARM64 (2d.2), si la hay */
+    void *jit_chain;      /* su entrada desde otro bloque traducido (encadenar) */
+    uint32_t jcnt;        /* su contador de veces en el JIT (g_jcnt) */
     bool spin;            /* un bucle sobre sí mismo que solo lee y compara */
     uint32_t jit_epoch;   /* del búfer del JIT en que se tradujo */
     uint32_t hits;        /* veces que corrió sin traducción */
@@ -2439,6 +2441,8 @@ static Block *get_block(Cpu *c, uint32_t eip)
     }
     g_decodes++;
     nb->jit = NULL;
+    nb->jit_chain = NULL;
+    nb->jcnt = 0;
     nb->jit_epoch = 0;
     nb->hits = 0;
     nb->execs = 0;
@@ -2490,16 +2494,25 @@ void cpu_profile(Cpu *c, CpuProfile *p)
     }
     for (unsigned i = 0; i < BLK_HASH; i++) {
         const Block *b = tab[i].b;
-        if (!b || !b->execs) {
+        if (!b) {
             continue;
         }
-        p->insns += (uint64_t)b->execs * b->n;
-        p->blocks += b->execs;
+        uint64_t ex = b->execs;
+#ifdef HAVE_JIT
+        if (b->jit && b->jit_epoch == g_jit.epoch && b->jcnt) {
+            ex += g_jcnt[b->jcnt];
+        }
+#endif
+        if (!ex) {
+            continue;
+        }
+        p->insns += ex * b->n;
+        p->blocks += ex;
         for (unsigned k = 0; k < b->n; k++) {
             if (!((b->slow >> (k & 63)) & 1)) {
                 continue;
             }
-            p->slow += b->execs;
+            p->slow += ex;
             uint8_t by[4] = {0};
             uint32_t a = b->in[k].start;
             vm_read(c->vm, a, by, 1);
@@ -2514,7 +2527,7 @@ void cpu_profile(Cpu *c, CpuProfile *p)
                 vm_read(c->vm, a + 1, by + 1, 1);
                 key = 256 + by[1];
             }
-            w[key] += b->execs;
+            w[key] += ex;
         }
     }
     for (int t = 0; t < CPU_PROF_TOP; t++) {
@@ -2562,9 +2575,14 @@ static inline uint64_t cpu_tick(void)
 }
 
 
+static const volatile uint8_t g_no_yield;
+
 static CpuStop run_blocks(Cpu *c, uint64_t max)
 {
     uint64_t done = 0;
+    if (!c->yield) {
+        c->yield = &g_no_yield; /* el JIT lo lee sin mirar si es NULL */
+    }
     uint64_t t_iter = 0; /* principio de la vuelta medida (0: esta no se mide) */
     c->st_runs++;
     while (done < max) {
@@ -2596,7 +2614,6 @@ static CpuStop run_blocks(Cpu *c, uint64_t max)
             continue;
         }
         c->trace[c->trace_pos++ % CPU_TRACE] = b->eip;
-        b->execs++;
         if (b->spin) {
             /* la misma vuelta con los mismos registros: espera algo de fuera */
             if (c->spin_eip == b->eip && !memcmp(c->spin_r, c->r, sizeof(c->r))) {
@@ -2621,8 +2638,14 @@ static CpuStop run_blocks(Cpu *c, uint64_t max)
                 g_compile_ticks += cpu_tick() - t0;
             }
             if (have && done + b->n <= max) {
+                if (!b->spin) { /* desde otros bloques traducidos se salta aquí directo */
+                    JSlot *js = &g_jtab[(b->eip ^ (b->eip >> 16)) & (JTAB - 1)];
+                    js->eip = b->eip;
+                    js->entry = b->jit_chain;
+                }
                 uint64_t t0 = smp ? cpu_tick() : 0;
-                unsigned k = ((JitFn)b->jit)(c);
+                /* corre este y los que encadene, hasta max - done instrucciones */
+                unsigned k = ((JitFn)b->jit)(c, max - done);
                 if (smp) {
                     c->st_t_jit += cpu_tick() - t0;
                 }
@@ -2630,30 +2653,19 @@ static CpuStop run_blocks(Cpu *c, uint64_t max)
                 c->icount += k;
                 done += k;
                 if (c->stop != CPU_RUNNING) {
-                    const Insn *in = &b->in[k];
-                    c->stop_eip = in->start;
-                    vm_read(c->vm, in->start, c->stop_bytes, sizeof(c->stop_bytes));
+                    uint32_t at = c->jit_stop_eip;
+                    c->stop_eip = at;
+                    vm_read(c->vm, at, c->stop_bytes, sizeof(c->stop_bytes));
                     if (c->stop == CPU_FAULT || c->stop == CPU_UNIMPL || c->stop == CPU_DIVIDE) {
-                        c->eip = in->start;
+                        c->eip = at;
                     }
                     return c->stop;
                 }
-                const Insn *last = &b->in[b->n - 1];
-                if (k == b->n && done < max && !ends_block(last->fn) && c->eip == last->next) {
-                    uint64_t t1 = smp ? cpu_tick() : 0;
-                    if (step(c) != CPU_RUNNING) { /* la siguiente no tenía función */
-                        return c->stop;
-                    }
-                    if (smp) {
-                        c->st_t_step += cpu_tick() - t1;
-                    }
-                    c->st_steps++;
-                    done++;
-                }
-                continue;
+                continue; /* la siguiente sin función: la vuelta siguiente la ve (bloque vacío) */
             }
         }
 #endif
+        b->execs++;
         uint64_t ti = smp ? cpu_tick() : 0;
         unsigned i = 0;
         for (; i < b->n && done < max; i++) {
@@ -2726,6 +2738,9 @@ CpuStop cpu_run(Cpu *c, uint64_t max)
 
 void cpu_free(Cpu *c)
 {
+#ifdef HAVE_JIT
+    jit_table_clear();
+#endif
     BlockSlot *tab = c->blocks;
     if (tab) {
         for (unsigned i = 0; i < BLK_HASH; i++) {
@@ -2738,6 +2753,9 @@ void cpu_free(Cpu *c)
 
 void cpu_init(Cpu *c, Vm *vm)
 {
+#ifdef HAVE_JIT
+    jit_table_clear();
+#endif
     memset(c, 0, sizeof(*c));
     c->vm = vm;
     c->flags = 0x2u | F_IF;

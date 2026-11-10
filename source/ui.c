@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "gfx.h"
 #include "hw.h"
@@ -739,6 +740,31 @@ static const char *obj_kind(const Vm *vm, uint32_t o)
     }
 }
 
+/* Cuadros del juego (flips) por segundo real y a qué velocidad va su reloj
+ * (1.0 = como en un Xbox), medidos cada segundo. */
+static void game_rate(const Runner *r, double *fps, double *speed)
+{
+    static struct timespec t0;
+    static unsigned f0;
+    static uint64_t g0;
+    static double cf, cs;
+    const HwStats *hs = hw_stats();
+    uint64_t g = r && r->k ? r->k->now_ns : 0;
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    double dt = (double)(t.tv_sec - t0.tv_sec) + (double)(t.tv_nsec - t0.tv_nsec) / 1e9;
+    if (t0.tv_sec == 0 || hs->flips < f0 || g < g0 || dt > 10.0) {
+        t0 = t, f0 = hs->flips, g0 = g;
+        cf = cs = 0;
+    } else if (dt >= 1.0) {
+        cf = (double)(hs->flips - f0) / dt;
+        cs = (double)(g - g0) / 1e9 / dt;
+        t0 = t, f0 = hs->flips, g0 = g;
+    }
+    *fps = cf;
+    *speed = cs;
+}
+
 /* La pantalla del Xbox: lo que hay en la memoria de video que muestra. */
 static void draw_xbox_screen(const UiState *s)
 {
@@ -746,7 +772,7 @@ static void draw_xbox_screen(const UiState *s)
     const Kernel *kn = r->k;
     static XImage img;
     const HwStats *hs = hw_stats();
-    char b[160];
+    char b[256];
     gfx_clear(HEX(0x000000));
     bool ok = kn && hw_screen(kn, &img);
     if (ok) {
@@ -756,8 +782,10 @@ static void draw_xbox_screen(const UiState *s)
             h = img.h * w / img.w;
         }
         gfx_image(&img, (UI_W - w) / 2, 34, w, h, 0);
-        snprintf(b, sizeof(b), "Pantalla del Xbox  ·  %dx%d  ·  PCRTC %08X%s  ·  %u cuadros  ·  %u flips  ·  %.2f s del juego",
-                 img.w, img.h, (unsigned)hw_scanout(),
+        double fps, spd;
+        game_rate(r, &fps, &spd);
+        snprintf(b, sizeof(b), "%.1f FPS · juego al %.0f%%  ·  Pantalla del Xbox  ·  %dx%d  ·  PCRTC %08X%s  ·  %u cuadros  ·  %u flips  ·  %.2f s del juego",
+                 fps, spd * 100.0, img.w, img.h, (unsigned)hw_scanout(),
                  hw_shown() != (hw_scanout() & (VM_RAM_SIZE - 1u)) ? " (negro: se ve el último dibujado)" : "", hs->frames,
                  hs->flips, kn->now_ns / 1e9);
         /* lo que el último cuadro pidió dibujar */
@@ -930,7 +958,9 @@ static void draw_run(const UiState *s)
     char sub[320];
     if (r->state == RUN_ACTIVE && (s->prof[0] | s->prof[1] | s->prof[2] | s->prof[3] | s->prof[5])) {
         /* en qué se va el tiempo real */
-        int o = snprintf(sub, sizeof(sub), "Tiempo:");
+        double fps, spd;
+        game_rate(s->run, &fps, &spd);
+        int o = snprintf(sub, sizeof(sub), "%.1f FPS · juego al %.0f%% · Tiempo:", fps, spd * 100.0);
         for (int i = 0; i < PROF_N && o < (int)sizeof(sub) - 20; i++) {
             o += snprintf(sub + o, sizeof(sub) - (size_t)o, "%s %s %u%%", i ? " ·" : "", prof_name((ProfPart)i),
                           (s->prof[i] + 5) / 10);
