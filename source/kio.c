@@ -33,6 +33,140 @@
 #include "disc.h"
 #include "kernel.h"
 
+/* ---- escrituras en segundo plano ----
+ * En la Switch cada NtWriteFile a la SD tardaba ~10 ms (Halo 2 copia el mapa
+ * a sus archivos de caché mientras carga): el juego esperaba cada una. Ahora
+ * NtWriteFile copia los datos y vuelve; un hilo los escribe en orden. Antes
+ * de cualquier otra operación con archivos de la SD se espera a que termine
+ * (aio_drain), así nadie ve datos a medias. */
+#ifdef __SWITCH__
+#include <switch.h>
+typedef Mutex AMutex;
+typedef CondVar ACond;
+#define am_init(m) mutexInit(m)
+#define am_lock(m) mutexLock(m)
+#define am_unlock(m) mutexUnlock(m)
+#define ac_init(c) condvarInit(c)
+#define ac_wait(c, m) condvarWait(c, m)
+#define ac_all(c) condvarWakeAll(c)
+#else
+#include <pthread.h>
+typedef pthread_mutex_t AMutex;
+typedef pthread_cond_t ACond;
+#define am_init(m) pthread_mutex_init(m, NULL)
+#define am_lock(m) pthread_mutex_lock(m)
+#define am_unlock(m) pthread_mutex_unlock(m)
+#define ac_init(c) pthread_cond_init(c, NULL)
+#define ac_wait(c, m) pthread_cond_wait(c, m)
+#define ac_all(c) pthread_cond_broadcast(c)
+#endif
+
+typedef struct AioReq {
+    FILE *fp;
+    uint64_t off;
+    uint8_t *buf;
+    uint32_t len;
+} AioReq;
+
+#define AIO_MAX 256
+#define AIO_BYTES (48u << 20) /* más de esto en cola: esperar */
+static struct {
+    bool on;
+    AMutex m;
+    ACond more, done;
+    AioReq q[AIO_MAX];
+    unsigned head, n;
+    uint64_t bytes;
+    bool busy;       /* el hilo tiene una entre manos */
+    unsigned errors;
+} g_aio;
+
+static void aio_loop(void)
+{
+    for (;;) {
+        am_lock(&g_aio.m);
+        while (!g_aio.n) {
+            g_aio.busy = false;
+            ac_all(&g_aio.done);
+            ac_wait(&g_aio.more, &g_aio.m);
+        }
+        AioReq r = g_aio.q[g_aio.head];
+        g_aio.busy = true;
+        am_unlock(&g_aio.m);
+        bool ok = fseeko(r.fp, (off_t)r.off, SEEK_SET) == 0 && fwrite(r.buf, 1, r.len, r.fp) == r.len;
+        fflush(r.fp); /* en este hilo no estorba: así otro handle del mismo archivo lo ve */
+        am_lock(&g_aio.m);
+        g_aio.head = (g_aio.head + 1) % AIO_MAX;
+        g_aio.n--;
+        g_aio.bytes -= r.len;
+        if (!ok) {
+            g_aio.errors++;
+        }
+        ac_all(&g_aio.done);
+        am_unlock(&g_aio.m);
+        free(r.buf);
+    }
+}
+
+#ifdef __SWITCH__
+static Thread g_aio_thr;
+static void aio_entry(void *p) { (void)p; aio_loop(); }
+#else
+static pthread_t g_aio_thr;
+static void *aio_entry(void *p) { (void)p; aio_loop(); return NULL; }
+#endif
+
+static void aio_init(void)
+{
+    if (g_aio.on) {
+        return;
+    }
+    am_init(&g_aio.m);
+    ac_init(&g_aio.more);
+    ac_init(&g_aio.done);
+#ifdef __SWITCH__
+    g_aio.on = R_SUCCEEDED(threadCreate(&g_aio_thr, aio_entry, NULL, NULL, 0x8000, 0x2C, 2)) &&
+               R_SUCCEEDED(threadStart(&g_aio_thr));
+#else
+    g_aio.on = pthread_create(&g_aio_thr, NULL, aio_entry, NULL) == 0;
+    if (g_aio.on) {
+        pthread_detach(g_aio_thr);
+    }
+#endif
+}
+
+/* Esperar a que todo lo encolado esté en la SD. */
+static void aio_drain(void)
+{
+    if (!g_aio.on) {
+        return;
+    }
+    am_lock(&g_aio.m);
+    while (g_aio.n || g_aio.busy) {
+        ac_wait(&g_aio.done, &g_aio.m);
+    }
+    am_unlock(&g_aio.m);
+}
+
+/* Encolar (buf pasa a ser de la cola). false: sin hilo, hacerla aquí. */
+static bool aio_write(FILE *fp, uint64_t off, uint8_t *buf, uint32_t len)
+{
+    if (!g_aio.on) {
+        return false;
+    }
+    am_lock(&g_aio.m);
+    while (g_aio.n == AIO_MAX || (g_aio.bytes + len > AIO_BYTES && g_aio.n)) {
+        ac_wait(&g_aio.done, &g_aio.m);
+    }
+    g_aio.q[(g_aio.head + g_aio.n) % AIO_MAX] = (AioReq){fp, off, buf, len};
+    g_aio.n++;
+    g_aio.bytes += len;
+    g_aio.busy = true;
+    ac_all(&g_aio.more);
+    am_unlock(&g_aio.m);
+    return true;
+}
+
 #define ST_PENDING                   0x00000103u
 #define ST_NO_MORE_FILES             0x80000006u
 #define ST_INVALID_INFO_CLASS        0xC0000003u
@@ -429,6 +563,7 @@ static KFile *file_new(void)
 static void file_drop(Kernel *k, KFile *f)
 {
     if (f->fp) {
+        aio_drain();
         fclose(f->fp);
     }
     if (f->del && f->kind == F_HOST) {
@@ -508,6 +643,7 @@ void kio_close(Kernel *k, uint32_t object)
 
 static uint64_t file_size(const KFile *f)
 {
+    aio_drain();
     if (f->kind == F_DISC) {
         return f->disc.size;
     }
@@ -844,6 +980,12 @@ static bool read_into(Kernel *k, KFile *f, uint64_t off, uint32_t va, uint32_t n
 /* NtReadFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length, ByteOffset) */
 static uint64_t NtReadFile(KCall *c)
 {
+    {
+        KFile *f0 = file_of(c->k, c->a[0]);
+        if (!f0 || f0->kind != F_DISC) {
+            aio_drain(); /* leer lo que se escribió en segundo plano */
+        }
+    }
     Kernel *k = c->k;
     KFile *f = file_of(k, c->a[0]);
     if (!f) {
@@ -893,6 +1035,12 @@ static uint64_t NtReadFile(KCall *c)
  *   SegmentArray, Length, ByteOffset): una dirección de página por cada página */
 static uint64_t NtReadFileScatter(KCall *c)
 {
+    {
+        KFile *f0 = file_of(c->k, c->a[0]);
+        if (!f0 || f0->kind != F_DISC) {
+            aio_drain(); /* leer lo que se escribió en segundo plano */
+        }
+    }
     Kernel *k = c->k;
     KFile *f = file_of(k, c->a[0]);
     if (!f) {
@@ -977,6 +1125,17 @@ static uint64_t NtWriteFile(KCall *c)
         }
     }
     uint32_t st = ST_SUCCESS, done = 0;
+    uint8_t *copy = len ? malloc(len) : NULL;
+    if (copy && vm_read(k->vm, c->a[5], copy, len)) {
+        if (aio_write(f->fp, off, copy, len)) { /* la escribe el hilo; el juego sigue */
+            f->wrote = true;
+            k->writes++;
+            io_moved(f, named, off + len);
+            return io_finish(c, f, ST_SUCCESS, len, false);
+        }
+    }
+    free(copy);
+    aio_drain();
     if (fseeko(f->fp, (off_t)off, SEEK_SET) != 0) {
         st = ST_DISK_FULL;
     }
@@ -1849,6 +2008,26 @@ static uint64_t IoNothing(KCall *c)
     return 0;
 }
 
+/* Las operaciones con archivos (salvo escribir y leer del disco) esperan a
+ * que las escrituras en segundo plano estén en la SD. */
+#define AIO_SYNC(fn) static uint64_t fn##_aio(KCall *c) { aio_drain(); return fn(c); }
+AIO_SYNC(NtCreateFile)
+AIO_SYNC(NtOpenFile)
+AIO_SYNC(NtQueryInformationFile)
+AIO_SYNC(NtSetInformationFile)
+AIO_SYNC(NtQueryVolumeInformationFile)
+AIO_SYNC(IoQueryVolumeInformation)
+AIO_SYNC(NtQueryDirectoryFile)
+AIO_SYNC(NtQueryFullAttributesFile)
+AIO_SYNC(NtDeleteFile)
+AIO_SYNC(NtFlushBuffersFile)
+AIO_SYNC(NtControlFile)
+AIO_SYNC(IoSynchronousDeviceIoControlRequest)
+AIO_SYNC(IoDismountVolumeByName)
+AIO_SYNC(ExReadWriteRefurbInfo)
+
+void kio_sync(void) { aio_drain(); }
+
 void kio_set_media(Kernel *k, const XDisc *disc, const char *hdd_root)
 {
     k->disc = disc;
@@ -1858,6 +2037,7 @@ void kio_set_media(Kernel *k, const XDisc *disc, const char *hdd_root)
 
 void kio_register(Kernel *k)
 {
+    aio_init();
     for (int i = 0; i < MAX_FILES; i++) {
         if (g_files[i].used) {
             if (g_files[i].fp) {
@@ -1875,22 +2055,22 @@ void kio_register(Kernel *k)
     if (!k->hdd_root[0]) {
         snprintf(k->hdd_root, sizeof(k->hdd_root), "hdd");
     }
-    kernel_impl(k, "NtCreateFile", NtCreateFile);
-    kernel_impl(k, "NtOpenFile", NtOpenFile);
+    kernel_impl(k, "NtCreateFile", NtCreateFile_aio);
+    kernel_impl(k, "NtOpenFile", NtOpenFile_aio);
     kernel_impl(k, "NtReadFile", NtReadFile);
     kernel_impl(k, "NtReadFileScatter", NtReadFileScatter);
     kernel_impl(k, "NtWriteFile", NtWriteFile);
-    kernel_impl(k, "NtQueryInformationFile", NtQueryInformationFile);
-    kernel_impl(k, "NtSetInformationFile", NtSetInformationFile);
-    kernel_impl(k, "NtQueryVolumeInformationFile", NtQueryVolumeInformationFile);
-    kernel_impl(k, "IoQueryVolumeInformation", IoQueryVolumeInformation);
-    kernel_impl(k, "NtQueryDirectoryFile", NtQueryDirectoryFile);
-    kernel_impl(k, "NtQueryFullAttributesFile", NtQueryFullAttributesFile);
-    kernel_impl(k, "NtDeleteFile", NtDeleteFile);
-    kernel_impl(k, "NtFlushBuffersFile", NtFlushBuffersFile);
-    kernel_impl(k, "NtFsControlFile", NtControlFile);
-    kernel_impl(k, "NtDeviceIoControlFile", NtControlFile);
-    kernel_impl(k, "IoSynchronousDeviceIoControlRequest", IoSynchronousDeviceIoControlRequest);
+    kernel_impl(k, "NtQueryInformationFile", NtQueryInformationFile_aio);
+    kernel_impl(k, "NtSetInformationFile", NtSetInformationFile_aio);
+    kernel_impl(k, "NtQueryVolumeInformationFile", NtQueryVolumeInformationFile_aio);
+    kernel_impl(k, "IoQueryVolumeInformation", IoQueryVolumeInformation_aio);
+    kernel_impl(k, "NtQueryDirectoryFile", NtQueryDirectoryFile_aio);
+    kernel_impl(k, "NtQueryFullAttributesFile", NtQueryFullAttributesFile_aio);
+    kernel_impl(k, "NtDeleteFile", NtDeleteFile_aio);
+    kernel_impl(k, "NtFlushBuffersFile", NtFlushBuffersFile_aio);
+    kernel_impl(k, "NtFsControlFile", NtControlFile_aio);
+    kernel_impl(k, "NtDeviceIoControlFile", NtControlFile_aio);
+    kernel_impl(k, "IoSynchronousDeviceIoControlRequest", IoSynchronousDeviceIoControlRequest_aio);
     kernel_impl(k, "IoCreateSymbolicLink", IoCreateSymbolicLink);
     kernel_impl(k, "IoDeleteSymbolicLink", IoDeleteSymbolicLink);
     kernel_impl(k, "NtOpenSymbolicLinkObject", NtOpenSymbolicLinkObject);
@@ -1898,8 +2078,8 @@ void kio_register(Kernel *k)
     kernel_impl(k, "ObReferenceObjectByName", ObReferenceObjectByName);
     kernel_impl(k, "IoCreateDevice", IoCreateDevice);
     kernel_impl(k, "IoDeleteDevice", IoDeleteDevice);
-    kernel_impl(k, "IoDismountVolumeByName", IoDismountVolumeByName);
-    kernel_impl(k, "ExReadWriteRefurbInfo", ExReadWriteRefurbInfo);
+    kernel_impl(k, "IoDismountVolumeByName", IoDismountVolumeByName_aio);
+    kernel_impl(k, "ExReadWriteRefurbInfo", ExReadWriteRefurbInfo_aio);
     kernel_impl(k, "IoInvalidDeviceRequest", IoInvalidDeviceRequest);
     kernel_impl(k, "IoBuildSynchronousFsdRequest", IoBuildSynchronousFsdRequest);
     kernel_impl(k, "IoSynchronousFsdRequest", IoInvalidDeviceRequest);

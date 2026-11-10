@@ -29,7 +29,7 @@
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.23"
+#define APP_VER   "0.18.24"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -560,6 +560,7 @@ int main(int argc, char **argv)
         }
     }
 
+    kio_sync(); /* lo que falte escribir en la SD */
     vm_free(&g_vm);
     game_close(&g_game);
     for (int i = 0; i < g_ncards; i++) {
