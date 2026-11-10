@@ -736,6 +736,9 @@ static void set_event(KCall *c, uint32_t ev)
  * su evento (o el del objeto archivo) queda señalado. */
 static void complete(KCall *c)
 {
+    if (c->a[2]) { /* ApcRoutine: un APC al hilo (ReadFileEx: corre en su próxima espera alertable) */
+        kps_queue_apc(c->k, c->k->cur, c->a[2], c->a[3], c->a[4], 0);
+    }
     if (c->a[1]) {
         uint32_t ev = kob_lookup(c->k, c->a[1], NULL);
         if (ev) {

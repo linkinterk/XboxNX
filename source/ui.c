@@ -842,8 +842,9 @@ static void draw_xbox_screen(const UiState *s)
             }
             gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
             ly += 22;
-            snprintf(e, sizeof(e), "Aperturas fallidas: %u · última: %s", kn->open_fails,
-                     kn->last_fail[0] ? kn->last_fail : "-");
+            snprintf(e, sizeof(e), "Aperturas fallidas: %u · última: %s · APC: %u encolados, %u corridos%s",
+                     kn->open_fails, kn->last_fail[0] ? kn->last_fail : "-", kn->apcs_queued, kn->apcs_run,
+                     kn->apc_lost ? " (con pérdidas)" : "");
             gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
             ly += 22;
         }

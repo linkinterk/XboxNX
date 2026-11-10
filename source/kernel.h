@@ -41,6 +41,9 @@ typedef struct KExport {
 #define K_ORD_DPC_RETURN    0x3FEu
 #define K_STUB_ISR_RETURN  (K_VA + 0x0F18u)  /* un ISR volvió: int 0x3F, 0x3FD */
 #define K_ORD_ISR_RETURN    0x3FDu
+#define K_STUB_APC_RETURN  (K_VA + 0x0F20u)  /* un APC de usuario volvió: int 0x3F, 0x3FC */
+#define K_ORD_APC_RETURN    0x3FCu
+#define K_MAX_APC 32
 #define K_KPCR_VA      (K_VA + 0x10000u)
 #define K_ETHREAD_VA   (K_VA + 0x14000u)
 
@@ -54,6 +57,7 @@ unsigned kernel_pop_bytes(const KExport *e);
 #define K_MAX_HANDLES 4096
 
 #define ST_SUCCESS                0x00000000u
+#define ST_USER_APC               0x000000C0u
 #define ST_INVALID_HANDLE         0xC0000008u
 #define ST_INVALID_PARAMETER      0xC000000Du
 #define ST_NO_MEMORY              0xC0000017u
@@ -98,6 +102,9 @@ typedef struct KCall {
     bool ended;      /* el hilo actual terminó */
     uint32_t tail_eip; /* no volver: saltar a tail_eip(tail_arg) con la vuelta del que llamó */
     uint32_t tail_arg;
+    uint32_t tail_args[3]; /* con tail_n = 3: los 3 argumentos (en el sitio de los suyos) */
+    uint8_t tail_n;
+    bool apc;          /* una espera alertable con APC pendientes: correrlos y devolver STATUS_USER_APC */
     char note[64];   /* detalle para el registro (el archivo que abre...) */
 } KCall;
 typedef uint64_t (*KFn)(KCall *c);
@@ -149,6 +156,12 @@ typedef struct KThread {
     uint64_t deadline_ns;
     uint32_t wait_cs;          /* sección crítica que tomará al despertar */
     const char *wait_what;     /* qué llamada espera */
+    /* APC de usuario pendientes: rutina y 3 argumentos (stdcall); corren
+     * cuando el hilo hace una espera alertable (ReadFileEx, SleepEx...) */
+    uint32_t apc[K_MAX_APC][4];
+    unsigned napc;
+    bool in_apc;
+    uint32_t apc_ret_eip, apc_ret_esp; /* a dónde vuelve la espera tras los APC */
 } KThread;
 
 typedef struct KTimerRec {
@@ -199,6 +212,7 @@ typedef struct Kernel {
     char hdd_root[192];          /* carpeta del disco duro virtual */
     unsigned files_open, reads, writes;
     char last_io[72];            /* la última lectura o escritura (para la pantalla) */
+    unsigned apcs_queued, apcs_run, apc_lost;
     unsigned open_fails;         /* aperturas de archivos que fallaron */
     char last_fail[72];          /* la última que falló, con su código */
     uint64_t bytes_read;
@@ -268,6 +282,12 @@ void kps_thread_start(Kernel *k, int t, uint32_t eip, const uint32_t *v, unsigne
 void kps_save(Kernel *k, struct Cpu *c);
 void kps_load(Kernel *k, struct Cpu *c);
 bool kps_interrupt(Kernel *k, struct Cpu *c);
+/* APC de usuario: encolar en el hilo ti; empezar a correrlos tras una
+ * espera alertable (vuelve a ret_eip con ESP ret_esp); y su stub de vuelta. */
+void kps_queue_apc(Kernel *k, int ti, uint32_t routine, uint32_t a1, uint32_t a2, uint32_t a3);
+void kps_apc_start(Kernel *k, struct Cpu *c, uint32_t ret_eip, uint32_t ret_esp);
+void kps_apc_return(Kernel *k, struct Cpu *c);
+uint32_t kernel_status_to_dos(uint32_t status);
 /* El hilo actual espera en un bucle: si nadie más puede correr, el tiempo
  * virtual salta al siguiente evento (como mucho 20 ms). */
 void kps_idle_skip(Kernel *k);

@@ -1000,11 +1000,121 @@ static uint64_t Zero(KCall *c)
     return 0;
 }
 
+/* ---- APC de usuario ---- */
+
+void kps_queue_apc(Kernel *k, int ti, uint32_t routine, uint32_t a1, uint32_t a2, uint32_t a3)
+{
+    if (ti < 0 || !routine) {
+        return;
+    }
+    KThread *t = &k->threads[ti];
+    if (t->napc >= K_MAX_APC) {
+        k->apc_lost++;
+        return;
+    }
+    uint32_t *e = t->apc[t->napc++];
+    e[0] = routine;
+    e[1] = a1;
+    e[2] = a2;
+    e[3] = a3;
+    k->apcs_queued++;
+}
+
+/* Corre el primer APC pendiente: rutina(a1, a2, a3) con la vuelta al stub,
+ * en la pila libre bajo ret_esp (la del que llamó a la espera). */
+static void apc_run_next(Kernel *k, Cpu *c)
+{
+    KThread *t = cur(k);
+    uint32_t e[4];
+    memcpy(e, t->apc[0], sizeof(e));
+    memmove(&t->apc[0], &t->apc[1], (t->napc - 1) * sizeof(t->apc[0]));
+    t->napc--;
+    uint32_t esp = t->apc_ret_esp - 16;
+    wr(k, esp, K_STUB_APC_RETURN);
+    wr(k, esp + 4, e[1]);
+    wr(k, esp + 8, e[2]);
+    wr(k, esp + 12, e[3]);
+    c->r[R_ESP] = esp;
+    c->eip = e[0];
+    k->apcs_run++;
+}
+
+void kps_apc_start(Kernel *k, Cpu *c, uint32_t ret_eip, uint32_t ret_esp)
+{
+    KThread *t = cur(k);
+    if (!t || !t->napc) {
+        c->eip = ret_eip;
+        c->r[R_ESP] = ret_esp;
+        c->r[R_EAX] = ST_USER_APC;
+        return;
+    }
+    t->in_apc = true;
+    t->apc_ret_eip = ret_eip;
+    t->apc_ret_esp = ret_esp;
+    apc_run_next(k, c);
+}
+
+void kps_apc_return(Kernel *k, Cpu *c)
+{
+    KThread *t = cur(k);
+    if (!t) {
+        return;
+    }
+    if (t->napc) {
+        apc_run_next(k, c);
+        return;
+    }
+    t->in_apc = false;
+    c->eip = t->apc_ret_eip;
+    c->r[R_ESP] = t->apc_ret_esp;
+    c->r[R_EAX] = ST_USER_APC;
+}
+
+/* ¿Una espera alertable de usuario con APC pendientes? Entonces no espera:
+ * corren los APC y devuelve STATUS_USER_APC. */
+static bool apc_now(KCall *c, uint32_t mode, uint32_t alertable)
+{
+    KThread *t = cur(c->k);
+    if (!alertable || mode != 1 || !t || t->in_apc || !t->napc) {
+        return false;
+    }
+    c->apc = true;
+    return true;
+}
+
+/* NtQueueApcThread(ThreadHandle, ApcRoutine, ApcArgument1, ApcArgument2, ApcArgument3) */
+static uint64_t NtQueueApcThread(KCall *c)
+{
+    int ti = thread_of_handle(c->k, c->a[0]);
+    if (ti < 0) {
+        return ST_INVALID_HANDLE;
+    }
+    kps_queue_apc(c->k, ti, c->a[1], c->a[2], c->a[3], c->a[4]);
+    return ST_SUCCESS;
+}
+
+/* NtUserIoApcDispatcher(ApcContext, IoStatusBlock, Reserved): la rutina de
+ * XAPI para ReadFileEx/WriteFileEx: llama a la de la aplicación,
+ * CompletionRoutine(dwErrorCode, dwNumberOfBytesTransfered, lpOverlapped). */
+static uint64_t NtUserIoApcDispatcher(KCall *c)
+{
+    uint32_t iosb = c->a[1], st = rd(c->k, iosb);
+    c->tail_eip = c->a[0];
+    c->tail_n = 3;
+    c->tail_args[0] = st >= 0xC0000000u ? kernel_status_to_dos(st) : 0;
+    c->tail_args[1] = rd(c->k, iosb + 4);
+    c->tail_args[2] = iosb; /* OVERLAPPED.Internal es el IO_STATUS_BLOCK */
+    return 0;
+}
+
 /* ---- esperas ---- */
 
 /* KeWaitForSingleObject(Object, WaitReason, WaitMode, Alertable, *Timeout) */
 static uint64_t KeWaitForSingleObject(KCall *c)
 {
+    if (apc_now(c, c->a[2], c->a[3])) {
+        return ST_USER_APC;
+    }
     return wait_begin(c, &c->a[0], 1, false, c->a[4], 0, "KeWaitForSingleObject");
 }
 
@@ -1015,6 +1125,9 @@ static uint64_t KeWaitForMultipleObjects(KCall *c)
     uint32_t n = c->a[0], objs[K_MAX_WAIT];
     if (!n || n > K_MAX_WAIT) {
         return ST_INVALID_PARAMETER;
+    }
+    if (apc_now(c, c->a[4], c->a[5])) {
+        return ST_USER_APC;
     }
     for (uint32_t i = 0; i < n; i++) {
         objs[i] = rd(c->k, c->a[1] + 4 * i);
@@ -1043,6 +1156,9 @@ static uint64_t NtWaitForSingleObject(KCall *c)
     if (!handle_obj(c->k, c->a[0], &o)) {
         return ST_INVALID_HANDLE;
     }
+    if (apc_now(c, 1, c->a[1])) {
+        return ST_USER_APC;
+    }
     return wait_begin(c, &o, 1, false, c->a[2], 0, "NtWaitForSingleObject");
 }
 
@@ -1052,6 +1168,9 @@ static uint64_t NtWaitForSingleObjectEx(KCall *c)
     uint32_t o;
     if (!handle_obj(c->k, c->a[0], &o)) {
         return ST_INVALID_HANDLE;
+    }
+    if (apc_now(c, c->a[1], c->a[2])) {
+        return ST_USER_APC;
     }
     return wait_begin(c, &o, 1, false, c->a[3], 0, "NtWaitForSingleObjectEx");
 }
@@ -1067,6 +1186,9 @@ static uint64_t NtWaitForMultipleObjectsEx(KCall *c)
         if (!handle_obj(c->k, rd(c->k, c->a[1] + 4 * i), &objs[i])) {
             return ST_INVALID_HANDLE;
         }
+    }
+    if (apc_now(c, c->a[3], c->a[4])) {
+        return ST_USER_APC;
     }
     return wait_begin(c, objs, n, c->a[2] == WAIT_ALL, c->a[5], 0, "NtWaitForMultipleObjectsEx");
 }
@@ -1092,6 +1214,9 @@ static uint64_t NtSignalAndWaitForSingleObjectEx(KCall *c)
         wr(k, so + DH_SIGNAL, 1);
     }
     kps_signaled(c);
+    if (apc_now(c, c->a[2], c->a[3])) {
+        return ST_USER_APC;
+    }
     return wait_begin(c, &wo, 1, false, c->a[4], 0, "NtSignalAndWaitForSingleObjectEx");
 }
 
@@ -1117,6 +1242,9 @@ static uint64_t NtSetSystemTime(KCall *c)
 /* KeDelayExecutionThread(WaitMode, Alertable, *Interval) */
 static uint64_t KeDelayExecutionThread(KCall *c)
 {
+    if (apc_now(c, c->a[0], c->a[1])) {
+        return ST_USER_APC;
+    }
     return wait_begin(c, NULL, 0, false, c->a[2], 0, "KeDelayExecutionThread");
 }
 
@@ -1450,6 +1578,8 @@ void kps_register(Kernel *k)
     kernel_impl(k, "KeInitializeEvent", KeInitializeEvent);
     kernel_impl(k, "KePulseEvent", KePulseEvent);
     kernel_impl(k, "KeInitializeSemaphore", KeInitializeSemaphore);
+    kernel_impl(k, "NtQueueApcThread", NtQueueApcThread);
+    kernel_impl(k, "NtUserIoApcDispatcher", NtUserIoApcDispatcher);
     kernel_impl(k, "KeReleaseSemaphore", KeReleaseSemaphore);
     kernel_impl(k, "KeInitializeMutant", KeInitializeMutant);
     kernel_impl(k, "KeReleaseMutant", KeReleaseMutant);

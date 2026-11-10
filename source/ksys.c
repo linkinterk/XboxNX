@@ -446,6 +446,8 @@ static uint32_t status_to_dos(uint32_t status)
 
 static uint64_t RtlNtStatusToDosError(KCall *c) { return status_to_dos(c->a[0]); }
 
+uint32_t kernel_status_to_dos(uint32_t status) { return status_to_dos(status); }
+
 static bool leap(int y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
 static const int k_mdays[2][12] = {
     {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31},

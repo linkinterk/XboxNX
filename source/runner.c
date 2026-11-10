@@ -155,6 +155,11 @@ static void kernel_call(Runner *r)
         reschedule(r, false);
         return;
     }
+    if (ord == K_ORD_APC_RETURN) {
+        kps_apc_return(k, c);
+        c->stop = CPU_RUNNING;
+        return;
+    }
     if (ord == K_ORD_ISR_RETURN) {
         kps_isr_return(k);
         reschedule(r, false);
@@ -223,6 +228,19 @@ static void kernel_call(Runner *r)
     memcpy(rec->note, kc.note, sizeof(rec->note));
     if (kc.ended) { /* el hilo terminó: no vuelve */
         reschedule(r, false);
+        return;
+    }
+    if (kc.apc) { /* espera alertable con APC pendientes: corren y vuelve STATUS_USER_APC */
+        kps_apc_start(k, c, vm_rd32(c->vm, esp), esp + 4 + kernel_pop_bytes(e));
+        c->stop = CPU_RUNNING;
+        return;
+    }
+    if (kc.tail_eip && kc.tail_n == 3) { /* otra función de 3 argumentos con la misma vuelta */
+        for (int i = 0; i < 3; i++) {
+            vm_wr32(c->vm, esp + 4 + 4 * (uint32_t)i, kc.tail_args[i]);
+        }
+        c->eip = kc.tail_eip;
+        c->stop = CPU_RUNNING;
         return;
     }
     if (kc.tail_eip) { /* saltar a tail_eip(tail_arg) con la vuelta del que llamó */

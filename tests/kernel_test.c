@@ -238,6 +238,43 @@ static void thread_tests(void)
     CHECK(rd(SCRATCH + 0x38) == 0x102); /* STATUS_TIMEOUT */
     CHECK(k.dpcs_run == 1);
 
+    /* 3'') APC de usuario: NtQueueApcThread y NtUserIoApcDispatcher (la vuelta
+     * de ReadFileEx) corren en la espera alertable, que devuelve STATUS_USER_APC */
+    g_pc = 0;
+    uint32_t apc_fn = here();
+    b1(0x8B); b1(0x44); b1(0x24); b1(0x04);       /* mov eax, [esp+4] */
+    b1(0x01); b1(0x05); d4(SCRATCH + 0x700);      /* add [cuenta], eax */
+    b1(0xC2); b1(0x0C); b1(0x00);                 /* ret 12 */
+    uint32_t done_fn = here();
+    b1(0x8B); b1(0x44); b1(0x24); b1(0x08);       /* mov eax, [esp+8] (bytes) */
+    b1(0x01); b1(0x05); d4(SCRATCH + 0x704);
+    b1(0x8B); b1(0x44); b1(0x24); b1(0x0C);       /* mov eax, [esp+12] (OVERLAPPED) */
+    b1(0xA3); d4(SCRATCH + 0x70C);
+    b1(0xC2); b1(0x0C); b1(0x00);
+    main_va = here();
+    push(0); push(0); push(5); push(apc_fn); push(0xFFFFFFFEu);
+    kcall("NtQueueApcThread");
+    push(0); push(SCRATCH + 0x710); push(done_fn); push(k.tramp_va[232]); push(0xFFFFFFFEu);
+    kcall("NtQueueApcThread");
+    push(SCRATCH + 0x720); push(1); push(1);
+    kcall("KeDelayExecutionThread"); /* (UserMode, Alertable, 0) */
+    store_eax(SCRATCH + 0x708);
+    push(7);
+    kcall("HalReturnToFirmware");
+    boot(main_va);
+    wr(SCRATCH + 0x700, 0);
+    wr(SCRATCH + 0x704, 0);
+    wr(SCRATCH + 0x710, 0);
+    wr(SCRATCH + 0x714, 77); /* IO_STATUS_BLOCK: éxito, 77 bytes */
+    wr(SCRATCH + 0x720, 0);
+    wr(SCRATCH + 0x724, 0);
+    unsigned apcs0 = k.apcs_run;
+    CHECK(runner_slice(&g_run, 100000) == RUN_SYSTEM_STOP);
+    CHECK(rd(SCRATCH + 0x700) == 5);
+    CHECK(rd(SCRATCH + 0x704) == 77 && rd(SCRATCH + 0x70C) == SCRATCH + 0x710);
+    CHECK(rd(SCRATCH + 0x708) == 0xC0);
+    CHECK(k.apcs_run == apcs0 + 2);
+
     /* 4) sección crítica disputada entre dos hilos */
     g_pc = 0;
     worker = here();

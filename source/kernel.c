@@ -108,6 +108,10 @@ bool kernel_init(Kernel *k, Vm *vm)
     km[K_STUBS + 25] = K_CALL_VECTOR;
     km[K_STUBS + 26] = (uint8_t)K_ORD_ISR_RETURN;
     km[K_STUBS + 27] = (uint8_t)(K_ORD_ISR_RETURN >> 8);
+    km[K_STUBS + 32] = 0xCD; /* un APC de usuario volvió */
+    km[K_STUBS + 33] = K_CALL_VECTOR;
+    km[K_STUBS + 34] = (uint8_t)K_ORD_APC_RETURN;
+    km[K_STUBS + 35] = (uint8_t)(K_ORD_APC_RETURN >> 8);
 
     for (size_t i = 0; i < sizeof(k_exports) / sizeof(k_exports[0]); i++) {
         const KExport *e = &k_exports[i];
