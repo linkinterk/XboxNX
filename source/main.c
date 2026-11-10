@@ -19,13 +19,14 @@
 #include "kernel.h"
 #include "loader.h"
 #include "runner.h"
+#include "dump.h"
 #include "probe.h"
 #include "ui.h"
 #include "usb/usb.h"
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.9"
+#define APP_VER   "0.18.10"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -401,6 +402,13 @@ int main(int argc, char **argv)
                     g_ui.run_screen = true;
                     dirty = true;
                     k = 0;
+                }
+                if (k & HidNpadButton_Minus) {
+                    /* volcado para depurar: RAM, páginas, hilos, llamadas, default.xbe */
+                    snprintf(g_ui.toast, sizeof(g_ui.toast), "Guardando el volcado (64 MB)...");
+                    present();
+                    dump_state(&g_run, &g_game.disc, "sdmc:/switch/XboxNX/volcado", g_ui.toast, sizeof(g_ui.toast));
+                    dirty = true;
                 }
                 if (k & HidNpadButton_Y) {
                     g_nspi = g_nspi >= 8 ? 1 : g_nspi * 2;

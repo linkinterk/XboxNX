@@ -13,6 +13,7 @@
 #include "../source/nv2a_sw.h"
 #include "../source/apu/apu.h"
 #include "../source/runner.h"
+#include "../source/dump.h"
 
 static int g_fail;
 #define CHECK(c)                                                 \
@@ -1041,6 +1042,23 @@ int main(int argc, char **argv)
     CHECK(st >= 0xD0000000u && vm_phys(&vm, st) != VM_NO_PHYS && vm_phys(&vm, st - 1) == VM_NO_PHYS);
 
     thread_tests();
+    {
+        /* el volcado (botón − en la Switch): RAM, páginas y estado en texto */
+        char msg[160];
+        CHECK(dump_state(&g_run, NULL, "build-test/volcado", msg, sizeof(msg)));
+        FILE *f = fopen("build-test/volcado/estado.txt", "r");
+        CHECK(f != NULL);
+        if (f) {
+            char line[256];
+            CHECK(fgets(line, sizeof(line), f) && !strncmp(line, "XboxNX volcado", 14));
+            fclose(f);
+        }
+        f = fopen("build-test/volcado/ram.bin", "rb");
+        CHECK(f && fseek(f, 0, SEEK_END) == 0 && ftell(f) == (long)VM_RAM_SIZE);
+        if (f) {
+            fclose(f);
+        }
+    }
     hw_tests();
     if (argc > 1) {
         io_tests(argv[1]);

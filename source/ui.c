@@ -1161,12 +1161,16 @@ static void draw_run(const UiState *s)
         snprintf(b, sizeof(b), "terminados: %s", dead);
         gfx_text_fit(rx + 20, ly0 + ph - 24, 13, rw - 36, C_ON_VAR, b);
     }
+    if (s->toast[0]) {
+        gfx_rrect(20, BOTBAR_Y - 44, UI_W - 40, 36, 12, C_SURF_HI);
+        gfx_text_fit(36, BOTBAR_Y - 36, 18, UI_W - 72, C_GREEN, s->toast);
+    }
 
     if (r->state == RUN_ACTIVE) {
         char clk[32];
         snprintf(clk, sizeof(clk), "Reloj %u ns", kn ? kn->ns_per_instr : 1);
-        Hint h[] = {{"Y", clk}, {"X", "Pantalla"}, {"B", "Detener"}, {"+", "Salir"}};
-        bottom_bar(h, 4);
+        Hint h[] = {{"Y", clk}, {"X", "Pantalla"}, {"-", "Volcado"}, {"B", "Detener"}, {"+", "Salir"}};
+        bottom_bar(h, 5);
     } else {
         Hint h[] = {{"X", "Pantalla"}, {"A", "Otra vez"}, {"B", "Volver"}, {"+", "Salir"}};
         bottom_bar(h, 4);

@@ -39,7 +39,7 @@ jobs:
           ./build-test/load_test build-test/bad.iso --bad-sha
           gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g -Isource \
             -o build-test/kernel_test tests/kernel_test.c source/vm.c source/kernel.c source/kmm.c source/kob.c \
-            source/kps.c source/kio.c source/ksys.c source/xc_crypto.c source/hw.c source/nv2a_sw.c source/workers.c source/prof.c source/aci.c build-test/apu/*.o source/disc.c source/cpu.c source/runner.c -lm -lpthread
+            source/kps.c source/kio.c source/ksys.c source/xc_crypto.c source/hw.c source/nv2a_sw.c source/workers.c source/prof.c source/aci.c build-test/apu/*.o source/disc.c source/cpu.c source/runner.c source/dump.c -lm -lpthread
           ./build-test/kernel_test build-test/t.iso
           APU_HILO=1 ./build-test/kernel_test build-test/t.iso
 
@@ -96,7 +96,7 @@ jobs:
           python3 tests/mkxiso.py build-test/t.iso
           aarch64-linux-gnu-gcc -std=gnu11 -O1 -Wall -Wextra -Werror -static -Isource -o kernel_test_a64 tests/kernel_test.c \
             source/vm.c source/kernel.c source/kmm.c source/kob.c source/kps.c source/kio.c source/ksys.c source/xc_crypto.c \
-            source/hw.c source/nv2a_sw.c source/workers.c source/prof.c source/aci.c a64/*.o source/disc.c source/cpu.c source/runner.c -lm -lpthread
+            source/hw.c source/nv2a_sw.c source/workers.c source/prof.c source/aci.c a64/*.o source/disc.c source/cpu.c source/runner.c source/dump.c -lm -lpthread
           aarch64-linux-gnu-gcc -std=gnu11 -O2 -ffp-contract=off -static -Isource -o bench_a64 tests/bench.c source/cpu.c source/vm.c -lm
           qemu-aarch64 ./kernel_test_a64 build-test/t.iso
           qemu-aarch64 ./bench_a64 100
