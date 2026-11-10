@@ -94,6 +94,7 @@ typedef struct Em {
     unsigned nexits;
     bool full;
     bool fallback; /* emitiendo el camino de respaldo (no cuenta como lento) */
+    unsigned lf_kind; /* LF_* de 32 bits que dejó la instrucción anterior (0: no se sabe) */
 } Em;
 
 static inline void E(Em *e, uint32_t ins)
@@ -289,6 +290,7 @@ static void emit_call(Em *e, const Block *b, unsigned i, const Vm *vm)
 /* lf_* de una operación de 32 bits: w9 = a, w10 = b, w11 = res */
 static void emit_lf(Em *e, unsigned kind)
 {
+    e->lf_kind = kind;
     movw(e, W12, kind);
     strb(e, W12, XC, OFF(lf_op));
     movw(e, W12, 4);
@@ -605,6 +607,179 @@ static bool emit_mmx(Em *e, const Block *b, unsigned i, const Vm *vm)
     return false;
 }
 
+/* ---- 2d.3: más instrucciones en código nativo ---- */
+
+static void ldrb_i(Em *e, int rt, int rn, uint32_t off) { E(e, 0x39400000u | (off << 10) | (uint32_t)rn << 5 | (uint32_t)rt); }
+static void ldrh_i(Em *e, int rt, int rn, uint32_t off) { E(e, 0x79400000u | ((off / 2) << 10) | (uint32_t)rn << 5 | (uint32_t)rt); }
+static void strh_i(Em *e, int rt, int rn, uint32_t off) { E(e, 0x79000000u | ((off / 2) << 10) | (uint32_t)rn << 5 | (uint32_t)rt); }
+static void ldrh_r(Em *e, int rt, int rn, int rm) { E(e, 0x78606800u | (uint32_t)rm << 16 | (uint32_t)rn << 5 | (uint32_t)rt); }
+static void strb_r(Em *e, int rt, int rn, int rm) { E(e, 0x38206800u | (uint32_t)rm << 16 | (uint32_t)rn << 5 | (uint32_t)rt); }
+static void strh_r(Em *e, int rt, int rn, int rm) { E(e, 0x78206800u | (uint32_t)rm << 16 | (uint32_t)rn << 5 | (uint32_t)rt); }
+
+/* Como emit_page, para un acceso de n bytes. */
+static void emit_page_n(Em *e, bool write, unsigned n, uint32_t **slow1, uint32_t **slow2, uint32_t **slow3)
+{
+    lsrw(e, W10, W9, 12);
+    ldrw_lsl2(e, W10, XPT, W10);
+    *slow1 = fwd_cb(e, J_CBZ, W10);
+    ubfx12(e, W11, W9);
+    cmpwi(e, W11, 0x1000 - n);
+    *slow2 = fwd_bcond(e, COND_HI);
+    subwi(e, W10, W10, 1);
+    *slow3 = NULL;
+    if (write) {
+        ldrb_r(e, W13, XCODE, W10);
+        *slow3 = fwd_cb(e, J_CBNZ, W13);
+    }
+    addx_lsl(e, W10, XRAM, W10, 12);
+}
+
+/* Dónde está un registro de 8 bits (AL..BH) dentro de c->r. */
+static uint32_t r8off(unsigned r) { return r < 4 ? ROFF(r) : ROFF(r - 4) + 1; }
+
+static void fallback_tail(Em *e, const Block *b, unsigned i, const Vm *vm, uint32_t *done, uint32_t *s1,
+                          uint32_t *s2, uint32_t *s3)
+{
+    patch(e, s1);
+    patch(e, s2);
+    if (s3) {
+        patch(e, s3);
+    }
+    e->fallback = true;
+    emit_call(e, b, i, vm);
+    e->fallback = false;
+    patch(e, done);
+}
+
+/* jcc tras cmp/sub/test/and/or/xor de 32 bits hechos aquí: los flags de
+ * ARM64 dicen lo mismo (con el carry al revés). -1: no se puede. */
+static int arm_cond(unsigned kind, unsigned x86)
+{
+    static const int sub[16] = {6, 7, 3, 2, 0, 1, 9, 8, 4, 5, -1, -1, 11, 10, 13, 12};
+    if (kind == LF_LOGIC) {
+        if (x86 == 2) return 16; /* nunca */
+        if (x86 == 3) return 14; /* siempre */
+        if (x86 == 6) return 0;  /* ZF */
+        if (x86 == 7) return 1;
+    }
+    return sub[x86 & 15];
+}
+
+static bool emit_more(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned prev_kind)
+{
+    const Insn *in = &b->in[i];
+    InsnFn f = in->fn;
+    uint32_t *s1, *s2, *s3;
+    if (f == x_jcc && (prev_kind == LF_SUB || prev_kind == LF_LOGIC)) {
+        int cc = arm_cond(prev_kind, in->aop);
+        if (cc < 0) {
+            return false;
+        }
+        movw(e, W12, in->next);
+        if (cc == 14) {
+            movw(e, W12, in->imm);
+        } else if (cc != 16) {
+            if (prev_kind == LF_SUB) {
+                ldrw(e, W9, XC, OFF(lf_a));
+                ldrw(e, W10, XC, OFF(lf_b));
+                cmpw(e, W9, W10);
+            } else {
+                ldrw(e, W11, XC, OFF(lf_res));
+                E(e, 0x6A0B017Fu); /* tst w11, w11 */
+            }
+            movw(e, W13, in->imm);
+            E(e, 0x1A800000u | (uint32_t)W12 << 16 | (uint32_t)cc << 12 | (uint32_t)W13 << 5 | (uint32_t)W12); /* csel w12, w13, w12, cc */
+        }
+        strw(e, W12, XC, OFF(eip));
+        return true;
+    }
+    if (f == x_movx && in->sz == 4 && (in->aop == 1 || in->aop == 2)) {
+        bool sx = in->imm != 0;
+        if (in->is_reg) {
+            if (in->aop == 1) {
+                ldrb_i(e, W12, XC, r8off(in->rm));
+            } else {
+                ldrh_i(e, W12, XC, ROFF(in->rm));
+            }
+            s1 = s2 = NULL;
+        } else {
+            emit_ea(e, in, true);
+            emit_page_n(e, false, in->aop, &s1, &s2, &s3);
+            if (in->aop == 1) {
+                ldrb_r(e, W12, W10, W11);
+            } else {
+                ldrh_r(e, W12, W10, W11);
+            }
+        }
+        if (sx) {
+            E(e, (in->aop == 1 ? 0x13001C00u : 0x13003C00u) | (uint32_t)W12 << 5 | (uint32_t)W12); /* sxtb / sxth */
+        }
+        strw(e, W12, XC, ROFF(in->reg));
+        if (s1) {
+            uint32_t *done = fwd_b(e);
+            fallback_tail(e, b, i, vm, done, s1, s2, NULL);
+        }
+        return true;
+    }
+    if ((f == x_mov_ge || f == x_mov_eg || f == x_mov_ei) && (in->sz == 1 || in->sz == 2)) {
+        unsigned n = in->sz;
+        uint32_t ro = n == 1 ? r8off(in->reg) : ROFF(in->reg);
+        if (f == x_mov_ge) { /* registro <- E */
+            if (in->is_reg) {
+                if (n == 1) {
+                    ldrb_i(e, W12, XC, r8off(in->rm));
+                    strb(e, W12, XC, ro);
+                } else {
+                    ldrh_i(e, W12, XC, ROFF(in->rm));
+                    strh_i(e, W12, XC, ro);
+                }
+                return true;
+            }
+            emit_ea(e, in, true);
+            emit_page_n(e, false, n, &s1, &s2, &s3);
+            if (n == 1) {
+                ldrb_r(e, W12, W10, W11);
+                strb(e, W12, XC, ro);
+            } else {
+                ldrh_r(e, W12, W10, W11);
+                strh_i(e, W12, XC, ro);
+            }
+            uint32_t *done = fwd_b(e);
+            fallback_tail(e, b, i, vm, done, s1, s2, NULL);
+            return true;
+        }
+        /* E <- registro o inmediato */
+        if (f == x_mov_eg) {
+            if (n == 1) {
+                ldrb_i(e, W12, XC, ro);
+            } else {
+                ldrh_i(e, W12, XC, ro);
+            }
+        } else {
+            movw(e, W12, in->imm & (n == 1 ? 0xFFu : 0xFFFFu));
+        }
+        if (in->is_reg) {
+            if (n == 1) {
+                strb(e, W12, XC, r8off(in->rm));
+            } else {
+                strh_i(e, W12, XC, ROFF(in->rm));
+            }
+            return true;
+        }
+        emit_ea(e, in, true);
+        emit_page_n(e, true, n, &s1, &s2, &s3);
+        if (n == 1) {
+            strb_r(e, W12, W10, W11);
+        } else {
+            strh_r(e, W12, W10, W11);
+        }
+        uint32_t *done = fwd_b(e);
+        fallback_tail(e, b, i, vm, done, s1, s2, s3);
+        return true;
+    }
+    return false;
+}
+
 /* Una instrucción; true si puede quedar en código nativo (EIP sin poner;
  * su camino lento pone el mismo next). false: la función, que pone el EIP. */
 static bool emit_insn(Em *e, const Block *b, unsigned i, const Vm *vm)
@@ -612,11 +787,22 @@ static bool emit_insn(Em *e, const Block *b, unsigned i, const Vm *vm)
     const Insn *in = &b->in[i];
     InsnFn f = in->fn;
     bool r32 = in->sz == 4;
+    unsigned prev_kind = e->lf_kind;
+    if (f == x_nop || f == x_lea || f == x_mov_ge || f == x_mov_eg || f == x_mov_ei || f == x_movx || f == x_push_r ||
+        f == x_push_i || f == x_pop_r || is_mmx_op(f) || f == x_movq_load || f == x_movq_store || f == x_movd_load ||
+        f == x_movd_store || f == x_mmx_shift_i) {
+        /* no tocan los flags: lo que dejó la anterior sigue valiendo */
+    } else {
+        e->lf_kind = 0;
+    }
     if (f == x_nop) {
         return true;
     }
     if (emit_mmx(e, b, i, vm)) {
         return true;
+    }
+    if (emit_more(e, b, i, vm, prev_kind)) {
+        return f != x_jcc; /* el jcc pone el EIP él mismo */
     }
     if (f == x_mov_eg && r32) {
         ldrw(e, W12, XC, ROFF(in->reg));
@@ -747,6 +933,7 @@ static bool jit_compile(Cpu *c, Block *b)
         e.nexits = 0;
         e.full = false;
         e.fallback = false;
+        e.lf_kind = 0;
         uint32_t *start = e.p;
         /* prólogo: x19 = c, x20 = ram, x21 = tabla de páginas, x22 = code[] */
         E(&e, 0xA9BD7BFDu); /* stp x29, x30, [sp, #-48]! */

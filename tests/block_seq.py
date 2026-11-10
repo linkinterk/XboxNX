@@ -22,7 +22,27 @@ FAULT = "5"
 JUMPS = {"jcc8", "jcc32", "call", "jmp8", "loop", "ret"}
 
 
+def cmp_jcc():
+    """cmp/sub/test/and/or/xor y un jcc que, si salta, se brinca inc esi (el
+    JIT traduce ese jcc con los flags de ARM64)."""
+    k = rnd.randrange(4)
+    if k == 0:
+        prod = bytes([rnd.choice([0x39, 0x29, 0x85, 0x21, 0x09, 0x31, 0x3B, 0x2B, 0x23, 0x38]),
+                      0xC0 | rnd.randrange(8) << 3 | rnd.choice([0, 1, 2, 3, 5, 7])])
+    elif k == 1:
+        prod = bytes([0x83, 0xC0 | rnd.choice([7, 5, 4, 1, 6]) << 3 | rnd.choice([0, 1, 2, 3, 5, 7]),
+                      rnd.choice([0, 1, 0x7F, 0x80, 0xFF, rnd.getrandbits(8)])])
+    elif k == 2:
+        prod = bytes([0x3D]) + rnd.choice([0, 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF,
+                                            rnd.getrandbits(32)]).to_bytes(4, "little")
+    else:
+        prod = bytes([0x39, 0x06])  # cmp [esi], eax
+    return prod + bytes([0x70 | rnd.randrange(16), 0x01, 0x46])
+
+
 def piece():
+    if rnd.random() < 0.15:
+        return cmp_jcc()
     if rnd.random() < 0.3:
         code, _ = rnd.choice([fp_diff.gen_sse, fp_diff.gen_x87, fp_diff.gen_mmx, fp_diff.gen_mmx])()
         return code
