@@ -178,6 +178,9 @@ static void kernel_call(Runner *r)
             rec->args[i] = vm_rd32(c->vm, esp + 4 + 4 * (uint32_t)i);
         }
     }
+    if (ord < K_ORDINAL_MAX) {
+        r->counts[ord]++;
+    }
     if (ord < K_ORDINAL_MAX && !r->seen[ord]) {
         r->seen[ord] = 1;
         r->distinct++;

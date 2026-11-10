@@ -786,7 +786,7 @@ static void draw_xbox_screen(const UiState *s)
                  (unsigned long long)sw->triangles, (unsigned long long)sw->pixels, sw->skipped_ff, sw->no_target,
                  sw->no_target_why, (unsigned)sw->surf_format, (unsigned)sw->surf_pitch, (unsigned)sw->clip_h,
                  (unsigned)sw->clip_v, sw->vs_errors, (unsigned)hw_scanout());
-        gfx_rrect(14, ly - 4, UI_W - 28, 166, 10, WITH_ALPHA(HEX(0x000000), 200));
+        gfx_rrect(14, ly - 4, UI_W - 28, 210, 10, WITH_ALPHA(HEX(0x000000), 200));
         gfx_text_fit(24, ly, 16, UI_W - 48, C_ON, e);
         ly += 22;
         snprintf(e, sizeof(e), "Último: prim %u, %u vértices, %llu tri, %llu px, %u ocultos, %u tras Z · destino %08X pitch %u fmt %X · Z %08X",
@@ -820,6 +820,33 @@ static void draw_xbox_screen(const UiState *s)
                  kn->bytes_read / 1048576.0, kn->writes, kn->files_open, kn->last_io[0] ? kn->last_io : "-");
         gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
         ly += 22;
+        /* las 5 funciones del kernel más llamadas y la última apertura fallida */
+        {
+            int top[5] = {-1, -1, -1, -1, -1};
+            for (int o = 0; o < (int)K_ORDINAL_MAX; o++) {
+                for (int t = 0; t < 5; t++) {
+                    if (top[t] < 0 || r->counts[o] > r->counts[top[t]]) {
+                        memmove(&top[t + 1], &top[t], (size_t)(4 - t) * sizeof(int));
+                        top[t] = o;
+                        break;
+                    }
+                }
+            }
+            int o2 = snprintf(e, sizeof(e), "Más llamadas:");
+            for (int t = 0; t < 5 && top[t] >= 0 && r->counts[top[t]]; t++) {
+                const KExport *x = kernel_export((unsigned)top[t]);
+                o2 += snprintf(e + o2, sizeof(e) - (size_t)o2, " %s %u", x ? x->name : "?", (unsigned)r->counts[top[t]]);
+                if (o2 >= (int)sizeof(e)) {
+                    break;
+                }
+            }
+            gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
+            ly += 22;
+            snprintf(e, sizeof(e), "Aperturas fallidas: %u · última: %s", kn->open_fails,
+                     kn->last_fail[0] ? kn->last_fail : "-");
+            gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
+            ly += 22;
+        }
         snprintf(e, sizeof(e), "JIT %s: %llu traducidos, búfer %.1f de %.0f MB, vaciado %u veces · %llu decodificados · código reescrito %llu veces",
                  js.on ? "activo" : "apagado", (unsigned long long)js.compiled, js.used / 1048576.0,
                  js.size / 1048576.0, js.flushes, (unsigned long long)js.decodes,

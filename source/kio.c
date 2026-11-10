@@ -536,8 +536,28 @@ static bool resolve_name(Kernel *k, uint32_t root, char *name, size_t cap)
 }
 
 /* Abre (y crea) para NtCreateFile/NtOpenFile. *info: lo que va al IoStatusBlock. */
+static uint32_t do_open_(KCall *c, uint32_t access, uint32_t attrs, uint32_t disposition, uint32_t options,
+                         uint32_t *handle, uint32_t *info);
+
+/* Abre y, si falla, lo apunta para la pantalla (un juego que reintenta
+ * abrir un archivo que no encuentra se queda en negro sin decir nada). */
 static uint32_t do_open(KCall *c, uint32_t access, uint32_t attrs, uint32_t disposition, uint32_t options,
                         uint32_t *handle, uint32_t *info)
+{
+    uint32_t st = do_open_(c, access, attrs, disposition, options, handle, info);
+    if (st != ST_SUCCESS) {
+        Kernel *k = c->k;
+        char name[300];
+        ansi(k, vm_rd32(k->vm, attrs + 4), name, sizeof(name));
+        size_t n = strlen(name), cap = sizeof(k->last_fail) - 12;
+        snprintf(k->last_fail, sizeof(k->last_fail), "%08X %s", (unsigned)st, n > cap ? name + n - cap : name);
+        k->open_fails++;
+    }
+    return st;
+}
+
+static uint32_t do_open_(KCall *c, uint32_t access, uint32_t attrs, uint32_t disposition, uint32_t options,
+                         uint32_t *handle, uint32_t *info)
 {
     Kernel *k = c->k;
     char name[300], path[300];
