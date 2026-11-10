@@ -399,6 +399,94 @@ static void draw_method(uint32_t m, uint32_t v)
     }
 }
 
+/* ---- captura de un cuadro (para repetirlo en la PC con tools/replay.c) ---- */
+
+typedef struct { uint32_t m, v, base; } CapRec;
+static struct {
+    int state;          /* 0 nada, 1 esperando el flip, 2 capturando, 3 listo, -1 error */
+    char dir[160];
+    uint8_t *ram;       /* la RAM al empezar el cuadro */
+    CapRec *rec;
+    size_t n, cap;
+} g_cap;
+
+void hw_capture_arm(const char *dir)
+{
+    if (g_cap.state == 1 || g_cap.state == 2) {
+        return;
+    }
+    snprintf(g_cap.dir, sizeof(g_cap.dir), "%s", dir);
+    g_cap.state = 1;
+}
+
+int hw_capture_state(void) { return g_cap.state; }
+
+static void cap_write(const char *name, const void *p, size_t n)
+{
+    char path[200];
+    snprintf(path, sizeof(path), "%s/%s", g_cap.dir, name);
+    remove(path);
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        g_cap.state = -1;
+        return;
+    }
+    if (fwrite(p, 1, n, f) != n) {
+        g_cap.state = -1;
+    }
+    fclose(f);
+}
+
+/* En cada flip: empezar (con la RAM de ese momento) o terminar y guardar. */
+static void cap_flip(Kernel *k)
+{
+    if (g_cap.state == 1) {
+        g_cap.ram = malloc(VM_RAM_SIZE);
+        if (!g_cap.ram) {
+            g_cap.state = -1;
+            return;
+        }
+        memcpy(g_cap.ram, k->vm->ram, VM_RAM_SIZE);
+        g_cap.n = 0;
+        g_cap.state = 2;
+    } else if (g_cap.state == 2) {
+        g_cap.state = 3;
+        cap_write("cuadro_ram.bin", g_cap.ram, VM_RAM_SIZE);
+        if (g_cap.state == 3) {
+            cap_write("cuadro.bin", g_cap.rec, g_cap.n * sizeof(CapRec));
+        }
+        free(g_cap.ram);
+        g_cap.ram = NULL;
+        free(g_cap.rec);
+        g_cap.rec = NULL;
+        g_cap.cap = 0;
+    }
+}
+
+static void cap_method(uint32_t m, uint32_t v)
+{
+    if (g_cap.state != 2) {
+        return;
+    }
+    if (g_cap.n == g_cap.cap) {
+        size_t nc = g_cap.cap ? g_cap.cap * 2 : 65536;
+        if (nc > (16u << 20)) {
+            return;
+        }
+        CapRec *n = realloc(g_cap.rec, nc * sizeof(CapRec));
+        if (!n) {
+            return;
+        }
+        g_cap.rec = n;
+        g_cap.cap = nc;
+    }
+    uint32_t base = 0;
+    if (m == 0x0184 || m == 0x0188 || m == 0x0194 || m == 0x0198 || m == 0x019C || m == 0x01A0) {
+        base = dma_of_handle(v);
+    }
+    g_cap.rec[g_cap.n++] = (CapRec){m, v, base};
+}
+
 /* Un método del push buffer. Devuelve PB_GO o el motivo de parar. */
 static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
 {
@@ -428,6 +516,7 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         return PB_GO;
     }
     draw_method(m, v);
+    cap_method(m, v);
     sw_method(m, v);
     switch (m) { /* Kelvin */
     case NV097_SET_FLIP_READ: surf_set(SURF_READ, v); break;
@@ -437,6 +526,7 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         uint32_t mod = surf_get(SURF_MODULO);
         surf_set(SURF_WRITE, mod ? (surf_get(SURF_WRITE) + 1) % mod : 0);
         g_hw.st.flips++;
+        cap_flip(k);
         if (g_hw.color_inst) {
             g_hw.last_target = dma_base(g_hw.color_inst) + g_hw.color_offset;
         }

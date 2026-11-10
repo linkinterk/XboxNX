@@ -23,12 +23,13 @@
 #include "dump.h"
 #include "probe.h"
 #include "crash.h"
+#include "hw.h"
 #include "ui.h"
 #include "usb/usb.h"
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.16"
+#define APP_VER   "0.18.17"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -48,6 +49,7 @@ static void present(void);
 static LoadReport g_load;
 static Runner g_run;
 const char *g_app_version = APP_VER;
+static int g_cap_seen;
 
 static void load_into_memory(void);
 
@@ -447,6 +449,9 @@ int main(int argc, char **argv)
                     snprintf(g_ui.toast, sizeof(g_ui.toast), "Guardando el volcado (64 MB)...");
                     present();
                     dump_state(&g_run, &g_game.disc, "sdmc:/switch/XboxNX/volcado", g_ui.toast, sizeof(g_ui.toast));
+                    /* y el cuadro siguiente entero, para repetirlo en la PC */
+                    hw_capture_arm("sdmc:/switch/XboxNX/volcado");
+                    g_cap_seen = 1;
                     dirty = true;
                 }
                 if (k & HidNpadButton_Y) {
@@ -461,6 +466,14 @@ int main(int argc, char **argv)
                 u64 budget = g_ui.run_screen ? 60000000ull : 150000000ull;
                 u64 spent = run_guarded(budget);
                 g_run.ns += spent;
+                int cs = hw_capture_state();
+                if (cs != g_cap_seen) {
+                    g_cap_seen = cs;
+                    snprintf(g_ui.toast, sizeof(g_ui.toast), "%s",
+                             cs == 2 ? "Capturando un cuadro entero... (sigue corriendo, puede tardar)"
+                             : cs == 3 ? "Cuadro capturado: volcado/cuadro.bin y cuadro_ram.bin"
+                             : cs < 0 ? "No se pudo capturar el cuadro" : "Esperando el próximo cuadro para capturarlo...");
+                }
                 dirty = true;
                 if (k & HidNpadButton_B) {
                     g_run.state = RUN_CPU_STOP;

@@ -72,6 +72,11 @@ bool hw_screen(const struct Kernel *k, XImage *out);
 uint32_t hw_scanout(void);
 /* La dirección que hw_screen mostró y el destino del último cuadro terminado. */
 uint32_t hw_shown(void);
+/* Capturar el próximo cuadro entero (la RAM al empezar y cada método de
+ * Kelvin) en dir/cuadro_ram.bin y dir/cuadro.bin. Estado: 0 nada, 1 esperando,
+ * 2 capturando, 3 guardado, -1 error. */
+void hw_capture_arm(const char *dir);
+int hw_capture_state(void);
 uint32_t hw_last_target(void);
 
 /* Prepara el hardware para una ejecución nueva. */

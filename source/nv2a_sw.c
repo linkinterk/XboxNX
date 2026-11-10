@@ -55,7 +55,7 @@ static struct {
     uint32_t *inl;
     unsigned ninl, inl_cap;
     /* texturas */
-    uint32_t t_off[4], t_fmt[4], t_addr[4], t_ctl0[4], t_ctl1[4], t_filter[4], t_rect[4];
+    uint32_t t_off[4], t_fmt[4], t_addr[4], t_ctl0[4], t_ctl1[4], t_filter[4], t_rect[4], t_pal[4];
     uint32_t shader_prog;
     /* combiners */
     uint32_t c_icw[8], a_icw[8], c_ocw[8], a_ocw[8], factor0[8], factor1[8], cctl, fcw0, fcw1;
@@ -251,6 +251,10 @@ typedef struct Tex {
     bool linear, normalized, bilinear;
     unsigned au, av;
     uint32_t *xm, *ym;   /* direcciones swizzle por x y por y */
+    bool cube;
+    uint32_t face_bytes; /* cubo: lo que ocupa cada cara con sus mipmaps */
+    const uint8_t *pal;  /* P8: la paleta (A8R8G8B8) */
+    unsigned pal_n;
 } Tex;
 
 /* Las tablas swizzle de cada etapa de textura: cada etapa las suyas (si se
@@ -353,9 +357,36 @@ static bool tex_setup(int s, Tex *t)
     } else {
         bytes = t->w * t->h * fmt_bpp(t->fmt);
     }
+    /* cubo: seis caras seguidas, cada una con su cadena de mipmaps,
+     * alineadas a 128 bytes */
+    t->cube = (fmtw >> 2) & 1;
+    t->face_bytes = 0;
+    if (t->cube && !t->linear) {
+        unsigned levels = (fmtw >> 16) & 0xF;
+        uint32_t fb = 0, w = t->w, h = t->h;
+        for (unsigned l = 0; l < (levels ? levels : 1); l++) {
+            if (dxt) {
+                fb += ((w + 3) / 4) * ((h + 3) / 4) * (t->fmt == 0x0C ? 8 : 16);
+            } else {
+                fb += w * h * fmt_bpp(t->fmt);
+            }
+            w = w > 1 ? w / 2 : 1;
+            h = h > 1 ? h / 2 : 1;
+        }
+        t->face_bytes = (fb + 127) & ~127u;
+        bytes = t->face_bytes * 6;
+    } else {
+        t->cube = false;
+    }
     t->base = mem(base + S.t_off[s], bytes);
     if (!t->base) {
         return false;
+    }
+    t->pal = NULL;
+    if (t->fmt == 0x0B) {
+        uint32_t pv = S.t_pal[s];
+        t->pal_n = 256u >> ((pv >> 2) & 3);
+        t->pal = mem(((pv & 3) ? S.dma_b : S.dma_a) + (pv & ~0x3Fu), t->pal_n * 4);
     }
     if (!t->linear && !dxt) {
         swz_tables(s, t->w, t->h, &t->xm, &t->ym);
@@ -495,8 +526,13 @@ static void texel(const Tex *t, uint32_t x, uint32_t y, float c[4])
     case 0x28: /* G8B8 */
         c[0] = 0, c[1] = (v >> 8) / 255.0f, c[2] = (v & 255) / 255.0f, c[3] = 1;
         break;
-    case 0x0B: /* con paleta: sin paleta todavía, gris */
-        c[0] = c[1] = c[2] = v / 255.0f, c[3] = 1;
+    case 0x0B: /* con paleta (A8R8G8B8) */
+        if (t->pal) {
+            const uint8_t *e = t->pal + (v < t->pal_n ? v : t->pal_n - 1) * 4;
+            c[0] = e[2] / 255.0f, c[1] = e[1] / 255.0f, c[2] = e[0] / 255.0f, c[3] = e[3] / 255.0f;
+        } else {
+            c[0] = c[1] = c[2] = v / 255.0f, c[3] = 1;
+        }
         break;
     default: /* A8R8G8B8 y los demás de 32 bits */
         c[0] = ((v >> 16) & 255) / 255.0f, c[1] = ((v >> 8) & 255) / 255.0f, c[2] = (v & 255) / 255.0f;
@@ -848,6 +884,26 @@ static void shade(const Target *t, int x, int y, const float l[3], const OutVert
             for (int i = 0; i < 4; i++) {
                 R[8 + s][i] = clamp01(tc[i]);
             }
+            continue;
+        }
+        if (g_tex_mode[s] == 3 && g_tex[s].cube) { /* CUBE_MAP: la cara del eje mayor */
+            float rx = tc[0], ry = tc[1], rz = tc[2], ax = fabsf(rx), ay = fabsf(ry), az = fabsf(rz);
+            float sc, tcc, ma;
+            unsigned face;
+            if (ax >= ay && ax >= az) {
+                face = rx >= 0 ? 0 : 1, ma = ax, sc = rx >= 0 ? -rz : rz, tcc = -ry;
+            } else if (ay >= az) {
+                face = ry >= 0 ? 2 : 3, ma = ay, sc = rx, tcc = ry >= 0 ? rz : -rz;
+            } else {
+                face = rz >= 0 ? 4 : 5, ma = az, sc = rz >= 0 ? rx : -rx, tcc = -ry;
+            }
+            if (!(ma > 0)) {
+                ma = 1;
+            }
+            Tex f = g_tex[s];
+            f.base += face * f.face_bytes;
+            f.normalized = true;
+            sample(&f, (sc / ma + 1) * 0.5f, (tcc / ma + 1) * 0.5f, R[8 + s]);
             continue;
         }
         float u = tc[0], w = tc[1];
@@ -1361,6 +1417,7 @@ void sw_method(uint32_t m, uint32_t v)
         case 0x10: S.t_ctl1[s] = v; break;
         case 0x14: S.t_filter[s] = v; break;
         case 0x1C: S.t_rect[s] = v; break;
+        case 0x20: S.t_pal[s] = v; break;
         default: break;
         }
         return;
