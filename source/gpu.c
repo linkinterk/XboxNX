@@ -366,8 +366,11 @@ static bool init_inner(void *nwin)
         snprintf(G.info, sizeof(G.info), "EGL: sin OpenGL");
         return false;
     }
+    /* Sin ventana (la pantalla es del framebuffer de la app): se dibuja solo
+     * en FBOs y se copia a la RAM del Xbox. Contexto sin superficie
+     * (EGL_KHR_surfaceless_context) o, si no, un pbuffer pequeño. */
     EGLint cfg_attr[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT, EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
-                         EGL_ALPHA_SIZE, 8, EGL_SURFACE_TYPE, nwin ? EGL_WINDOW_BIT : EGL_PBUFFER_BIT, EGL_NONE};
+                         EGL_ALPHA_SIZE, 8, EGL_SURFACE_TYPE, nwin ? EGL_WINDOW_BIT : 0, EGL_NONE};
     EGLConfig cfg;
     EGLint n = 0;
     PASO("eglChooseConfig");
@@ -394,8 +397,22 @@ static bool init_inner(void *nwin)
     }
     PASO("eglMakeCurrent");
     if (!eglMakeCurrent(G.dpy, G.win, G.win, G.ctx)) {
-        snprintf(G.info, sizeof(G.info), "EGL: no se pudo activar (0x%X)", (unsigned)eglGetError());
-        return false;
+        if (nwin) {
+            snprintf(G.info, sizeof(G.info), "EGL: no se pudo activar (0x%X)", (unsigned)eglGetError());
+            return false;
+        }
+        PASO("pbuffer");
+        EGLint pcfg_attr[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT, EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8,
+                              EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_NONE};
+        EGLConfig pcfg;
+        EGLint pn = 0, pb_attr[] = {EGL_WIDTH, 16, EGL_HEIGHT, 16, EGL_NONE};
+        if (eglChooseConfig(G.dpy, pcfg_attr, &pcfg, 1, &pn) && pn > 0) {
+            G.win = eglCreatePbufferSurface(G.dpy, pcfg, pb_attr);
+        }
+        if (G.win == EGL_NO_SURFACE || !eglMakeCurrent(G.dpy, G.win, G.win, G.ctx)) {
+            snprintf(G.info, sizeof(G.info), "EGL: no se pudo activar sin ventana (0x%X)", (unsigned)eglGetError());
+            return false;
+        }
     }
     const char *miss = "?";
     PASO("cargar funciones GL");

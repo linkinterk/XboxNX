@@ -30,13 +30,12 @@
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.28"
+#define APP_VER   "0.18.29"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
 static uint32_t g_shadow[UI_W * UI_H];
 static Framebuffer g_fb;
-static bool g_use_fb = true; /* false: la pantalla va por OpenGL (etapa 4c) */
 
 /* ---- registro del arranque del GPU (sd:/switch/XboxNX/gpu.txt) ---- */
 #define GPU_LOG "sdmc:/switch/XboxNX/gpu.txt"
@@ -211,22 +210,17 @@ static void present(void)
     }
     prof_push(PROF_UI);
     ui_draw(&g_ui);
-    if (!g_use_fb) {
-        if (g_gpu_log && g_gpu_frames == 0) {
-            gpu_log_line("primer cuadro");
-        }
-        gpu_present_ui(g_shadow, UI_W, UI_H); /* 4c: la ventana es de OpenGL */
-        if (g_gpu_log && ++g_gpu_frames == 2) { /* ya se mostró el menú: el GPU sirve */
-            gpu_log_line("listo");
-            gpu_log_close();
-        }
-    } else {
+    {
         u32 stride;
         u8 *dst = framebufferBegin(&g_fb, &stride);
         for (int y = 0; y < UI_H; y++) {
             memcpy(dst + (size_t)y * stride, &g_shadow[y * UI_W], UI_W * 4);
         }
         framebufferEnd(&g_fb);
+    }
+    if (g_gpu_log && ++g_gpu_frames == 1) { /* ya se mostró el menú: todo bien */
+        gpu_log_line("listo");
+        gpu_log_close();
     }
     prof_pop();
 }
@@ -375,25 +369,15 @@ int main(int argc, char **argv)
         gpu_log = gpu_log_line;
         gpu_log_line("v" APP_VER);
     }
-    if (probar && gpu_init(nwindowGetDefault())) {
-        g_use_fb = false;
-        gpu_log_line("activa");
+    /* La pantalla de la app siempre es el framebuffer (lo que ya funcionaba);
+     * el GPU dibuja el juego por dentro, sin ventana, y se copia a la RAM. */
+    framebufferCreate(&g_fb, nwindowGetDefault(), UI_W, UI_H, PIXEL_FORMAT_RGBA_8888, 2);
+    framebufferMakeLinear(&g_fb);
+    if (probar) {
+        if (gpu_init(NULL)) {
+            gpu_log_line("activa");
+        }
         gpu_log_line(gpu_info());
-    } else {
-        if (probar) {
-            gpu_log_line(gpu_info());
-        }
-        Result fr = framebufferCreate(&g_fb, nwindowGetDefault(), UI_W, UI_H, PIXEL_FORMAT_RGBA_8888, 2);
-        if (R_SUCCEEDED(fr)) {
-            framebufferMakeLinear(&g_fb);
-        }
-        if (probar) {
-            char t[64];
-            snprintf(t, sizeof(t), "framebuffer 0x%X", (unsigned)fr);
-            gpu_log_line(t);
-            gpu_log_line("listo");
-            gpu_log_close();
-        }
     }
     gfx_target(g_shadow, UI_W, UI_H, UI_W);
 
@@ -698,9 +682,7 @@ int main(int argc, char **argv)
     for (int i = 0; i < g_ncards; i++) {
         ui_card_free(&g_cards[i]);
     }
-    if (g_use_fb) {
-        framebufferClose(&g_fb);
-    }
+    framebufferClose(&g_fb);
     plExit();
     return 0;
 }
