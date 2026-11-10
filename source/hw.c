@@ -270,9 +270,11 @@ static uint32_t *phys32(Kernel *k, uint32_t pa)
 /* CLEAR_SURFACE por software: el rectángulo de la superficie de color
  * (lineal, de 16 o 32 bits) con el color de borrado. Sin dibujo todavía,
  * es lo primero que se ve de un juego. */
+static bool g_skipping; /* el cuadro en curso no se dibuja (saltar cuadros) */
+
 static void clear_color(Kernel *k, uint32_t flags)
 {
-    if (!(flags & 0xF0u) || !g_hw.color_inst) {
+    if (!(flags & 0xF0u) || !g_hw.color_inst || g_skipping) {
         return;
     }
     unsigned fmt = g_hw.surf_format & 0xF, type = (g_hw.surf_format >> 8) & 0xF;
@@ -398,6 +400,18 @@ static void draw_method(uint32_t m, uint32_t v)
         break;
     }
 }
+
+static unsigned g_frameskip = 3, g_frame_no;
+static uint32_t g_last_drawn; /* el destino del último cuadro que sí se dibujó */
+void hw_set_frameskip(unsigned n)
+{
+    g_frameskip = n ? n : 1;
+    if (g_frameskip == 1) {
+        g_skipping = false;
+        sw_set_skip(false);
+    }
+}
+unsigned hw_frameskip(void) { return g_frameskip; }
 
 /* ---- captura de un cuadro (para repetirlo en la PC con tools/replay.c) ---- */
 
@@ -527,6 +541,13 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         surf_set(SURF_WRITE, mod ? (surf_get(SURF_WRITE) + 1) % mod : 0);
         g_hw.st.flips++;
         cap_flip(k);
+        /* saltar cuadros: dibujar solo 1 de cada g_frameskip (no al capturar) */
+        g_frame_no++;
+        if (!g_skipping && g_hw.color_inst) {
+            g_last_drawn = dma_base(g_hw.color_inst) + g_hw.color_offset;
+        }
+        g_skipping = g_frameskip > 1 && g_cap.state != 2 && g_cap.state != 1 && (g_frame_no % g_frameskip) != 0;
+        sw_set_skip(g_skipping);
         if (g_hw.color_inst) {
             g_hw.last_target = dma_base(g_hw.color_inst) + g_hw.color_offset;
         }
@@ -968,6 +989,10 @@ bool hw_screen(const Kernel *k, XImage *out)
         out->h = h;
     }
     uint32_t start = nv_ld(NV_PCRTC_START) & (VM_RAM_SIZE - 1);
+    if (g_frameskip > 1 && g_last_drawn) {
+        /* saltando cuadros, el búfer de PCRTC puede ser uno sin dibujar */
+        start = g_last_drawn & (VM_RAM_SIZE - 1);
+    }
     /* Si lo que apunta PCRTC está todo negro (todavía no se pintó o el
      * flip no llegó) y hay un cuadro terminado en otro lado, ese. */
     uint32_t alt = g_hw.last_target & (VM_RAM_SIZE - 1);

@@ -25,6 +25,7 @@ typedef struct SwStats {
     unsigned skipped_ff;   /* dibujos con función fija (todavía no) */
     unsigned vs_errors;    /* programas que no se pudieron leer */
     unsigned no_target;    /* sin superficie donde dibujar */
+    unsigned skipped_frames_draws; /* dibujos no hechos por saltar cuadros */
     unsigned no_target_why; /* 1 formato, 2 pitch, 3 swizzle, 4 sin DMA, 5 recorte, 6 memoria */
     uint32_t surf_format, surf_pitch, clip_h, clip_v; /* los de ese momento */
     /* el último dibujo, para entender qué hace el juego */
@@ -44,5 +45,7 @@ void sw_init(uint8_t *ram, uint32_t ram_size, SwDmaFn dma);
 /* Un método de Kelvin con su valor. */
 void sw_method(uint32_t m, uint32_t v);
 const SwStats *sw_stats(void);
+/* Saltar los dibujos (los cuadros que no se van a ver). */
+void sw_set_skip(bool skip);
 
 #endif

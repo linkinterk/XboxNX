@@ -29,7 +29,7 @@
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.18"
+#define APP_VER   "0.18.19"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -452,6 +452,17 @@ int main(int argc, char **argv)
                     /* y el cuadro siguiente entero, para repetirlo en la PC */
                     hw_capture_arm("sdmc:/switch/XboxNX/volcado");
                     g_cap_seen = 1;
+                    dirty = true;
+                }
+                if (k & (HidNpadButton_AnyLeft | HidNpadButton_AnyRight)) { /* saltar cuadros: dibujar 1 de cada n */
+                    unsigned n = hw_frameskip();
+                    n = (k & HidNpadButton_AnyRight) ? (n >= 6 ? 6 : n + 1) : (n <= 1 ? 1 : n - 1);
+                    hw_set_frameskip(n);
+                    if (n == 1) {
+                        snprintf(g_ui.toast, sizeof(g_ui.toast), "Dibujar todos los cuadros (más lento)");
+                    } else {
+                        snprintf(g_ui.toast, sizeof(g_ui.toast), "Dibujar 1 de cada %u cuadros (el juego corre más rápido)", n);
+                    }
                     dirty = true;
                 }
                 if (k & HidNpadButton_StickR) { /* R3: JIT sí/no (para saber si un fallo es del JIT) */

@@ -76,6 +76,9 @@ uint32_t hw_shown(void);
  * Kelvin) en dir/cuadro_ram.bin y dir/cuadro.bin. Estado: 0 nada, 1 esperando,
  * 2 capturando, 3 guardado, -1 error. */
 void hw_capture_arm(const char *dir);
+/* Dibujar solo 1 de cada n cuadros (el juego corre más rápido; 1 = todos). */
+void hw_set_frameskip(unsigned n);
+unsigned hw_frameskip(void);
 int hw_capture_state(void);
 uint32_t hw_last_target(void);
 

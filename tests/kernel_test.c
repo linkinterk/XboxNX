@@ -905,6 +905,7 @@ static void hw_tests(void)
 
 int main(int argc, char **argv)
 {
+    hw_set_frameskip(1); /* las pruebas del GPU dibujan cada cuadro */
     if (getenv("APU_HILO")) {
         apu_set_threaded(true); /* el audio en su hilo, como en la Switch */
     }

@@ -1,3 +1,4 @@
+#pragma GCC optimize("O3", "no-strict-aliasing") /* XboxNX: el vertex shader corre por cada vértice */
 #include "nv2a_vsh_cpu.h"
 
 #include <math.h>

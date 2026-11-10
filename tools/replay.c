@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "nv2a_sw.h"
+#include "workers.h"
 
 #define RAM (64u << 20)
 static uint8_t *g_ram;
@@ -79,6 +80,7 @@ int main(int argc, char **argv)
     int w = argc > 6 ? atoi(argv[6]) : 640, h = argc > 7 ? atoi(argv[7]) : 480;
     unsigned stop = argc > 8 ? (unsigned)atoi(argv[8]) : 0;
     bool list = getenv("LISTA") != NULL;
+    workers_init();
     sw_init(g_ram, RAM, dma_rec);
     /* lo que suele venir de antes del cuadro: el modo del vertex shader y los
      * objetos DMA (en D3D todos con base 0) */

@@ -9,6 +9,9 @@
  */
 #include "nv2a_sw.h"
 
+/* lo que más tiempo gasta del emulador: con -O3 ~30% más rápido */
+#pragma GCC optimize("O3")
+
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -93,6 +96,10 @@ void sw_init(uint8_t *ram, uint32_t ram_size, SwDmaFn dma)
 }
 
 const SwStats *sw_stats(void) { return &S.st; }
+
+/* Saltar cuadros: sin dibujar (ni transformar vértices) hasta que se diga. */
+static bool g_skip;
+void sw_set_skip(bool skip) { g_skip = skip; }
 
 static uint8_t *mem(uint32_t pa, uint32_t len)
 {
@@ -197,6 +204,9 @@ static bool push_vertex(const float v[16][4])
 /* El vértice i de los arreglos (los atributos sin arreglo: su valor actual). */
 static void array_vertex(uint32_t i)
 {
+    if (g_skip) {
+        return;
+    }
     float v[16][4];
     memcpy(v, S.cur, sizeof(v));
     for (int a = 0; a < 16; a++) {
@@ -962,15 +972,25 @@ static void shade(const Target *t, int x, int y, const float l[3], const OutVert
     k->pixels++;
 }
 
-typedef struct Job {
-    const Target *t;
-    const OutVert *v[3];
+/* Los triángulos de un dibujo se preparan primero (recorte, ocultos,
+ * rectángulo) y después se pintan todos juntos repartidos entre los hilos
+ * de ayuda: cada hilo es dueño de las filas y % n == parte, así cada píxel
+ * lo pinta siempre el mismo hilo y en el orden de los triángulos. Antes se
+ * despertaba a los hilos por cada triángulo grande (caro) y los chicos iban
+ * en un solo núcleo. */
+typedef struct TriJob {
+    OutVert v[3];
     float iw[3], inv;
     int ix0, ix1, iy0, iy1;
-    Count cnt[4];
-} Job;
+} TriJob;
 
-static void raster_rows(void *arg, int part, int n);
+static struct {
+    TriJob *t;
+    size_t n, cap;
+    uint64_t area;
+    const Target *tg;
+    Count cnt[8];
+} g_tj;
 
 static void raster(const Target *t, const OutVert *a, const OutVert *b, const OutVert *c)
 {
@@ -998,28 +1018,59 @@ static void raster(const Target *t, const OutVert *a, const OutVert *b, const Ou
     if (ix0 >= ix1 || iy0 >= iy1) {
         return;
     }
-    S.st.triangles++;
-    const OutVert *v[3] = {a, b, c};
-    float iw[3];
-    for (int i = 0; i < 3; i++) {
-        float w = v[i]->pos[3];
-        iw[i] = (w > 1e-20f || w < -1e-20f) && isfinite(w) ? 1.0f / w : 1.0f;
+    if (g_tj.n == g_tj.cap) {
+        size_t nc = g_tj.cap ? g_tj.cap * 2 : 1024;
+        void *p = realloc(g_tj.t, nc * sizeof(TriJob));
+        if (!p) {
+            return;
+        }
+        g_tj.t = p;
+        g_tj.cap = nc;
     }
-    Job j = {t, {a, b, c}, {iw[0], iw[1], iw[2]}, 1.0f / area, ix0, ix1, iy0, iy1, {{0}}};
-    int n = (ix1 - ix0) * (iy1 - iy0) > 2048 ? workers_count() : 1;
+    S.st.triangles++;
+    TriJob *j = &g_tj.t[g_tj.n++];
+    j->v[0] = *a, j->v[1] = *b, j->v[2] = *c;
+    for (int i = 0; i < 3; i++) {
+        float w = j->v[i].pos[3];
+        j->iw[i] = (w > 1e-20f || w < -1e-20f) && isfinite(w) ? 1.0f / w : 1.0f;
+    }
+    j->inv = 1.0f / area;
+    j->ix0 = ix0, j->ix1 = ix1, j->iy0 = iy0, j->iy1 = iy1;
+    g_tj.area += (uint64_t)(ix1 - ix0) * (uint64_t)(iy1 - iy0);
+}
+
+static void raster_rows(void *arg, int part, int n);
+
+/* Pinta los triángulos preparados del dibujo. */
+static void raster_flush(const Target *t)
+{
+    if (!g_tj.n) {
+        return;
+    }
+    int n = g_tj.area > 4096 ? workers_count() : 1;
+    if (n > 8) {
+        n = 8;
+    }
+    memset(g_tj.cnt, 0, sizeof(g_tj.cnt));
+    for (int i = 0; i < 8; i++) {
+        g_tj.cnt[i].first_px = 0xFFFFFFFFu;
+    }
+    g_tj.tg = t;
     if (n > 1) {
-        workers_run(raster_rows, &j);
+        workers_run(raster_rows, NULL);
     } else {
-        raster_rows(&j, 0, 1);
+        raster_rows(NULL, 0, 1);
     }
     for (int i = 0; i < n; i++) {
-        S.st.pixels += j.cnt[i].pixels;
-        S.st.last.depth_fail += j.cnt[i].depth_fail;
-        S.st.last.alpha_fail += j.cnt[i].alpha_fail;
-        if (S.st.last.first_px == 0xFFFFFFFFu && i == 0) {
-            S.st.last.first_px = j.cnt[0].first_px;
+        S.st.pixels += g_tj.cnt[i].pixels;
+        S.st.last.depth_fail += g_tj.cnt[i].depth_fail;
+        S.st.last.alpha_fail += g_tj.cnt[i].alpha_fail;
+        if (S.st.last.first_px == 0xFFFFFFFFu && g_tj.cnt[i].first_px != 0xFFFFFFFFu) {
+            S.st.last.first_px = g_tj.cnt[i].first_px;
         }
     }
+    g_tj.n = 0;
+    g_tj.area = 0;
 }
 
 /* Un triángulo recortado contra el plano cercano (w > 0). El vertex shader
@@ -1092,36 +1143,45 @@ static void tri(const Target *t, const OutVert *a, const OutVert *b, const OutVe
     }
 }
 
-/* Las filas y % n == part de un triángulo. */
+/* Las filas y % n == part de todos los triángulos preparados. */
 static void raster_rows(void *arg, int part, int n)
 {
-    Job *j = arg;
-    const Target *t = j->t;
-    const OutVert *a = j->v[0], *b = j->v[1], *c = j->v[2];
-    const OutVert *v[3] = {a, b, c};
-    float x0 = a->pos[0], y0 = a->pos[1], x1 = b->pos[0], y1 = b->pos[1], x2 = c->pos[0], y2 = c->pos[1];
-    const float *iw = j->iw;
-    float inv = j->inv;
-    int ix0 = j->ix0, ix1 = j->ix1;
-    Count *k = &j->cnt[part];
-    k->first_px = 0xFFFFFFFFu;
-    for (int y = j->iy0 + part; y < j->iy1; y += n) {
-        float py = y + 0.5f;
-        for (int x = ix0; x < ix1; x++) {
-            float px = x + 0.5f;
+    (void)arg;
+    if (part >= 8) {
+        return;
+    }
+    const Target *t = g_tj.tg;
+    Count *k = &g_tj.cnt[part];
+    for (size_t ti = 0; ti < g_tj.n; ti++) {
+        const TriJob *j = &g_tj.t[ti];
+        const OutVert *a = &j->v[0], *b = &j->v[1], *c = &j->v[2];
+        const OutVert *v[3] = {a, b, c};
+        float x0 = a->pos[0], y0 = a->pos[1], x1 = b->pos[0], y1 = b->pos[1], x2 = c->pos[0], y2 = c->pos[1];
+        const float *iw = j->iw;
+        float inv = j->inv;
+        int ix0 = j->ix0, ix1 = j->ix1;
+        int y = j->iy0 + (((part - j->iy0) % n) + n) % n;
+        for (; y < j->iy1; y += n) {
+            float py = y + 0.5f;
+            /* las funciones de borde son lineales en x: se avanzan sumando */
+            float px = ix0 + 0.5f;
             float w0 = ((x1 - px) * (y2 - py) - (x2 - px) * (y1 - py)) * inv;
             float w1 = ((x2 - px) * (y0 - py) - (x0 - px) * (y2 - py)) * inv;
-            float w2 = 1 - w0 - w1;
-            if (w0 < 0 || w1 < 0 || w2 < 0) {
-                continue;
+            float d0 = -(y2 - py) * inv + (y1 - py) * inv, d1 = -(y0 - py) * inv + (y2 - py) * inv;
+            for (int x = ix0; x < ix1; x++, w0 += d0, w1 += d1) {
+                float w2 = 1 - w0 - w1;
+                if (w0 < 0 || w1 < 0 || w2 < 0) {
+                    continue;
+                }
+                float z = w0 * a->pos[2] + w1 * b->pos[2] + w2 * c->pos[2];
+                float p0 = w0 * iw[0], p1 = w1 * iw[1], p2 = w2 * iw[2], ps = p0 + p1 + p2;
+                float l[3] = {w0, w1, w2};
+                if (ps != 0 && isfinite(ps)) {
+                    float r = 1.0f / ps;
+                    l[0] = p0 * r, l[1] = p1 * r, l[2] = p2 * r;
+                }
+                shade(t, x, y, l, v, z, k);
             }
-            float z = w0 * a->pos[2] + w1 * b->pos[2] + w2 * c->pos[2];
-            float p0 = w0 * iw[0], p1 = w1 * iw[1], p2 = w2 * iw[2], ps = p0 + p1 + p2;
-            float l[3] = {w0, w1, w2};
-            if (ps != 0 && isfinite(ps)) {
-                l[0] = p0 / ps, l[1] = p1 / ps, l[2] = p2 / ps;
-            }
-            shade(t, x, y, l, v, z, k);
         }
     }
 }
@@ -1187,7 +1247,7 @@ static bool run_program(void)
 static void transform(const float in[16][4], OutVert *o)
 {
     /* el estado a mano: las constantes son las del GPU, sin copiarlas */
-    static float inr[16 * 4], outr[13 * 4], tmp[12 * 4], a0[4];
+    float inr[16 * 4], outr[13 * 4], tmp[12 * 4], a0[4];
     memcpy(inr, in, sizeof(inr));
     memset(outr, 0, sizeof(outr));
     memset(tmp, 0, sizeof(tmp));
@@ -1213,8 +1273,25 @@ static void transform(const float in[16][4], OutVert *o)
     o->fog = out[5 * 4];
 }
 
+static OutVert *g_xf_out;
+
+/* Los vértices i con i % n == part (cada hilo los suyos). */
+static void transform_part(void *arg, int part, int n)
+{
+    (void)arg;
+    unsigned chunk = (S.nin + (unsigned)n - 1) / (unsigned)n, i0 = (unsigned)part * chunk;
+    unsigned i1 = i0 + chunk < S.nin ? i0 + chunk : S.nin;
+    for (unsigned i = i0; i < i1; i++) {
+        transform(S.in[i], &g_xf_out[i]);
+    }
+}
+
 static void draw(void)
 {
+    if (g_skip) {
+        S.st.skipped_frames_draws++;
+        return;
+    }
     if (!S.nin) {
         return;
     }
@@ -1242,8 +1319,11 @@ static void draw(void)
     if (!ov) {
         return;
     }
-    for (unsigned i = 0; i < S.nin; i++) {
-        transform(S.in[i], &ov[i]);
+    g_xf_out = ov;
+    if (S.nin >= 192 && workers_count() > 1) {
+        workers_run(transform_part, NULL); /* los vértices repartidos entre los hilos */
+    } else {
+        transform_part(NULL, 0, 1);
     }
     {
         __typeof__(S.st.last) *L = &S.st.last;
@@ -1308,6 +1388,7 @@ static void draw(void)
     default: /* puntos y líneas: todavía no */
         break;
     }
+    raster_flush(&t);
     free(ov);
     S.st.last.pixels = S.st.pixels - px0;
     S.st.last.tris = S.st.triangles - tr0;
@@ -1315,7 +1396,7 @@ static void draw(void)
 
 static void zclear(uint32_t flags)
 {
-    if (!(flags & 3)) {
+    if (!(flags & 3) || g_skip) {
         return;
     }
     Target t;
