@@ -245,6 +245,13 @@ static void emit_call(Em *e, const Block *b, unsigned i, const Vm *vm)
     if (!e->fallback) {
         ((Block *)b)->slow |= 1ull << (i & 63); /* para el perfil (no el camino de respaldo) */
     }
+    /* cuenta para la pantalla (lentas / de respaldo) */
+    {
+        uint32_t o = e->fallback ? OFF(st_cfb) : OFF(st_ccall);
+        ldrx(e, W9, XC, o);
+        E(e, 0x91000400u | 9u << 5 | 9u); /* add x9, x9, #1 */
+        E(e, 0xF9000000u | (o / 8) << 10 | (uint32_t)XC << 5 | 9u);
+    }
     /* el intérprete (rdtsc, por ejemplo) ve icount como si fuera de una en una */
     bool icnt = in->fn == x_interp && i > 0;
     if (icnt) {

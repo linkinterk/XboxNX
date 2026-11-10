@@ -878,12 +878,136 @@ static bool emit_jcc_more(Em *e, const Insn *in, unsigned prev)
     return true;
 }
 
+static uint32_t jit_cond(Cpu *c, uint32_t n) { return cond(c, (int)n) ? 1u : 0u; }
+
+/* w0 = la condición n con los flags que haya (función de C, sin más) */
+static void emit_cond_call(Em *e, unsigned n)
+{
+    movx_r(e, X0, XC);
+    movw(e, X1, n);
+    movx(e, W9, (uint64_t)(uintptr_t)jit_cond);
+    E(e, 0xD63F0000u | 9u << 5); /* blr x9 */
+}
+
+/* x13 = la dirección en el host del operando de memoria de 4 bytes (o al lento) */
+static void mem_addr4(Em *e, const Insn *in, bool write, uint32_t **s1, uint32_t **s2, uint32_t **s3)
+{
+    emit_ea(e, in, true);
+    emit_page(e, write, s1, s2, s3);
+    E(e, 0x8B0B014Du); /* add x13, x10, x11 */
+}
+
 /* Las enteras nuevas; *ret: lo que devuelve emit_insn (false: puso el EIP). */
 static bool emit_int(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned prev, bool *ret)
 {
     const Insn *in = &b->in[i];
     InsnFn f = in->fn;
     *ret = true;
+    uint32_t *s1, *s2, *s3;
+    /* alu de 32 bits con memoria: [m] op= reg/imm, cmp [m], test [m] */
+    if (((f == x_alu_ei || f == x_alu_eg) && in->sz == 4 && !in->is_reg && alu_native(in->aop)) ||
+        ((f == x_test_ei || f == x_test_eg) && in->sz == 4 && !in->is_reg)) {
+        bool test = f == x_test_ei || f == x_test_eg;
+        unsigned aop = test ? OP_AND : in->aop;
+        bool wr = !test && aop != OP_CMP;
+        mem_addr4(e, in, wr, &s1, &s2, &s3);
+        if (f == x_alu_eg || f == x_test_eg) {
+            ldrw(e, W10, XC, ROFF(in->reg));
+        } else {
+            movw(e, W10, in->imm);
+        }
+        ldrw(e, W9, W13, 0);
+        emit_alu_op(e, aop);
+        if (wr) {
+            strw(e, W11, W13, 0);
+        }
+        uint32_t *done = fwd_b(e);
+        fallback_tail(e, b, i, vm, done, s1, s2, s3);
+        return true;
+    }
+    if (f == x_incdec && in->sz == 4 && !in->is_reg) {
+        emit_cf(e, prev);
+        mem_addr4(e, in, true, &s1, &s2, &s3);
+        ldrw(e, W9, W13, 0);
+        if (in->aop) {
+            subwi(e, W11, W9, 1);
+        } else {
+            addwi(e, W11, W9, 1);
+        }
+        strw(e, W11, W13, 0);
+        movw(e, W10, 1);
+        emit_lf_cin(e, in->aop ? LF_DEC : LF_INC);
+        uint32_t *done = fwd_b(e);
+        fallback_tail(e, b, i, vm, done, s1, s2, s3);
+        return true;
+    }
+    /* jcc tras inc/dec/desplazamientos de aquí: con los flags de ARM64 */
+    if (f == x_jcc && (prev == LF_INC || prev == LF_DEC || prev == LF_SHL || prev == LF_SHR || prev == LF_SAR) &&
+        emit_jcc_more(e, in, prev)) {
+        *ret = false;
+        return true;
+    }
+    /* jcc, setcc y cmov con flags de antes del bloque: la condición en C */
+    if (f == x_jcc) {
+        emit_cond_call(e, in->aop);
+        movw(e, W12, in->next);
+        movw(e, W13, in->imm);
+        E(e, 0x7100001Fu); /* cmp w0, #0 */
+        E(e, 0x1A800000u | (uint32_t)W12 << 16 | (uint32_t)COND_NE << 12 | (uint32_t)W13 << 5 | (uint32_t)W12);
+        strw(e, W12, XC, OFF(eip));
+        *ret = false;
+        return true;
+    }
+    if (f == x_setcc && in->is_reg) {
+        emit_cond_call(e, in->aop);
+        strb(e, X0, XC, r8off(in->rm));
+        return true;
+    }
+    if (f == x_cmov && in->sz == 4 && in->is_reg) {
+        emit_cond_call(e, in->aop);
+        ldrw(e, W12, XC, ROFF(in->reg));
+        ldrw(e, W13, XC, ROFF(in->rm));
+        E(e, 0x7100001Fu); /* cmp w0, #0 */
+        E(e, 0x1A800000u | (uint32_t)W12 << 16 | (uint32_t)COND_NE << 12 | (uint32_t)W13 << 5 | (uint32_t)W12);
+        strw(e, W12, XC, ROFF(in->reg));
+        return true;
+    }
+    /* call / jmp / push indirectos (FF /2 /4 /6) de 32 bits */
+    if (f == x_call_e || f == x_jmp_e || (f == x_push_e && in->sz == 4)) {
+        uint32_t *t1 = NULL, *t2 = NULL, *t3 = NULL;
+        if (in->is_reg) {
+            ldrw(e, W14, XC, ROFF(in->rm));
+        } else {
+            mem_addr4(e, in, false, &t1, &t2, &t3);
+            ldrw(e, W14, W13, 0);
+        }
+        uint32_t *p1 = NULL, *p2 = NULL, *p3 = NULL;
+        if (f != x_jmp_e) { /* push (la siguiente o el valor) */
+            ldrw(e, W9, XC, ROFF(R_ESP));
+            subwi(e, W9, W9, 4);
+            emit_page(e, true, &p1, &p2, &p3);
+            if (f == x_call_e) {
+                movw(e, W12, in->next);
+                strw_r(e, W12, W10, W11);
+            } else {
+                strw_r(e, W14, W10, W11);
+            }
+            strw(e, W9, XC, ROFF(R_ESP));
+        }
+        if (f != x_push_e) {
+            strw(e, W14, XC, OFF(eip));
+            *ret = false;
+        }
+        Slow sl = {{0}, 0};
+        uint32_t *all[6] = {t1, t2, t3, p1, p2, p3};
+        for (unsigned k = 0; k < 6; k++) {
+            if (all[k]) {
+                slow_add(e, &sl, all[k]);
+            }
+        }
+        slow_tail(e, b, i, vm, &sl);
+        return true;
+    }
     if (f == x_incdec && in->sz == 4 && in->is_reg) {
         emit_cf(e, prev);
         ldrw(e, W9, XC, ROFF(in->rm));
@@ -917,13 +1041,6 @@ static bool emit_int(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned p
         emit_lf_cin(e, in->aop == 5 ? LF_SHR : in->aop == 7 ? LF_SAR : LF_SHL);
         return true;
     }
-    if (f == x_jcc && (prev == LF_INC || prev == LF_DEC || prev == LF_SHL || prev == LF_SHR || prev == LF_SAR)) {
-        if (emit_jcc_more(e, in, prev)) {
-            *ret = false;
-            return true;
-        }
-        return false;
-    }
     if (f == x_jmp) {
         movw(e, W12, in->imm);
         strw(e, W12, XC, OFF(eip));
@@ -931,7 +1048,6 @@ static bool emit_int(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned p
         return true;
     }
     if (f == x_call || (f == x_ret && in->imm < 4092)) {
-        uint32_t *s1, *s2, *s3;
         ldrw(e, W9, XC, ROFF(R_ESP));
         if (f == x_call) {
             subwi(e, W9, W9, 4);

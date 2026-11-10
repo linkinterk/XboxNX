@@ -2352,6 +2352,7 @@ static bool ends_block(InsnFn f)
 }
 
 static uint64_t g_decodes; /* bloques decodificados (para la pantalla) */
+static uint64_t g_compile_ticks; /* tiempo traduciendo al JIT */
 
 static inline uint32_t nb_end_off(const Insn *in, unsigned n)
 {
@@ -2465,6 +2466,14 @@ void cpu_jit_stats(CpuJitStats *s)
     s->flushes = g_jit.epoch ? g_jit.epoch - 1 : 0;
 #endif
     s->decodes = g_decodes;
+    s->compile_ticks = g_compile_ticks;
+#if defined(__aarch64__)
+    uint64_t f;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    s->ticks_per_s = f;
+#else
+    s->ticks_per_s = 1000000000ull; /* aproximado */
+#endif
 }
 
 /* Qué instrucciones gastan más fuera del código nativo: las que el JIT
@@ -2538,18 +2547,51 @@ void cpu_jit_range(uintptr_t *rx, size_t *size)
 }
 
 /* Hasta max instrucciones por bloques; las demás, una a una en step(). */
+/* El reloj de la CPU del host (para medir dónde se va el tiempo). */
+static inline uint64_t cpu_tick(void)
+{
+#if defined(__aarch64__)
+    uint64_t v;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+#elif defined(__x86_64__) || defined(__i386__)
+    return __builtin_ia32_rdtsc();
+#else
+    return 0;
+#endif
+}
+
+
 static CpuStop run_blocks(Cpu *c, uint64_t max)
 {
     uint64_t done = 0;
+    uint64_t t_iter = 0; /* principio de la vuelta medida (0: esta no se mide) */
+    c->st_runs++;
     while (done < max) {
+        if (t_iter) {
+            c->st_t_all += cpu_tick() - t_iter;
+            t_iter = 0;
+        }
+        bool smp = (++c->st_disp & 63) == 0;
+        if (smp) {
+            t_iter = cpu_tick();
+        }
         if (c->yield && *c->yield) {
             return CPU_LIMIT; /* el hardware pidió una interrupción */
         }
         Block *b = get_block(c, c->eip);
+        if (smp) {
+            c->st_t_get += cpu_tick() - t_iter;
+        }
         if (!b || !b->n) {
+            uint64_t t0 = smp ? cpu_tick() : 0;
             if (step(c) != CPU_RUNNING) {
                 return c->stop;
             }
+            if (smp) {
+                c->st_t_step += cpu_tick() - t0;
+            }
+            c->st_steps++;
             done++;
             continue;
         }
@@ -2574,10 +2616,17 @@ static CpuStop run_blocks(Cpu *c, uint64_t max)
         if (c->jit_hot) {
             bool have = b->jit && b->jit_epoch == g_jit.epoch;
             if (!have && ++b->hits >= c->jit_hot) {
+                uint64_t t0 = cpu_tick();
                 have = jit_compile(c, b);
+                g_compile_ticks += cpu_tick() - t0;
             }
             if (have && done + b->n <= max) {
+                uint64_t t0 = smp ? cpu_tick() : 0;
                 unsigned k = ((JitFn)b->jit)(c);
+                if (smp) {
+                    c->st_t_jit += cpu_tick() - t0;
+                }
+                c->st_jit++;
                 c->icount += k;
                 done += k;
                 if (c->stop != CPU_RUNNING) {
@@ -2591,15 +2640,21 @@ static CpuStop run_blocks(Cpu *c, uint64_t max)
                 }
                 const Insn *last = &b->in[b->n - 1];
                 if (k == b->n && done < max && !ends_block(last->fn) && c->eip == last->next) {
+                    uint64_t t1 = smp ? cpu_tick() : 0;
                     if (step(c) != CPU_RUNNING) { /* la siguiente no tenía función */
                         return c->stop;
                     }
+                    if (smp) {
+                        c->st_t_step += cpu_tick() - t1;
+                    }
+                    c->st_steps++;
                     done++;
                 }
                 continue;
             }
         }
 #endif
+        uint64_t ti = smp ? cpu_tick() : 0;
         unsigned i = 0;
         for (; i < b->n && done < max; i++) {
             const Insn *in = &b->in[i];
@@ -2622,13 +2677,24 @@ static CpuStop run_blocks(Cpu *c, uint64_t max)
                 break; /* se escribió en el código de este bloque */
             }
         }
+        if (smp) {
+            c->st_t_int += cpu_tick() - ti;
+        }
         if (i == b->n && done < max && !ends_block(b->in[b->n - 1].fn) && c->eip == b->in[b->n - 1].next) {
             /* la siguiente no tenía función: el intérprete */
+            uint64_t t1 = smp ? cpu_tick() : 0;
             if (step(c) != CPU_RUNNING) {
                 return c->stop;
             }
+            if (smp) {
+                c->st_t_step += cpu_tick() - t1;
+            }
+            c->st_steps++;
             done++;
         }
+    }
+    if (t_iter) {
+        c->st_t_all += cpu_tick() - t_iter;
     }
     return CPU_LIMIT;
 }

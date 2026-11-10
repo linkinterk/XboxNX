@@ -97,6 +97,11 @@ typedef struct Cpu {
     void *blocks;               /* su tabla (cpu.c) */
     uint32_t fetch_page;        /* la página del código en curso (cpu.c) */
     const uint8_t *fetch_host;
+    /* dónde se va el tiempo (para la pantalla): cuentas y, en 1 de cada 64
+     * vueltas (1 de cada 64) de run_blocks, el tiempo de cada parte (ticks del reloj) */
+    uint64_t st_disp, st_jit, st_steps, st_runs;
+    uint64_t st_ccall, st_cfb;          /* el JIT llamó a C: lentas / de respaldo */
+    uint64_t st_t_all, st_t_jit, st_t_int, st_t_step, st_t_get;
 } Cpu;
 
 void cpu_init(Cpu *c, Vm *vm);
@@ -115,6 +120,7 @@ typedef struct CpuJitStats {
     size_t used, size;
     uint32_t flushes;
     uint64_t decodes;  /* bloques decodificados (con o sin JIT) */
+    uint64_t compile_ticks, ticks_per_s; /* tiempo traduciendo */
 } CpuJitStats;
 void cpu_jit_stats(CpuJitStats *s);
 #define CPU_PROF_TOP 10

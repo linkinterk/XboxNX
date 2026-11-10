@@ -789,7 +789,7 @@ static void draw_xbox_screen(const UiState *s)
                  (unsigned long long)sw->triangles, (unsigned long long)sw->pixels, sw->skipped_ff, sw->no_target,
                  sw->no_target_why, (unsigned)sw->surf_format, (unsigned)sw->surf_pitch, (unsigned)sw->clip_h,
                  (unsigned)sw->clip_v, sw->vs_errors, (unsigned)hw_scanout());
-        gfx_rrect(14, ly - 4, UI_W - 28, 254, 10, WITH_ALPHA(HEX(0x000000), 200));
+        gfx_rrect(14, ly - 4, UI_W - 28, 276, 10, WITH_ALPHA(HEX(0x000000), 200));
         gfx_text_fit(24, ly, 16, UI_W - 48, C_ON, e);
         ly += 22;
         snprintf(e, sizeof(e), "Último: prim %u, %u vértices, %llu tri, %llu px, %u ocultos, %u tras Z · destino %08X pitch %u fmt %X · Z %08X",
@@ -859,6 +859,26 @@ static void draw_xbox_screen(const UiState *s)
                  (unsigned long long)r->cpu.vm->rewrites);
         gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
         ly += 22;
+        /* dónde se va el tiempo del CPU (muestreado en run_blocks) */
+        {
+            const Cpu *cc = &r->cpu;
+            double all = (double)cc->st_t_all;
+            double jit = all > 0 ? 100.0 * (double)cc->st_t_jit / all : 0;
+            double in = all > 0 ? 100.0 * (double)cc->st_t_int / all : 0;
+            double sp = all > 0 ? 100.0 * (double)cc->st_t_step / all : 0;
+            double gb = all > 0 ? 100.0 * (double)cc->st_t_get / all : 0;
+            double nb = (double)(cc->st_disp ? cc->st_disp : 1);
+            double ns_blk = js.ticks_per_s && cc->st_disp ? (double)cc->st_t_all * 64.0 / nb * 1e9 / (double)js.ticks_per_s : 0;
+            snprintf(e, sizeof(e),
+                     "Tiempo CPU: traducido %.0f%%, bloques sin traducir %.0f%%, intérprete suelto %.0f%%, buscar bloque %.0f%%, resto %.0f%% · %.0f ns por vuelta · %.1fM vueltas (%.0f%% JIT), %.1fM sueltas · C: %.2f lentas y %.2f de respaldo por bloque · %.1fM llamadas a cpu_run · traducir %.1f s",
+                     jit, in, sp, gb, 100.0 - jit - in - sp - gb, ns_blk, nb / 1e6,
+                     100.0 * (double)cc->st_jit / nb, cc->st_steps / 1e6,
+                     cc->st_jit ? (double)cc->st_ccall / (double)cc->st_jit : 0.0,
+                     cc->st_jit ? (double)cc->st_cfb / (double)cc->st_jit : 0.0, cc->st_runs / 1e6,
+                     js.ticks_per_s ? (double)js.compile_ticks / (double)js.ticks_per_s : 0.0);
+            gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
+            ly += 22;
+        }
         /* el perfil del CPU: qué instrucciones se quedan fuera del JIT (cada ~60 dibujos de la pantalla) */
         {
             static CpuProfile pf;
