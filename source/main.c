@@ -30,7 +30,7 @@
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.27"
+#define APP_VER   "0.18.28"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -64,12 +64,21 @@ static void gpu_log_close(void)
 /* true: se puede intentar el GPU */
 static bool gpu_check_previous(bool forzar)
 {
-    if (forzar) {
-        remove(GPU_FALLO);
-    }
     FILE *f = fopen(GPU_FALLO, "r");
     if (f) {
+        /* cada versión nueva vuelve a probar (puede traer el arreglo) */
+        char v[64] = "";
+        if (!fgets(v, sizeof(v), f)) {
+            v[0] = 0;
+        }
         fclose(f);
+        v[strcspn(v, "\r\n")] = 0;
+        if (forzar || strcmp(v, "v" APP_VER) != 0) {
+            remove(GPU_FALLO);
+            f = NULL;
+        }
+    }
+    if (f) {
         gpu_set_info("apagada: la vez pasada se cerró al iniciarla (ZR al abrir para reintentar)");
         return false;
     }
@@ -78,6 +87,10 @@ static bool gpu_check_previous(bool forzar)
         return true;
     }
     char line[200], last[200] = "";
+    if (!fgets(line, sizeof(line), f) || strncmp(line, "v" APP_VER, strlen("v" APP_VER)) != 0) {
+        fclose(f); /* de otra versión: se vuelve a probar */
+        return true;
+    }
     while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\r\n")] = 0;
         if (line[0]) {
@@ -199,8 +212,11 @@ static void present(void)
     prof_push(PROF_UI);
     ui_draw(&g_ui);
     if (!g_use_fb) {
+        if (g_gpu_log && g_gpu_frames == 0) {
+            gpu_log_line("primer cuadro");
+        }
         gpu_present_ui(g_shadow, UI_W, UI_H); /* 4c: la ventana es de OpenGL */
-        if (g_gpu_log && ++g_gpu_frames == 30) { /* ya se vio el menú: el GPU sirve */
+        if (g_gpu_log && ++g_gpu_frames == 2) { /* ya se mostró el menú: el GPU sirve */
             gpu_log_line("listo");
             gpu_log_close();
         }
@@ -357,6 +373,7 @@ int main(int argc, char **argv)
     if (probar) {
         g_gpu_log = fopen(GPU_LOG, "w");
         gpu_log = gpu_log_line;
+        gpu_log_line("v" APP_VER);
     }
     if (probar && gpu_init(nwindowGetDefault())) {
         g_use_fb = false;
