@@ -129,6 +129,8 @@ typedef struct Hw {
     uint32_t sem_inst, sem_offset, report_inst;
     /* la superficie de color (para borrarla por software) */
     uint32_t color_inst, surf_format, surf_pitch, color_offset, clip_h, clip_v;
+    uint32_t last_target;   /* el destino de color del último cuadro terminado */
+    uint32_t shown;         /* lo que se mostró la última vez (hw_screen) */
     uint32_t clear_value, clear_h, clear_v;
     /* lo que se ve: AvSetDisplayMode y PCRTC_START */
     uint32_t av_format, av_pitch, av_fb;
@@ -435,6 +437,9 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         uint32_t mod = surf_get(SURF_MODULO);
         surf_set(SURF_WRITE, mod ? (surf_get(SURF_WRITE) + 1) % mod : 0);
         g_hw.st.flips++;
+        if (g_hw.color_inst) {
+            g_hw.last_target = dma_base(g_hw.color_inst) + g_hw.color_offset;
+        }
         g_hw.st.last = g_hw.cur; /* el cuadro terminado */
         g_hw.st.total_draws += g_hw.cur.draws;
         memset(&g_hw.cur, 0, sizeof(g_hw.cur));
@@ -873,6 +878,21 @@ bool hw_screen(const Kernel *k, XImage *out)
         out->h = h;
     }
     uint32_t start = nv_ld(NV_PCRTC_START) & (VM_RAM_SIZE - 1);
+    /* Si lo que apunta PCRTC está todo negro (todavía no se pintó o el
+     * flip no llegó) y hay un cuadro terminado en otro lado, ese. */
+    uint32_t alt = g_hw.last_target & (VM_RAM_SIZE - 1);
+    if (alt && alt != start && start + pitch * (uint32_t)h <= VM_RAM_SIZE && alt + pitch * (uint32_t)h <= VM_RAM_SIZE) {
+        bool black = true;
+        for (int i = 0; i < 257 && black; i++) {
+            uint32_t y = (uint32_t)(i * 37) % (uint32_t)h, x = (uint32_t)(i * 101) % (uint32_t)w;
+            const uint8_t *q = k->vm->ram + start + y * pitch + x * bpp;
+            black = !(q[0] | q[1] | (bpp == 4 ? q[2] : 0));
+        }
+        if (black) {
+            start = alt;
+        }
+    }
+    g_hw.shown = start;
     for (int y = 0; y < h; y++) {
         uint8_t *d = out->px + (size_t)y * w * 4;
         uint32_t row = start + (uint32_t)y * pitch;
@@ -904,3 +924,5 @@ bool hw_screen(const Kernel *k, XImage *out)
 }
 
 uint32_t hw_scanout(void) { return g_hw.nv ? nv_ld(NV_PCRTC_START) : 0; }
+uint32_t hw_shown(void) { return g_hw.shown; }
+uint32_t hw_last_target(void) { return g_hw.last_target; }

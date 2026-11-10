@@ -755,8 +755,10 @@ static void draw_xbox_screen(const UiState *s)
             h = img.h * w / img.w;
         }
         gfx_image(&img, (UI_W - w) / 2, 34, w, h, 0);
-        snprintf(b, sizeof(b), "Pantalla del Xbox  ·  %dx%d  ·  %u cuadros  ·  %u borrados  ·  %u flips  ·  %.2f s del juego",
-                 img.w, img.h, hs->frames, hs->clears, hs->flips, kn->now_ns / 1e9);
+        snprintf(b, sizeof(b), "Pantalla del Xbox  ·  %dx%d  ·  PCRTC %08X%s  ·  %u cuadros  ·  %u flips  ·  %.2f s del juego",
+                 img.w, img.h, (unsigned)hw_scanout(),
+                 hw_shown() != (hw_scanout() & (VM_RAM_SIZE - 1u)) ? " (negro: se ve el último dibujado)" : "", hs->frames,
+                 hs->flips, kn->now_ns / 1e9);
         /* lo que el último cuadro pidió dibujar */
         const HwDraws *dw = &hs->last;
         static const char *pn[16] = {"", "puntos", "líneas", "lazo", "tira-l", "triángulos", "tira", "abanico",
