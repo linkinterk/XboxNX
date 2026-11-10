@@ -1412,7 +1412,7 @@ done:
 
 #define NOREG 8
 #define BLK_MAX 64
-#define BLK_HASH 65536 /* con 16384, bloques calientes se echaban unos a otros (y se volvían a traducir) */
+#define BLK_HASH (1u << 19) /* Halo 2 tiene cientos de miles de bloques: con 65536 se echaban unos a otros y se volvían a traducir */
 
 typedef struct Insn Insn;
 typedef void (*InsnFn)(Cpu *c, const Insn *in);
@@ -1435,6 +1435,8 @@ typedef struct Block {
     bool spin;            /* un bucle sobre sí mismo que solo lee y compara */
     uint32_t jit_epoch;   /* del búfer del JIT en que se tradujo */
     uint32_t hits;        /* veces que corrió sin traducción */
+    uint32_t execs;       /* veces que corrió (para el perfil) */
+    uint64_t slow;        /* JIT: instrucciones que llaman a su función de C (bit i) */
     Insn in[];
 } Block;
 
@@ -2398,6 +2400,8 @@ static Block *get_block(Cpu *c, uint32_t eip)
     nb->jit = NULL;
     nb->jit_epoch = 0;
     nb->hits = 0;
+    nb->execs = 0;
+    nb->slow = ~0ull;
     memcpy(nb->in, tmp, n * sizeof(Insn));
     nb->spin = is_spin(nb);
     s->eip = eip;
@@ -2421,6 +2425,64 @@ void cpu_jit_stats(CpuJitStats *s)
     s->flushes = g_jit.epoch ? g_jit.epoch - 1 : 0;
 #endif
     s->decodes = g_decodes;
+}
+
+/* Qué instrucciones gastan más fuera del código nativo: las que el JIT
+ * deja a su función de C (o que corren sin traducir), pesadas por las veces
+ * que corrió su bloque. Clave: el byte del opcode (0F xx: 256 + xx). */
+void cpu_profile(Cpu *c, CpuProfile *p)
+{
+    static uint64_t w[512];
+    memset(w, 0, sizeof(w));
+    memset(p, 0, sizeof(*p));
+    BlockSlot *tab = c->blocks;
+    if (!tab) {
+        return;
+    }
+    for (unsigned i = 0; i < BLK_HASH; i++) {
+        const Block *b = tab[i].b;
+        if (!b || !b->execs) {
+            continue;
+        }
+        p->insns += (uint64_t)b->execs * b->n;
+        p->blocks += b->execs;
+        for (unsigned k = 0; k < b->n; k++) {
+            if (!((b->slow >> (k & 63)) & 1)) {
+                continue;
+            }
+            p->slow += b->execs;
+            uint8_t by[4] = {0};
+            uint32_t a = b->in[k].start;
+            vm_read(c->vm, a, by, 1);
+            for (int j = 0; j < 4 && (by[0] == 0x66 || by[0] == 0xF2 || by[0] == 0xF3 || by[0] == 0xF0 ||
+                                       by[0] == 0x2E || by[0] == 0x3E || by[0] == 0x26 || by[0] == 0x36 ||
+                                       by[0] == 0x64 || by[0] == 0x65);
+                 j++) {
+                vm_read(c->vm, ++a, by, 1);
+            }
+            unsigned key = by[0];
+            if (by[0] == 0x0F) {
+                vm_read(c->vm, a + 1, by + 1, 1);
+                key = 256 + by[1];
+            }
+            w[key] += b->execs;
+        }
+    }
+    for (int t = 0; t < CPU_PROF_TOP; t++) {
+        unsigned best = 0;
+        for (unsigned k = 1; k < 512; k++) {
+            if (w[k] > w[best]) {
+                best = k;
+            }
+        }
+        if (!w[best]) {
+            break;
+        }
+        p->op[t] = (uint16_t)(best >= 256 ? 0x0F00 | (best - 256) : best);
+        p->count[t] = w[best];
+        w[best] = 0;
+        p->n++;
+    }
 }
 
 void cpu_jit_range(uintptr_t *rx, size_t *size)
@@ -2452,6 +2514,7 @@ static CpuStop run_blocks(Cpu *c, uint64_t max)
             continue;
         }
         c->trace[c->trace_pos++ % CPU_TRACE] = b->eip;
+        b->execs++;
         if (b->spin) {
             /* la misma vuelta con los mismos registros: espera algo de fuera */
             if (c->spin_eip == b->eip && !memcmp(c->spin_r, c->r, sizeof(c->r))) {

@@ -15,7 +15,7 @@
 
 typedef uint32_t (*JitFn)(Cpu *c);
 
-#define JIT_SIZE_MAX (32u << 20)
+#define JIT_SIZE_MAX (128u << 20) /* con 32 MB, Halo 2 lo vaciaba decenas de veces */
 
 static struct {
     uint8_t *rw, *rx;
@@ -240,6 +240,7 @@ static void emit_page(Em *e, bool write, uint32_t **slow1, uint32_t **slow2, uin
 static void emit_call(Em *e, const Block *b, unsigned i, const Vm *vm)
 {
     const Insn *in = &b->in[i];
+    ((Block *)b)->slow |= 1ull << (i & 63); /* para el perfil */
     /* el intérprete (rdtsc, por ejemplo) ve icount como si fuera de una en una */
     bool icnt = in->fn == x_interp && i > 0;
     if (icnt) {
@@ -484,6 +485,7 @@ static bool jit_compile(Cpu *c, Block *b)
     }
     jit_begin_write();
     for (int attempt = 0; attempt < 2; attempt++) {
+        b->slow = 0;
         Em e;
         e.p = (uint32_t *)(g_jit.rw + g_jit.used);
         e.end = (uint32_t *)(g_jit.rw + g_jit.size);

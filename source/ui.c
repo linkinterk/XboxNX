@@ -788,7 +788,7 @@ static void draw_xbox_screen(const UiState *s)
                  (unsigned long long)sw->triangles, (unsigned long long)sw->pixels, sw->skipped_ff, sw->no_target,
                  sw->no_target_why, (unsigned)sw->surf_format, (unsigned)sw->surf_pitch, (unsigned)sw->clip_h,
                  (unsigned)sw->clip_v, sw->vs_errors, (unsigned)hw_scanout());
-        gfx_rrect(14, ly - 4, UI_W - 28, 210, 10, WITH_ALPHA(HEX(0x000000), 200));
+        gfx_rrect(14, ly - 4, UI_W - 28, 232, 10, WITH_ALPHA(HEX(0x000000), 200));
         gfx_text_fit(24, ly, 16, UI_W - 48, C_ON, e);
         ly += 22;
         snprintf(e, sizeof(e), "Último: prim %u, %u vértices, %llu tri, %llu px, %u ocultos, %u tras Z · destino %08X pitch %u fmt %X · Z %08X",
@@ -855,6 +855,23 @@ static void draw_xbox_screen(const UiState *s)
                  js.size / 1048576.0, js.flushes, (unsigned long long)js.decodes,
                  (unsigned long long)r->cpu.vm->rewrites);
         gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
+        ly += 22;
+        /* el perfil del CPU: qué instrucciones se quedan fuera del JIT (cada ~60 dibujos de la pantalla) */
+        {
+            static CpuProfile pf;
+            static unsigned tick;
+            if (tick++ % 60 == 0) {
+                cpu_profile((Cpu *)&r->cpu, &pf);
+            }
+            int o3 = snprintf(e, sizeof(e), "Lentas: %.0f%% de %.0fM instr, %.1f por bloque ·",
+                              pf.insns ? 100.0 * (double)pf.slow / (double)pf.insns : 0.0, pf.insns / 1e6,
+                              pf.blocks ? (double)pf.insns / (double)pf.blocks : 0.0);
+            for (unsigned t = 0; t < pf.n && o3 < (int)sizeof(e) - 16; t++) {
+                o3 += snprintf(e + o3, sizeof(e) - (size_t)o3, pf.op[t] > 0xFF ? " 0F%02X %.0f%%" : " %02X %.0f%%",
+                               pf.op[t] & 0xFF, pf.insns ? 100.0 * (double)pf.count[t] / (double)pf.insns : 0.0);
+            }
+            gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
+        }
     } else {
         snprintf(b, sizeof(b), "Pantalla del Xbox: el juego todavía no eligió un modo de video");
         gfx_text_center(0, UI_W, 330, 22, C_ON_VAR, "Todavía no hay imagen");
