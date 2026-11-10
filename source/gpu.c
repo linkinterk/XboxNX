@@ -1,5 +1,6 @@
 /* XboxNX — etapa 4c: el dibujo del NV2A con OpenGL (ver gpu.h). */
 #include "gpu.h"
+#include <stdio.h>
 
 #ifndef XBOXNX_NO_GL /* las pruebas en la PC compilan sin GL: ver el final */
 
@@ -111,6 +112,7 @@ bool gpu_ready(void) { return G.ready; }
 void gpu_enable(bool on) { G.on = on && G.ready; }
 bool gpu_enabled(void) { return G.on; }
 const char *gpu_info(void) { return G.info; }
+void gpu_set_info(const char *t) { snprintf(G.info, sizeof(G.info), "%s", t); }
 
 void gpu_set_ram(uint8_t *ram, uint32_t size)
 {
@@ -185,19 +187,20 @@ static const char *k_fs =
     "  if (f == 0x203u) return a <= b; if (f == 0x204u) return a > b; if (f == 0x205u) return a != b;\n"
     "  if (f == 0x206u) return a >= b; return true;\n"
     "}\n"
-    "#define STAGE(S, V, S2, SC) if (u_tmode[S] != 0) { vec4 tc = V; int md = u_tmode[S];\\\n"
-    "  if (md == 4) R[8 + S] = clamp(tc, 0.0, 1.0);\\\n"
-    "  else if (md == 3 && u_tcube[S] != 0) R[8 + S] = texture(SC, tc.xyz);\\\n"
-    "  else { vec2 uv = tc.xy; if (md == 1 && tc.w != 0.0 && tc.w != 1.0) uv /= tc.w;\\\n"
-    "         R[8 + S] = texture(S2, uv * u_tscale[S]); } }\n"
+    "vec4 stage(int md, int cube, vec2 sc, vec4 tc, sampler2D s2, samplerCube scb) {\n"
+    "  if (md == 4) return clamp(tc, 0.0, 1.0);\n"
+    "  if (md == 3 && cube != 0) return texture(scb, tc.xyz);\n"
+    "  vec2 uv = tc.xy; if (md == 1 && tc.w != 0.0 && tc.w != 1.0) uv /= tc.w;\n"
+    "  return texture(s2, uv * sc);\n"
+    "}\n"
     "void main() {\n"
     "  for (int i = 0; i < 16; i++) R[i] = vec4(0.0);\n"
     "  R[4] = clamp(v_c0, 0.0, 1.0); R[5] = clamp(v_c1, 0.0, 1.0);\n"
     "  R[3] = vec4(u_fog.rgb, 1.0);\n"
-    "  STAGE(0, v_t0, s2d0, scb0)\n"
-    "  STAGE(1, v_t1, s2d1, scb1)\n"
-    "  STAGE(2, v_t2, s2d2, scb2)\n"
-    "  STAGE(3, v_t3, s2d3, scb3)\n"
+    "  if (u_tmode[0] != 0) R[8] = stage(u_tmode[0], u_tcube[0], u_tscale[0], v_t0, s2d0, scb0);\n"
+    "  if (u_tmode[1] != 0) R[9] = stage(u_tmode[1], u_tcube[1], u_tscale[1], v_t1, s2d1, scb1);\n"
+    "  if (u_tmode[2] != 0) R[10] = stage(u_tmode[2], u_tcube[2], u_tscale[2], v_t2, s2d2, scb2);\n"
+    "  if (u_tmode[3] != 0) R[11] = stage(u_tmode[3], u_tcube[3], u_tscale[3], v_t3, s2d3, scb3);\n"
     "  R[12].a = R[8].a;\n"
     "  vec4 c;\n"
     "  uint n = u_cctl & 0xFFu;\n"
@@ -303,21 +306,62 @@ static GLuint link(const char *vs, const char *fs)
 
 /* ------------------------------------------------------------ EGL */
 
+void (*gpu_log)(const char *paso);
+#define PASO(t) (gpu_log ? gpu_log(t) : (void)0)
+
+static bool init_inner(void *nwin);
+
+/* Si algo falla a medias, se suelta todo: la ventana queda libre para el
+ * framebuffer de siempre. */
+static void teardown(void)
+{
+    if (G.dpy != EGL_NO_DISPLAY) {
+        eglMakeCurrent(G.dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        if (G.ctx != EGL_NO_CONTEXT) {
+            eglDestroyContext(G.dpy, G.ctx);
+        }
+        if (G.win != EGL_NO_SURFACE) {
+            eglDestroySurface(G.dpy, G.win);
+        }
+        eglTerminate(G.dpy);
+    }
+    G.dpy = EGL_NO_DISPLAY;
+    G.ctx = EGL_NO_CONTEXT;
+    G.win = EGL_NO_SURFACE;
+    G.ready = G.on = false;
+}
+
 bool gpu_init(void *nwin)
 {
     if (G.ready) {
         return true;
     }
+    G.dpy = EGL_NO_DISPLAY;
+    G.ctx = EGL_NO_CONTEXT;
+    G.win = EGL_NO_SURFACE;
+    if (init_inner(nwin)) {
+        return true;
+    }
+    PASO("falló, se suelta EGL");
+    teardown();
+    return false;
+}
+
+static bool init_inner(void *nwin)
+{
+    PASO("eglGetDisplay");
 #ifdef __SWITCH__
     G.dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
 #else
     PFNEGLGETPLATFORMDISPLAYEXTPROC gpd = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     G.dpy = gpd ? gpd(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL) : eglGetDisplay(EGL_DEFAULT_DISPLAY);
 #endif
+    PASO("eglInitialize");
     if (G.dpy == EGL_NO_DISPLAY || !eglInitialize(G.dpy, NULL, NULL)) {
         snprintf(G.info, sizeof(G.info), "EGL: sin pantalla");
         return false;
     }
+    PASO("eglBindAPI");
     if (!eglBindAPI(EGL_OPENGL_API)) {
         snprintf(G.info, sizeof(G.info), "EGL: sin OpenGL");
         return false;
@@ -326,12 +370,14 @@ bool gpu_init(void *nwin)
                          EGL_ALPHA_SIZE, 8, EGL_SURFACE_TYPE, nwin ? EGL_WINDOW_BIT : EGL_PBUFFER_BIT, EGL_NONE};
     EGLConfig cfg;
     EGLint n = 0;
+    PASO("eglChooseConfig");
     if (!eglChooseConfig(G.dpy, cfg_attr, &cfg, 1, &n) || n < 1) {
         snprintf(G.info, sizeof(G.info), "EGL: sin configuración");
         return false;
     }
     G.win = EGL_NO_SURFACE;
     if (nwin) {
+        PASO("eglCreateWindowSurface");
         G.win = eglCreateWindowSurface(G.dpy, cfg, (EGLNativeWindowType)nwin, NULL);
         if (G.win == EGL_NO_SURFACE) {
             snprintf(G.info, sizeof(G.info), "EGL: sin superficie (0x%X)", (unsigned)eglGetError());
@@ -340,16 +386,19 @@ bool gpu_init(void *nwin)
     }
     EGLint ctx_attr[] = {EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR,
                          EGL_CONTEXT_MAJOR_VERSION_KHR, 3, EGL_CONTEXT_MINOR_VERSION_KHR, 3, EGL_NONE};
+    PASO("eglCreateContext 3.3");
     G.ctx = eglCreateContext(G.dpy, cfg, EGL_NO_CONTEXT, ctx_attr);
     if (G.ctx == EGL_NO_CONTEXT) {
         snprintf(G.info, sizeof(G.info), "EGL: sin contexto 3.3 (0x%X)", (unsigned)eglGetError());
         return false;
     }
+    PASO("eglMakeCurrent");
     if (!eglMakeCurrent(G.dpy, G.win, G.win, G.ctx)) {
         snprintf(G.info, sizeof(G.info), "EGL: no se pudo activar (0x%X)", (unsigned)eglGetError());
         return false;
     }
     const char *miss = "?";
+    PASO("cargar funciones GL");
     if (!gl_load(egl_proc, &miss)) {
         snprintf(G.info, sizeof(G.info), "GL: falta %s", miss);
         return false;
@@ -357,6 +406,7 @@ bool gpu_init(void *nwin)
     if (nwin) {
         eglSwapInterval(G.dpy, 0);
     }
+    PASO("shaders");
     G.prog = link(k_vs, k_fs);
     G.ui_prog = link(k_ui_vs, k_ui_fs);
     if (!G.prog || !G.ui_prog) {
@@ -376,6 +426,7 @@ bool gpu_init(void *nwin)
     }
     glUseProgram(G.ui_prog);
     glUniform1i(glGetUniformLocation(G.ui_prog, "t"), 0);
+    PASO("buffers");
     glGenVertexArrays(1, &G.vao);
     glGenVertexArrays(1, &G.ui_vao);
     glGenBuffers(1, &G.vbo);
@@ -1099,7 +1150,10 @@ bool gpu_init(void *nwin) { (void)nwin; return false; }
 bool gpu_ready(void) { return false; }
 void gpu_enable(bool on) { (void)on; }
 bool gpu_enabled(void) { return false; }
-const char *gpu_info(void) { return "sin GL"; }
+static char g_noinfo[160] = "sin GL";
+const char *gpu_info(void) { return g_noinfo; }
+void gpu_set_info(const char *t) { snprintf(g_noinfo, sizeof(g_noinfo), "%s", t); }
+void (*gpu_log)(const char *paso);
 bool gpu_draw(const GpuDraw *d) { (void)d; return false; }
 bool gpu_clear_color(uint32_t pa, uint32_t pitch, int h, int x0, int y0, int x1, int y1, uint32_t argb, unsigned mask)
 {

@@ -59,6 +59,9 @@ typedef struct GpuDraw {
 
 /* nwin: el NWindow de la Switch (NULL en la PC: sin ventana). */
 bool gpu_init(void *nwin);
+/* Opcional: recibe cada paso de gpu_init (para un registro en la SD). */
+extern void (*gpu_log)(const char *paso);
+void gpu_set_info(const char *t);
 bool gpu_ready(void);
 /* Activar/desactivar el dibujo por GPU (con GL listo). */
 void gpu_enable(bool on);

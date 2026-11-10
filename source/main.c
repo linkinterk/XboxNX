@@ -30,7 +30,7 @@
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.26"
+#define APP_VER   "0.18.27"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -142,6 +142,10 @@ static void present(void)
     ui_draw(&g_ui);
     if (!g_use_fb) {
         gpu_present_ui(g_shadow, UI_W, UI_H); /* 4c: la ventana es de OpenGL */
+        if (g_gpu_log && ++g_gpu_frames == 30) { /* ya se vio el menú: el GPU sirve */
+            gpu_log_line("listo");
+            gpu_log_close();
+        }
     } else {
         u32 stride;
         u8 *dst = framebufferBegin(&g_fb, &stride);
@@ -272,18 +276,106 @@ static void pad_to_xbox(PadState *pad, u64 h, NcPadState *ps)
     ps->ry = (int16_t)r.y;
 }
 
+/* ---- registro del arranque del GPU (sd:/switch/XboxNX/gpu.txt) ---- */
+#define GPU_LOG "sdmc:/switch/XboxNX/gpu.txt"
+#define GPU_FALLO "sdmc:/switch/XboxNX/gpu_fallo.txt"
+static FILE *g_gpu_log;
+static int g_gpu_frames; /* cuadros mostrados por OpenGL hasta escribir "listo" */
+
+static void gpu_log_line(const char *t)
+{
+    if (g_gpu_log) {
+        fprintf(g_gpu_log, "%s\n", t);
+        fflush(g_gpu_log);
+    }
+}
+
+static void gpu_log_close(void)
+{
+    if (g_gpu_log) {
+        fclose(g_gpu_log);
+        g_gpu_log = NULL;
+    }
+    gpu_log = NULL;
+}
+
+/* true: se puede intentar el GPU */
+static bool gpu_check_previous(bool forzar)
+{
+    if (forzar) {
+        remove(GPU_FALLO);
+    }
+    FILE *f = fopen(GPU_FALLO, "r");
+    if (f) {
+        fclose(f);
+        gpu_set_info("apagada: la vez pasada se cerró al iniciarla (ZR al abrir para reintentar)");
+        return false;
+    }
+    f = fopen(GPU_LOG, "r");
+    if (!f) {
+        return true;
+    }
+    char line[200], last[200] = "";
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        if (line[0]) {
+            snprintf(last, sizeof(last), "%s", line);
+        }
+    }
+    fclose(f);
+    if (strcmp(last, "listo") == 0) {
+        return true;
+    }
+    rename(GPU_LOG, GPU_FALLO);
+    char t[260];
+    snprintf(t, sizeof(t), "apagada: se cerró en \"%.100s\" (ZR al abrir para reintentar)", last);
+    gpu_set_info(t);
+    return false;
+}
+
 int main(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
 
     /* 4c: OpenGL en la ventana; si no se puede, el framebuffer de siempre
-     * y el dibujo por software */
-    if (gpu_init(nwindowGetDefault())) {
+     * y el dibujo por software. Si el intento anterior cerró la app a medias
+     * (gpu.txt sin "listo"), esta vez no se intenta: queda gpu_fallo.txt.
+     * Para volver a probar: borrar gpu_fallo.txt o abrir con ZR apretado. */
+    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+    PadState pad0;
+    padInitializeDefault(&pad0);
+    for (int i = 0; i < 3; i++) {
+        padUpdate(&pad0);
+        svcSleepThread(10000000ULL);
+    }
+    bool forzar = (padGetButtons(&pad0) & HidNpadButton_ZR) != 0;
+    mkdir("sdmc:/switch", 0777);
+    mkdir("sdmc:/switch/XboxNX", 0777);
+    bool probar = gpu_check_previous(forzar);
+    if (probar) {
+        g_gpu_log = fopen(GPU_LOG, "w");
+        gpu_log = gpu_log_line;
+    }
+    if (probar && gpu_init(nwindowGetDefault())) {
         g_use_fb = false;
+        gpu_log_line("activa");
+        gpu_log_line(gpu_info());
     } else {
-        framebufferCreate(&g_fb, nwindowGetDefault(), UI_W, UI_H, PIXEL_FORMAT_RGBA_8888, 2);
-        framebufferMakeLinear(&g_fb);
+        if (probar) {
+            gpu_log_line(gpu_info());
+        }
+        Result fr = framebufferCreate(&g_fb, nwindowGetDefault(), UI_W, UI_H, PIXEL_FORMAT_RGBA_8888, 2);
+        if (R_SUCCEEDED(fr)) {
+            framebufferMakeLinear(&g_fb);
+        }
+        if (probar) {
+            char t[64];
+            snprintf(t, sizeof(t), "framebuffer 0x%X", (unsigned)fr);
+            gpu_log_line(t);
+            gpu_log_line("listo");
+            gpu_log_close();
+        }
     }
     gfx_target(g_shadow, UI_W, UI_H, UI_W);
 
