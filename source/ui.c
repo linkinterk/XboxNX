@@ -12,6 +12,7 @@
 
 #include "gfx.h"
 #include "hw.h"
+#include "gpu.h"
 #include "apu/apu.h"
 #include "nv2a_sw.h"
 #include "prof.h"
@@ -788,7 +789,7 @@ static void draw_xbox_screen(const UiState *s)
                  (unsigned long long)sw->triangles, (unsigned long long)sw->pixels, sw->skipped_ff, sw->no_target,
                  sw->no_target_why, (unsigned)sw->surf_format, (unsigned)sw->surf_pitch, (unsigned)sw->clip_h,
                  (unsigned)sw->clip_v, sw->vs_errors, (unsigned)hw_scanout());
-        gfx_rrect(14, ly - 4, UI_W - 28, 232, 10, WITH_ALPHA(HEX(0x000000), 200));
+        gfx_rrect(14, ly - 4, UI_W - 28, 254, 10, WITH_ALPHA(HEX(0x000000), 200));
         gfx_text_fit(24, ly, 16, UI_W - 48, C_ON, e);
         ly += 22;
         snprintf(e, sizeof(e), "Último: prim %u, %u vértices, %llu tri, %llu px, %u ocultos, %u tras Z · destino %08X pitch %u fmt %X · Z %08X",
@@ -873,6 +874,14 @@ static void draw_xbox_screen(const UiState *s)
                                pf.op[t] & 0xFF, pf.insns ? 100.0 * (double)pf.count[t] / (double)pf.insns : 0.0);
             }
             gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
+        }
+        ly += 22;
+        {
+            const GpuStats *gs = gpu_stats();
+            snprintf(e, sizeof(e), "GPU %s: %s · %u dibujos, %u por software · %u subidas (%.0f MB) · %u copias a RAM",
+                     gpu_enabled() ? "activa" : gpu_ready() ? "apagada (L3)" : "no", gpu_info(), gs->draws,
+                     gs->fallbacks, gs->uploads, gs->upload_bytes / 1048576.0, gs->flushes);
+            gfx_text_fit(24, ly, 16, UI_W - 48, gpu_enabled() ? C_GREEN : C_WARN, e);
         }
     } else {
         snprintf(b, sizeof(b), "Pantalla del Xbox: el juego todavía no eligió un modo de video");
@@ -1191,7 +1200,7 @@ static void draw_run(const UiState *s)
         char clk[32];
         snprintf(clk, sizeof(clk), "Reloj %u ns", kn ? kn->ns_per_instr : 1);
         char fs[24];
-        snprintf(fs, sizeof(fs), "Dibuja 1/%u", hw_frameskip());
+        snprintf(fs, sizeof(fs), "%s 1/%u", gpu_enabled() ? "GPU" : "CPU", hw_frameskip());
         Hint h[] = {{"Y", clk}, {"<>", fs}, {"X", "Pantalla"}, {"-", "Volcado"}, {"B", "Detener"}, {"+", "Salir"}};
         bottom_bar(h, 6);
     } else {
@@ -1284,7 +1293,7 @@ static const Stage k_stages[] = {
     {"2d.1", "Bloques decodificados", "Código entendido una vez y guardado: ~1,8x; MMX del video 2,4x", 0},
     {"2d.2", "JIT a ARM64", "Bloques traducidos a código de la Switch (mov, alu, pila, memoria)", 1},
     {"2d.3", "JIT ampliado", "Más instrucciones en el JIT (x87, SSE) según lo que use Halo 2", 2},
-    {"4c", "Gráficos por GPU", "El dibujo en el GPU de la Switch, rápido", 2},
+    {"4c", "Gráficos por GPU", "Primera versión: triángulos, texturas y combiners en el GPU (L3)", 1},
     {"5", "Optimizar", "Velocidad general hasta que Halo 2 se pueda jugar", 2},
 };
 #define NSTAGES ((int)(sizeof(k_stages) / sizeof(k_stages[0])))

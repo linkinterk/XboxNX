@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "workers.h"
+#include "gpu.h"
 #include "vsh/nv2a_vsh_disassembler.h"
 #include "vsh/nv2a_vsh_emulator.h"
 
@@ -96,6 +97,28 @@ void sw_init(uint8_t *ram, uint32_t ram_size, SwDmaFn dma)
 }
 
 const SwStats *sw_stats(void) { return &S.st; }
+
+/* El estado de Kelvin (para capturar un cuadro con lo que venía de antes). */
+size_t sw_state_size(void) { return sizeof(S); }
+void sw_state_get(void *out) { memcpy(out, &S, sizeof(S)); }
+void sw_state_set(const void *in)
+{
+    uint8_t *ram = S.ram;
+    uint32_t ram_size = S.ram_size;
+    SwDmaFn dma = S.dma;
+    float(*vin)[16][4] = S.in;
+    unsigned cap = S.cap, inl_cap = S.inl_cap;
+    uint32_t *inl = S.inl;
+    memcpy(&S, in, sizeof(S));
+    S.ram = ram, S.ram_size = ram_size, S.dma = dma;
+    S.in = vin, S.cap = cap, S.inl = inl, S.inl_cap = inl_cap;
+    S.nin = S.ninl = 0;
+    S.begun = false;
+    memset(&S.prog, 0, sizeof(S.prog));
+    S.pok = false;
+    S.pdirty = true;
+    memset(&S.st, 0, sizeof(S.st));
+}
 
 /* Saltar cuadros: sin dibujar (ni transformar vértices) hasta que se diga. */
 static bool g_skip;
@@ -263,6 +286,7 @@ typedef struct Tex {
     uint32_t *xm, *ym;   /* direcciones swizzle por x y por y */
     bool cube;
     uint32_t face_bytes; /* cubo: lo que ocupa cada cara con sus mipmaps */
+    uint32_t bytes;      /* todo lo que ocupa (para la GPU: el hash del contenido) */
     const uint8_t *pal;  /* P8: la paleta (A8R8G8B8) */
     unsigned pal_n;
 } Tex;
@@ -388,6 +412,7 @@ static bool tex_setup(int s, Tex *t)
     } else {
         t->cube = false;
     }
+    t->bytes = bytes;
     t->base = mem(base + S.t_off[s], bytes);
     if (!t->base) {
         return false;
@@ -1273,6 +1298,80 @@ static void transform(const float in[16][4], OutVert *o)
     o->fog = out[5 * 4];
 }
 
+/* ---- etapa 4c: el dibujo a la GPU ---- */
+
+/* Una cara de la textura de la etapa, a ARGB (para subirla a la GPU). */
+static void gpu_decode(int stage, int face, uint32_t *out)
+{
+    Tex t = g_tex[stage];
+    t.base += (uint32_t)face * t.face_bytes;
+    for (uint32_t y = 0; y < t.h; y++) {
+        for (uint32_t x = 0; x < t.w; x++) {
+            float c[4];
+            texel(&t, x, y, c);
+            *out++ = (uint32_t)(clamp01(c[3]) * 255 + 0.5f) << 24 | (uint32_t)(clamp01(c[0]) * 255 + 0.5f) << 16 |
+                     (uint32_t)(clamp01(c[1]) * 255 + 0.5f) << 8 | (uint32_t)(clamp01(c[2]) * 255 + 0.5f);
+        }
+    }
+}
+
+static bool gpu_try(const Target *t, const OutVert *ov)
+{
+    _Static_assert(sizeof(OutVert) == GPU_VERT_FLOATS * sizeof(float), "OutVert para la GPU");
+    GpuDraw d;
+    memset(&d, 0, sizeof(d));
+    d.prim = S.prim;
+    d.nverts = S.nin;
+    d.verts = (const float *)ov;
+    d.color_pa = (uint32_t)(t->color - S.ram);
+    d.pitch = t->pitch;
+    d.fmt = t->bpp == 4 ? t->fmt : 0;
+    d.w = (int)(t->pitch / (t->bpp ? t->bpp : 4));
+    d.h = t->y1;
+    if (t->zeta) {
+        d.zeta_pa = (uint32_t)(t->zeta - S.ram);
+        d.zpitch = t->zpitch;
+        d.zfmt = t->zfmt;
+    }
+    d.zmax = t->zmax > 0 ? t->zmax : (((S.surf_format >> 4) & 0xF) == 1 ? 65535.0f : 16777215.0f);
+    d.x0 = t->x0, d.y0 = t->y0, d.x1 = t->x1, d.y1 = t->y1;
+    d.blend = S.blend, d.dtest = S.dtest, d.dmask = S.dmask, d.cull = S.cull, d.atest = S.atest;
+    d.sfac = S.sfac, d.dfac = S.dfac, d.beq = S.beq, d.bcolor = S.bcolor, d.dfunc = S.dfunc;
+    d.cull_face = S.cull_face, d.front_face = S.front_face, d.cmask = S.cmask, d.afunc = S.afunc, d.aref = S.aref;
+    d.cctl = S.cctl, d.fcw0 = S.fcw0, d.fcw1 = S.fcw1, d.fog_color = S.fog_color;
+    memcpy(d.c_icw, S.c_icw, sizeof(d.c_icw));
+    memcpy(d.a_icw, S.a_icw, sizeof(d.a_icw));
+    memcpy(d.c_ocw, S.c_ocw, sizeof(d.c_ocw));
+    memcpy(d.a_ocw, S.a_ocw, sizeof(d.a_ocw));
+    memcpy(d.factor0, S.factor0, sizeof(d.factor0));
+    memcpy(d.factor1, S.factor1, sizeof(d.factor1));
+    for (int s = 0; s < 4; s++) {
+        GpuTex *g = &d.tex[s];
+        if (!g_tex_on[s]) {
+            continue;
+        }
+        g->on = true;
+        g->mode = g_tex_mode[s];
+        if (g->mode == 4) {
+            continue;
+        }
+        const Tex *x = &g_tex[s];
+        g->addr = (uint32_t)(x->base - S.ram);
+        g->fmt = x->fmt, g->w = x->w, g->h = x->h;
+        g->cube = x->cube && g->mode == 3;
+        g->linear = x->linear;
+        g->bilinear = x->bilinear;
+        g->au = x->au, g->av = x->av;
+        g->data = x->base;
+        g->bytes = x->bytes;
+        g->pal = x->pal;
+        g->pal_bytes = x->pal ? x->pal_n * 4 : 0;
+        g->decode = gpu_decode;
+        g->stage = s;
+    }
+    return gpu_draw(&d);
+}
+
 static OutVert *g_xf_out;
 
 /* Los vértices i con i % n == part (cada hilo los suyos). */
@@ -1350,6 +1449,14 @@ static void draw(void)
         L->fcw1 = S.fcw1;
         L->first_px = 0xFFFFFFFFu;
     }
+    if (gpu_enabled()) {
+        if (gpu_try(&t, ov)) {
+            free(ov);
+            return;
+        }
+        /* la GPU no pudo: el software, sobre la RAM al día */
+        gpu_flush_surface((uint32_t)(t.color - S.ram));
+    }
     uint64_t px0 = S.st.pixels, tr0 = S.st.triangles;
     unsigned n = S.nin;
     switch (S.prim) {
@@ -1389,6 +1496,9 @@ static void draw(void)
         break;
     }
     raster_flush(&t);
+    if (gpu_enabled()) {
+        gpu_invalidate((uint32_t)(t.color - S.ram), t.pitch * (uint32_t)t.y1);
+    }
     free(ov);
     S.st.last.pixels = S.st.pixels - px0;
     S.st.last.tris = S.st.triangles - tr0;
@@ -1408,6 +1518,10 @@ static void zclear(uint32_t flags)
     int y0 = (int)(S.clear_v & 0xFFFF) * (int)fy, y1 = (int)((S.clear_v >> 16) + 1) * (int)fy;
     if (x1 > t.x1) x1 = t.x1;
     if (y1 > t.y1) y1 = t.y1;
+    if (gpu_enabled() && gpu_clear_zeta((uint32_t)(t.zeta - S.ram), t.zpitch, t.y1, x0, y0, x1, y1, S.zs_clear, t.zfmt,
+                                        flags)) {
+        return;
+    }
     uint32_t m = t.zfmt == 1 ? 0xFFFF : ((flags & 1 ? 0xFFFFFF00u : 0) | (flags & 2 ? 0xFFu : 0));
     for (int y = y0; y < y1; y++) {
         for (int x = x0; x < x1; x++) {

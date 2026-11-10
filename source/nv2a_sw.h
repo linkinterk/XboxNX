@@ -45,6 +45,11 @@ void sw_init(uint8_t *ram, uint32_t ram_size, SwDmaFn dma);
 /* Un método de Kelvin con su valor. */
 void sw_method(uint32_t m, uint32_t v);
 const SwStats *sw_stats(void);
+/* El estado de Kelvin, para la captura de un cuadro (tools/replay.c). */
+#include <stddef.h>
+size_t sw_state_size(void);
+void sw_state_get(void *out);
+void sw_state_set(const void *in);
 /* Saltar los dibujos (los cuadros que no se van a ver). */
 void sw_set_skip(bool skip);
 

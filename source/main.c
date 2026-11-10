@@ -23,18 +23,20 @@
 #include "dump.h"
 #include "probe.h"
 #include "crash.h"
+#include "gpu.h"
 #include "hw.h"
 #include "ui.h"
 #include "usb/usb.h"
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.25"
+#define APP_VER   "0.18.26"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
 static uint32_t g_shadow[UI_W * UI_H];
 static Framebuffer g_fb;
+static bool g_use_fb = true; /* false: la pantalla va por OpenGL (etapa 4c) */
 
 static UiCard g_cards[MAX_GAMES];
 static int g_ncards;
@@ -114,9 +116,10 @@ static void load_into_memory(void)
     vm_free(&g_vm);
     memset(&g_load, 0, sizeof(g_load));
     u64 t0 = armGetSystemTick();
+    gpu_reset(); /* lo de la ejecución anterior ya no vale */
     if (!vm_init(&g_vm)) {
         snprintf(g_load.error, sizeof(g_load.error), "No hay RAM para los 64 MB del Xbox");
-    } else if (!kernel_init(&g_kernel, &g_vm)) {
+    } else if ((gpu_set_ram(g_vm.ram, VM_RAM_SIZE), !kernel_init(&g_kernel, &g_vm))) {
         snprintf(g_load.error, sizeof(g_load.error), "No se pudo preparar el área del kernel");
     } else {
         /* D: es la ISO; el disco duro del Xbox, carpetas en la SD */
@@ -137,12 +140,16 @@ static void present(void)
     }
     prof_push(PROF_UI);
     ui_draw(&g_ui);
-    u32 stride;
-    u8 *dst = framebufferBegin(&g_fb, &stride);
-    for (int y = 0; y < UI_H; y++) {
-        memcpy(dst + (size_t)y * stride, &g_shadow[y * UI_W], UI_W * 4);
+    if (!g_use_fb) {
+        gpu_present_ui(g_shadow, UI_W, UI_H); /* 4c: la ventana es de OpenGL */
+    } else {
+        u32 stride;
+        u8 *dst = framebufferBegin(&g_fb, &stride);
+        for (int y = 0; y < UI_H; y++) {
+            memcpy(dst + (size_t)y * stride, &g_shadow[y * UI_W], UI_W * 4);
+        }
+        framebufferEnd(&g_fb);
     }
-    framebufferEnd(&g_fb);
     prof_pop();
 }
 
@@ -270,8 +277,14 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    framebufferCreate(&g_fb, nwindowGetDefault(), UI_W, UI_H, PIXEL_FORMAT_RGBA_8888, 2);
-    framebufferMakeLinear(&g_fb);
+    /* 4c: OpenGL en la ventana; si no se puede, el framebuffer de siempre
+     * y el dibujo por software */
+    if (gpu_init(nwindowGetDefault())) {
+        g_use_fb = false;
+    } else {
+        framebufferCreate(&g_fb, nwindowGetDefault(), UI_W, UI_H, PIXEL_FORMAT_RGBA_8888, 2);
+        framebufferMakeLinear(&g_fb);
+    }
     gfx_target(g_shadow, UI_W, UI_H, UI_W);
 
     /* La fuente del sistema de la Switch. */
@@ -448,6 +461,7 @@ int main(int argc, char **argv)
                     /* volcado para depurar: RAM, páginas, hilos, llamadas, default.xbe */
                     snprintf(g_ui.toast, sizeof(g_ui.toast), "Guardando el volcado (64 MB)...");
                     present();
+                    gpu_flush_all(); /* lo que está en la GPU, a la RAM */
                     dump_state(&g_run, &g_game.disc, "sdmc:/switch/XboxNX/volcado", g_ui.toast, sizeof(g_ui.toast));
                     /* y el cuadro siguiente entero, para repetirlo en la PC */
                     hw_capture_arm("sdmc:/switch/XboxNX/volcado");
@@ -470,10 +484,18 @@ int main(int argc, char **argv)
                     snprintf(g_ui.toast, sizeof(g_ui.toast), "JIT %s", g_run.cpu.jit_hot ? "activado" : "apagado (más lento)");
                     dirty = true;
                 }
-                if (k & HidNpadButton_StickL) { /* L3: bloques sí/no: sin bloques ni JIT, solo el intérprete */
-                    g_run.cpu.use_blocks = !g_run.cpu.use_blocks;
-                    snprintf(g_ui.toast, sizeof(g_ui.toast), "%s", g_run.cpu.use_blocks ? "Bloques activados"
-                                                                                       : "Solo el intérprete (sin bloques ni JIT, mucho más lento)");
+                if (k & HidNpadButton_StickL) { /* L3: dibujo por GPU (4c) o por software */
+                    if (!gpu_ready()) {
+                        snprintf(g_ui.toast, sizeof(g_ui.toast), "Sin GPU: %s", gpu_info());
+                    } else if (gpu_enabled()) {
+                        gpu_flush_all();
+                        gpu_enable(false);
+                        snprintf(g_ui.toast, sizeof(g_ui.toast), "Dibujo por software (CPU)");
+                    } else {
+                        gpu_reset();
+                        gpu_enable(true);
+                        snprintf(g_ui.toast, sizeof(g_ui.toast), "Dibujo por GPU (etapa 4c)");
+                    }
                     dirty = true;
                 }
                 if (k & HidNpadButton_Y) {
@@ -566,7 +588,9 @@ int main(int argc, char **argv)
     for (int i = 0; i < g_ncards; i++) {
         ui_card_free(&g_cards[i]);
     }
-    framebufferClose(&g_fb);
+    if (g_use_fb) {
+        framebufferClose(&g_fb);
+    }
     plExit();
     return 0;
 }

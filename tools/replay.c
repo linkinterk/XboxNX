@@ -15,6 +15,7 @@
 
 #include "nv2a_sw.h"
 #include "workers.h"
+#include "gpu.h"
 
 #define RAM (64u << 20)
 static uint8_t *g_ram;
@@ -82,12 +83,33 @@ int main(int argc, char **argv)
     bool list = getenv("LISTA") != NULL;
     workers_init();
     sw_init(g_ram, RAM, dma_rec);
+    if (getenv("GPU")) { /* 4c: con OpenGL (mesa en la PC) */
+        if (!gpu_init(NULL)) {
+            fprintf(stderr, "sin GPU: %s\n", gpu_info());
+            return 1;
+        }
+        gpu_set_ram(g_ram, RAM);
+        gpu_enable(true);
+        fprintf(stderr, "GPU: %s\n", gpu_info());
+    }
     /* lo que suele venir de antes del cuadro: el modo del vertex shader y los
      * objetos DMA (en D3D todos con base 0) */
     g_base = 0;
     sw_method(0x1E94, 2);
     for (uint32_t m = 0x0184; m <= 0x01A0; m += 4) {
         sw_method(m, 1);
+    }
+    if (getenv("ESTADO")) { /* cuadro_estado.bin: el estado de Kelvin al empezar el cuadro */
+        FILE *fe = fopen(getenv("ESTADO"), "rb");
+        size_t ss = sw_state_size();
+        void *st = malloc(ss);
+        if (!fe || !st || fread(st, 1, ss, fe) != ss) {
+            fprintf(stderr, "no se pudo leer el estado (¿otra versión?)\n");
+            return 1;
+        }
+        fclose(fe);
+        sw_state_set(st);
+        free(st);
     }
     unsigned draws = 0;
     uint32_t tex_fmt[4] = {0}, tex_off[4] = {0}, shader = 0, cctl = 0, prim = 0;
@@ -101,7 +123,16 @@ int main(int argc, char **argv)
         case 0x1D9C: clear_v = v; break;
         case 0x0210: color_off = v; break;
         case 0x020C: surf_pitch = v; break;
-        case 0x1D94: color_clear(v); break;
+        case 0x1D94:
+            if (gpu_enabled() && (v & 0xF0)) {
+                unsigned m4 = (v & 0x10 ? 4u : 0) | (v & 0x20 ? 2u : 0) | (v & 0x40 ? 1u : 0) | (v & 0x80 ? 8u : 0);
+                gpu_clear_color(color_base + color_off, surf_pitch & 0xFFFF, (int)((clear_v >> 16) + 1),
+                                (int)(clear_h & 0xFFFF), (int)(clear_v & 0xFFFF), (int)((clear_h >> 16) + 1),
+                                (int)((clear_v >> 16) + 1), clear_value, m4);
+            } else {
+                color_clear(v);
+            }
+            break;
         case 0x1E70: shader = v; break;
         case 0x1E60: cctl = v; break;
         default: break;
@@ -141,6 +172,7 @@ int main(int argc, char **argv)
             }
         }
     }
+    gpu_flush_all();
     const SwStats *st = sw_stats();
     fprintf(stderr, "%zu métodos, %u dibujos, %llu triángulos, %llu píxeles, sin destino %u, vs con error %u, ff %u\n", n,
             st->draws, (unsigned long long)st->triangles, (unsigned long long)st->pixels, st->no_target, st->vs_errors,

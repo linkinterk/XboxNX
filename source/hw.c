@@ -3,6 +3,7 @@
  */
 #include "hw.h"
 #include "nv2a_sw.h"
+#include "gpu.h"
 #include "prof.h"
 #include "usb/usb.h"
 
@@ -307,6 +308,13 @@ static void clear_color(Kernel *k, uint32_t flags)
     }
     uint32_t base = dma_base(g_hw.color_inst) + g_hw.color_offset;
     uint32_t val = g_hw.clear_value;
+    if (bpp == 4 && gpu_enabled()) { /* 4c: la superficie vive en la GPU */
+        unsigned m4 = (flags & 0x10 ? 4u : 0) | (flags & 0x20 ? 2u : 0) | (flags & 0x40 ? 1u : 0) | (flags & 0x80 ? 8u : 0);
+        if (gpu_clear_color(base, pitch, (int)y2, (int)x1, (int)y1, (int)x2, (int)y2, val, m4)) {
+            g_hw.st.clears++;
+            return;
+        }
+    }
     for (uint32_t y = y1; y < y2; y++) {
         uint32_t row = base + y * pitch;
         if (!phys32(k, row + x2 * bpp - 4)) {
@@ -463,6 +471,18 @@ static void cap_flip(Kernel *k)
         memcpy(g_cap.ram, k->vm->ram, VM_RAM_SIZE);
         g_cap.n = 0;
         g_cap.state = 2;
+        /* el estado de Kelvin al empezar (lo que el cuadro no vuelve a poner) */
+        size_t ss = sw_state_size();
+        void *st = malloc(ss);
+        if (st) {
+            sw_state_get(st);
+            cap_write("cuadro_estado.bin", st, ss);
+            free(st);
+            if (g_cap.state != 2) {
+                free(g_cap.ram);
+                g_cap.ram = NULL;
+            }
+        }
     } else if (g_cap.state == 2) {
         g_cap.state = 3;
         cap_write("cuadro_ram.bin", g_cap.ram, VM_RAM_SIZE);
@@ -545,7 +565,9 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         g_frame_no++;
         if (!g_skipping && g_hw.color_inst) {
             g_last_drawn = dma_base(g_hw.color_inst) + g_hw.color_offset;
+            gpu_flush_surface(g_last_drawn); /* 4c: el cuadro terminado, a la RAM (para la pantalla) */
         }
+        gpu_end_frame();
         g_skipping = g_frameskip > 1 && g_cap.state != 2 && g_cap.state != 1 && (g_frame_no % g_frameskip) != 0;
         sw_set_skip(g_skipping);
         if (g_hw.color_inst) {

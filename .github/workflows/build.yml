@@ -31,15 +31,15 @@ jobs:
             -o build-test/host_test tests/host_test.c source/disc.c source/xbe.c source/game.c source/xpr.c
           ./build-test/host_test build-test/t.iso XISO
           ./build-test/host_test build-test/full.iso "Disco completo XGD2"
-          gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g -Isource \
+          gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g -DXBOXNX_NO_GL -Isource \
             -o build-test/load_test tests/load_test.c source/disc.c source/xbe.c source/game.c source/xpr.c \
-            source/vm.c source/kernel.c source/kmm.c source/kob.c source/kps.c source/kio.c source/ksys.c source/xc_crypto.c source/hw.c source/nv2a_sw.c source/workers.c source/prof.c source/aci.c build-test/apu/*.o source/loader.c source/sha1.c \
+            source/vm.c source/kernel.c source/kmm.c source/kob.c source/kps.c source/kio.c source/ksys.c source/xc_crypto.c source/hw.c source/nv2a_sw.c source/gpu.c source/workers.c source/prof.c source/aci.c build-test/apu/*.o source/loader.c source/sha1.c \
             source/cpu.c source/runner.c -lm -lpthread
           ./build-test/load_test build-test/t.iso
           ./build-test/load_test build-test/bad.iso --bad-sha
-          gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g -Isource \
+          gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g -DXBOXNX_NO_GL -Isource \
             -o build-test/kernel_test tests/kernel_test.c source/vm.c source/kernel.c source/kmm.c source/kob.c \
-            source/kps.c source/kio.c source/ksys.c source/xc_crypto.c source/hw.c source/nv2a_sw.c source/workers.c source/prof.c source/aci.c build-test/apu/*.o source/disc.c source/cpu.c source/runner.c source/dump.c -lm -lpthread
+            source/kps.c source/kio.c source/ksys.c source/xc_crypto.c source/hw.c source/nv2a_sw.c source/gpu.c source/workers.c source/prof.c source/aci.c build-test/apu/*.o source/disc.c source/cpu.c source/runner.c source/dump.c -lm -lpthread
           ./build-test/kernel_test build-test/t.iso
           gcc -std=gnu11 -Wall -Wextra -Werror -Isource -c tools/replay.c -o build-test/replay.o
           APU_HILO=1 ./build-test/kernel_test build-test/t.iso
@@ -95,9 +95,9 @@ jobs:
           done
           mkdir -p build-test/hdd
           python3 tests/mkxiso.py build-test/t.iso
-          aarch64-linux-gnu-gcc -std=gnu11 -O1 -Wall -Wextra -Werror -static -Isource -o kernel_test_a64 tests/kernel_test.c \
+          aarch64-linux-gnu-gcc -std=gnu11 -O1 -Wall -Wextra -Werror -static -DXBOXNX_NO_GL -Isource -o kernel_test_a64 tests/kernel_test.c \
             source/vm.c source/kernel.c source/kmm.c source/kob.c source/kps.c source/kio.c source/ksys.c source/xc_crypto.c \
-            source/hw.c source/nv2a_sw.c source/workers.c source/prof.c source/aci.c a64/*.o source/disc.c source/cpu.c source/runner.c source/dump.c -lm -lpthread
+            source/hw.c source/nv2a_sw.c source/gpu.c source/workers.c source/prof.c source/aci.c a64/*.o source/disc.c source/cpu.c source/runner.c source/dump.c -lm -lpthread
           aarch64-linux-gnu-gcc -std=gnu11 -O2 -ffp-contract=off -static -Isource -o bench_a64 tests/bench.c source/cpu.c source/vm.c -lm
           qemu-aarch64 ./kernel_test_a64 build-test/t.iso
           qemu-aarch64 ./bench_a64 100
@@ -109,6 +109,8 @@ jobs:
     container: devkitpro/devkita64:latest
     steps:
       - uses: actions/checkout@v4
+      - name: OpenGL para la Switch (mesa/nouveau, etapa 4c)
+        run: dkp-pacman -Sy --noconfirm --needed switch-mesa switch-libdrm_nouveau
       - name: Compilar
         run: make -j"$(nproc)"
       - uses: actions/upload-artifact@v4

@@ -1,0 +1,99 @@
+/*
+ * XboxNX — etapa 4c: el dibujo del NV2A con la GPU de la Switch (OpenGL 3.3
+ * core sobre mesa/nouveau, con EGL).
+ *
+ * nv2a_sw.c sigue siendo el que lleva el estado de Kelvin, lee los vértices
+ * y corre el vertex shader del juego en el CPU; aquí se rasteriza: los
+ * triángulos, las texturas, los register combiners (un solo shader que los
+ * interpreta con uniforms, sin compilar uno por estado), la mezcla y el Z.
+ * Cada superficie de color del juego es una textura de GL (con su FBO); se
+ * copia a la RAM del Xbox al hacer flip (para la pantalla) y cuando el CPU
+ * la necesita. Si una superficie se usa como textura, se usa directo.
+ *
+ * Sin GL (o si falla), nv2a_sw.c dibuja por software como antes.
+ */
+#ifndef XBOXNX_GPU_H
+#define XBOXNX_GPU_H
+
+#include <stdbool.h>
+#include <stdint.h>
+
+/* Floats por vértice ya transformado (el OutVert de nv2a_sw.c):
+ * pos[4], col0[4], col1[4], tex[4][4], fog. */
+#define GPU_VERT_FLOATS 29
+
+typedef struct GpuTex {
+    bool on;
+    unsigned mode;          /* modo del texture shader (1 2D, 3 cubo, 4 pass-through...) */
+    uint32_t addr;          /* dirección física (para reconocer superficies) */
+    uint32_t fmt, w, h;
+    bool cube, linear, bilinear;
+    unsigned au, av;        /* modos de dirección (1 wrap, 2 mirror, otros clamp) */
+    const uint8_t *data;    /* para el hash del contenido */
+    uint32_t bytes;
+    const uint8_t *pal;     /* paleta (P8) para el hash */
+    uint32_t pal_bytes;
+    /* decodificar la cara face (0..5) a w*h ARGB (0xAARRGGBB) */
+    void (*decode)(int stage, int face, uint32_t *out);
+    int stage;
+} GpuTex;
+
+typedef struct GpuDraw {
+    unsigned prim;          /* 5 triángulos, 6 tira, 7 abanico, 8 quads, 9 tira de quads, 10 polígono */
+    unsigned nverts;
+    const float *verts;     /* nverts * GPU_VERT_FLOATS */
+    /* destino */
+    uint32_t color_pa, pitch;
+    unsigned fmt;           /* 4..8: 32 bits (8: con alfa) */
+    int w, h;               /* tamaño de la superficie (pitch/4 x y1) */
+    uint32_t zeta_pa, zpitch;
+    unsigned zfmt;          /* 1 Z16, 2 Z24S8; 0 sin Z */
+    float zmax;
+    int x0, y0, x1, y1;     /* recorte */
+    /* estado */
+    bool blend, dtest, dmask, cull, atest;
+    uint32_t sfac, dfac, beq, bcolor, dfunc, cull_face, front_face, cmask, afunc, aref;
+    uint32_t cctl, c_icw[8], a_icw[8], c_ocw[8], a_ocw[8], factor0[8], factor1[8], fcw0, fcw1, fog_color;
+    GpuTex tex[4];
+} GpuDraw;
+
+/* nwin: el NWindow de la Switch (NULL en la PC: sin ventana). */
+bool gpu_init(void *nwin);
+bool gpu_ready(void);
+/* Activar/desactivar el dibujo por GPU (con GL listo). */
+void gpu_enable(bool on);
+bool gpu_enabled(void);
+const char *gpu_info(void);
+
+/* Dibujar; false: no se pudo (lo hace el software). */
+bool gpu_draw(const GpuDraw *d);
+/* Borrar el rectángulo [x0,x1)x[y0,y1) de la superficie de color (mask: bits
+ * ARGB 0xF) o de Z/stencil (flags 1 Z, 2 stencil). false: no tiene superficie
+ * en la GPU (que lo haga la RAM). */
+bool gpu_clear_color(uint32_t pa, uint32_t pitch, int h, int x0, int y0, int x1, int y1, uint32_t argb, unsigned mask);
+bool gpu_clear_zeta(uint32_t pa, uint32_t zpitch, int h, int x0, int y0, int x1, int y1, uint32_t value, unsigned zfmt,
+                    unsigned flags);
+/* Copiar a la RAM la superficie que empieza en pa (la que se va a mostrar). */
+void gpu_flush_surface(uint32_t pa);
+/* Copiar a la RAM todas las superficies (antes de que el CPU lea). */
+void gpu_flush_all(void);
+/* La RAM de la superficie cambió por otro lado: volver a subirla. */
+void gpu_invalidate(uint32_t pa, uint32_t len);
+/* Fin de cuadro (limpia lo que no se usó en un rato). */
+void gpu_end_frame(void);
+
+/* La pantalla de la app con GL (1280x720 RGBA): true si se mostró. */
+bool gpu_present_ui(const uint32_t *rgba, int w, int h);
+
+typedef struct GpuStats {
+    unsigned draws, fallbacks, uploads, flushes, surfaces, textures;
+    uint64_t upload_bytes;
+} GpuStats;
+const GpuStats *gpu_stats(void);
+
+/* Olvidar todas las superficies y texturas (otra ejecución, o la RAM cambió por otro lado). */
+void gpu_reset(void);
+/* La RAM del Xbox (para subir y bajar superficies). */
+void gpu_set_ram(uint8_t *ram, uint32_t size);
+
+#endif
