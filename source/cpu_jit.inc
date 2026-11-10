@@ -153,10 +153,65 @@ static void movx(Em *e, int rd, uint64_t v)
     }
 }
 
-static void ldrw(Em *e, int rt, int rn, uint32_t off) { E(e, 0xB9400000u | ((off / 4) << 10) | (uint32_t)rn << 5 | (uint32_t)rt); }
-static void strw(Em *e, int rt, int rn, uint32_t off) { E(e, 0xB9000000u | ((off / 4) << 10) | (uint32_t)rn << 5 | (uint32_t)rt); }
+/* Los 8 registros x86 viven en registros de ARM64 mientras corre el código
+ * traducido (eax w2, ecx w3, edx w4, ebx w5, esp w6, ebp w7, esi w8, edi
+ * w16): se cargan de c->r al entrar, se guardan al salir y alrededor de cada
+ * llamada a C. Las lecturas/escrituras de c->r que piden los emisores (con
+ * x19 y un offset < 32) se vuelven movimientos entre registros. */
+#define JIT_REGS 1
+static const uint8_t k_rmap[8] = {2, 3, 4, 5, 6, 7, 8, 16};
+static inline bool reg_off(int rn, uint32_t off) { return JIT_REGS && rn == 19 && off < 32; }
+static void mov_w(Em *e, int d, int m)
+{
+    if (d != m) {
+        E(e, 0x2A0003E0u | (uint32_t)m << 16 | (uint32_t)d); /* mov wd, wm */
+    }
+}
+/* c->r de/hacia los registros (stp/ldp de pares de 32 bits) */
+static void regs_spill(Em *e)
+{
+    if (!JIT_REGS) {
+        return;
+    }
+    for (unsigned k = 0; k < 8; k += 2) {
+        E(e, 0x29000000u | (k) << 15 | (uint32_t)k_rmap[k + 1] << 10 | 19u << 5 | k_rmap[k]); /* stp */
+    }
+}
+static void regs_load(Em *e)
+{
+    if (!JIT_REGS) {
+        return;
+    }
+    for (unsigned k = 0; k < 8; k += 2) {
+        E(e, 0x29400000u | (k) << 15 | (uint32_t)k_rmap[k + 1] << 10 | 19u << 5 | k_rmap[k]); /* ldp */
+    }
+}
+static void ldrw(Em *e, int rt, int rn, uint32_t off)
+{
+    if (reg_off(rn, off)) {
+        mov_w(e, rt, k_rmap[off / 4]);
+        return;
+    }
+    E(e, 0xB9400000u | ((off / 4) << 10) | (uint32_t)rn << 5 | (uint32_t)rt);
+}
+static void strw(Em *e, int rt, int rn, uint32_t off)
+{
+    if (reg_off(rn, off)) {
+        mov_w(e, k_rmap[off / 4], rt == 31 ? 31 : rt);
+        return;
+    }
+    E(e, 0xB9000000u | ((off / 4) << 10) | (uint32_t)rn << 5 | (uint32_t)rt);
+}
 static void ldrx(Em *e, int rt, int rn, uint32_t off) { E(e, 0xF9400000u | ((off / 8) << 10) | (uint32_t)rn << 5 | (uint32_t)rt); }
-static void strb(Em *e, int rt, int rn, uint32_t off) { E(e, 0x39000000u | (off << 10) | (uint32_t)rn << 5 | (uint32_t)rt); }
+static void strb(Em *e, int rt, int rn, uint32_t off)
+{
+    if (reg_off(rn, off)) { /* bfi wR, wt, #8*(off%4), #8 */
+        uint32_t lsb = 8u * (off & 3u);
+        E(e, 0x33000000u | ((32u - lsb) & 31u) << 16 | 7u << 10 | (uint32_t)rt << 5 | k_rmap[off / 4]);
+        return;
+    }
+    E(e, 0x39000000u | (off << 10) | (uint32_t)rn << 5 | (uint32_t)rt);
+}
 static void rrr(Em *e, uint32_t op, int rd, int rn, int rm) { E(e, op | (uint32_t)rm << 16 | (uint32_t)rn << 5 | (uint32_t)rd); }
 #define ADDW 0x0B000000u
 #define SUBW 0x4B000000u
@@ -289,7 +344,9 @@ static void emit_call(Em *e, const Block *b, unsigned i, const Vm *vm)
     /* la copia de la Insn junto al código: sigue valiendo aunque el bloque se libere */
     movx(e, X1, (uint64_t)(uintptr_t)(e->insn_rx + i));
     movx(e, W9, (uint64_t)(uintptr_t)in->fn);
+    regs_spill(e);
     E(e, 0xD63F0000u | 9u << 5); /* blr x9 */
+    regs_load(e);
     ldrx(e, W9, XC, OFF(icount));
     E(e, 0xCB180129u); /* sub x9, x9, x24 */
     if (i) {
@@ -644,9 +701,31 @@ static bool emit_mmx(Em *e, const Block *b, unsigned i, const Vm *vm)
 
 /* ---- 2d.3: más instrucciones en código nativo ---- */
 
-static void ldrb_i(Em *e, int rt, int rn, uint32_t off) { E(e, 0x39400000u | (off << 10) | (uint32_t)rn << 5 | (uint32_t)rt); }
-static void ldrh_i(Em *e, int rt, int rn, uint32_t off) { E(e, 0x79400000u | ((off / 2) << 10) | (uint32_t)rn << 5 | (uint32_t)rt); }
-static void strh_i(Em *e, int rt, int rn, uint32_t off) { E(e, 0x79000000u | ((off / 2) << 10) | (uint32_t)rn << 5 | (uint32_t)rt); }
+static void ldrb_i(Em *e, int rt, int rn, uint32_t off)
+{
+    if (reg_off(rn, off)) { /* ubfx wt, wR, #8*(off%4), #8 */
+        uint32_t lsb = 8u * (off & 3u);
+        E(e, 0x53000000u | lsb << 16 | (lsb + 7u) << 10 | (uint32_t)k_rmap[off / 4] << 5 | (uint32_t)rt);
+        return;
+    }
+    E(e, 0x39400000u | (off << 10) | (uint32_t)rn << 5 | (uint32_t)rt);
+}
+static void ldrh_i(Em *e, int rt, int rn, uint32_t off)
+{
+    if (reg_off(rn, off)) { /* uxth */
+        E(e, 0x53000000u | 0u << 16 | 15u << 10 | (uint32_t)k_rmap[off / 4] << 5 | (uint32_t)rt);
+        return;
+    }
+    E(e, 0x79400000u | ((off / 2) << 10) | (uint32_t)rn << 5 | (uint32_t)rt);
+}
+static void strh_i(Em *e, int rt, int rn, uint32_t off)
+{
+    if (reg_off(rn, off)) { /* bfi wR, wt, #0, #16 */
+        E(e, 0x33000000u | 0u << 16 | 15u << 10 | (uint32_t)rt << 5 | k_rmap[off / 4]);
+        return;
+    }
+    E(e, 0x79000000u | ((off / 2) << 10) | (uint32_t)rn << 5 | (uint32_t)rt);
+}
 static void ldrh_r(Em *e, int rt, int rn, int rm) { E(e, 0x78606800u | (uint32_t)rm << 16 | (uint32_t)rn << 5 | (uint32_t)rt); }
 static void strb_r(Em *e, int rt, int rn, int rm) { E(e, 0x38206800u | (uint32_t)rm << 16 | (uint32_t)rn << 5 | (uint32_t)rt); }
 static void strh_r(Em *e, int rt, int rn, int rm) { E(e, 0x78206800u | (uint32_t)rm << 16 | (uint32_t)rn << 5 | (uint32_t)rt); }
@@ -1001,6 +1080,7 @@ static bool jit_compile(Cpu *c, Block *b)
         movx_r(&e, XC, X0);
         movx_r(&e, 23, X1);
         movx(&e, 24, 0);
+        regs_load(&e);
         ldrx(&e, W9, XC, OFF(vm));
         ldrx(&e, XRAM, W9, (uint32_t)offsetof(Vm, ram));
         ldrx(&e, XPT, W9, (uint32_t)offsetof(Vm, pt));
@@ -1061,6 +1141,7 @@ static bool jit_compile(Cpu *c, Block *b)
         patch(&e, miss2);
         movw(&e, X0, 0);
         uint32_t *epi = e.p;
+        regs_spill(&e);
         E(&e, 0x0B180000u); /* add w0, w0, w24 */
         E(&e, 0xA94363F7u); /* ldp x23, x24, [sp, #48] */
         E(&e, 0xA9425BF5u); /* ldp x21, x22, [sp, #32] */

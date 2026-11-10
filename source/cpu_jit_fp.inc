@@ -827,7 +827,9 @@ static void emit_cf(Em *e, unsigned prev)
     default:
         movx_r(e, X0, XC);
         movx(e, W9, (uint64_t)(uintptr_t)jit_lazy_cf);
+        regs_spill(e);
         E(e, 0xD63F0000u | 9u << 5); /* blr x9 */
+        regs_load(e);
         movw_r(e, W12, X0);
         return;
     }
@@ -886,7 +888,9 @@ static void emit_cond_call(Em *e, unsigned n)
     movx_r(e, X0, XC);
     movw(e, X1, n);
     movx(e, W9, (uint64_t)(uintptr_t)jit_cond);
+    regs_spill(e);
     E(e, 0xD63F0000u | 9u << 5); /* blr x9 */
+    regs_load(e);
 }
 
 /* x13 = la dirección en el host del operando de memoria de 4 bytes (o al lento) */
