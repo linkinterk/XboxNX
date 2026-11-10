@@ -62,7 +62,7 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS	:= -lEGL -lglapi -ldrm_nouveau -lnx -lm
+LIBS	:= -lEGL -lglapi -ldrm_nouveau -lstdc++ -lnx -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
@@ -96,7 +96,8 @@ BINFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.*)))
 #---------------------------------------------------------------------------------
 ifeq ($(strip $(CPPFILES)),)
 #---------------------------------------------------------------------------------
-	export LD	:=	$(CC)
+	# mesa (EGL/OpenGL) trae código C++: se enlaza con g++
+	export LD	:=	$(CXX)
 #---------------------------------------------------------------------------------
 else
 #---------------------------------------------------------------------------------
