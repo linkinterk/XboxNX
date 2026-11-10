@@ -2014,7 +2014,15 @@ static uint64_t IoNothing(KCall *c)
 AIO_SYNC(NtCreateFile)
 AIO_SYNC(NtOpenFile)
 AIO_SYNC(NtQueryInformationFile)
-AIO_SYNC(NtSetInformationFile)
+/* Mover la posición (clase 14, antes de cada escritura de Halo 2) no
+ * necesita esperar a las escrituras pendientes; las demás sí. */
+static uint64_t NtSetInformationFile_aio(KCall *c)
+{
+    if (c->a[4] != 14 && c->a[4] != 19 && c->a[4] != 4) { /* posición, reserva y tiempos: sin tocar el archivo */
+        aio_drain();
+    }
+    return NtSetInformationFile(c);
+}
 AIO_SYNC(NtQueryVolumeInformationFile)
 AIO_SYNC(IoQueryVolumeInformation)
 AIO_SYNC(NtQueryDirectoryFile)
