@@ -179,7 +179,7 @@ def gen():
         tail = bytes([rnd.randrange(32)]) if op in (0xA4, 0xAC) else b""
         return bytes([0x0F, op]) + m + tail, ("shd", op, tail), "shld"
     if k == 21:  # varios de un byte
-        return p66 + bytes([rnd.choice([0x98, 0x99, 0x9E, 0x9F, 0xF5, 0xF8, 0xF9, 0xFC, 0xFD, 0x90])]), 0, "misc"
+        return p66 + bytes([rnd.choice([0x98, 0x99, 0x9E, 0x9F, 0xF5, 0xF8, 0xF9, 0xFC, 0xFD, 0x90, 0xD7])]), 0, "misc"
     if k == 22:  # push/pop
         c = rnd.randrange(6)
         if c == 0:

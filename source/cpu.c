@@ -1202,6 +1202,13 @@ static CpuStop step(Cpu *c)
     case 0x9F: /* lahf */
         reg_set(c, 4, 1, (FL(c) & 0xD5u) | 0x2u);
         break;
+    case 0xD7: { /* xlat: AL = [EBX + AL] */
+        uint32_t v = mrd(c, c->r[R_EBX] + (c->r[R_EAX] & 0xFF) + (d.fs ? c->fs_base : 0), 1);
+        if (c->stop == CPU_RUNNING) {
+            reg_set(c, R_EAX, 1, v);
+        }
+        break;
+    }
     case 0xA0: case 0xA1: case 0xA2: case 0xA3: { /* mov moffs */
         int sz = (op & 1) ? osz : 1;
         uint32_t a = fetch32(c) + (d.fs ? c->fs_base : 0);
@@ -2044,7 +2051,7 @@ static bool dec_interp_1(Rd *r, Insn *in, uint8_t op)
         dec_modrm(r, in, rd8(r));
     } else if (!((op >= 0xA4 && op <= 0xA7) || (op >= 0xAA && op <= 0xAF) || (op >= 0x91 && op <= 0x98) ||
                  (op >= 0x9B && op <= 0x9F) || op == 0x60 || op == 0x61 || op == 0x90 || op == 0xF5 ||
-                 op == 0xF8 || op == 0xF9 || op == 0xFC || op == 0xFD)) {
+                 op == 0xF8 || op == 0xF9 || op == 0xFC || op == 0xFD || op == 0xD7)) {
         return false;
     }
     in->fn = x_interp;
