@@ -53,6 +53,9 @@ typedef struct UiState {
     int run_scroll;          /* -1: seguir la última llamada */
     int stage_scroll;        /* la tabla de etapas */
     unsigned prof[8];        /* el reparto del tiempo real (prof.h), en milésimas */
+    CpuProfile pf;           /* el perfil del CPU (lo llena main.c en su hilo: recorre los bloques) */
+    unsigned ui_ms;          /* lo que tardó el último dibujo de la pantalla (en el núcleo 1) */
+    bool ui_async;           /* la pantalla se dibuja en otro hilo */
     int stage_back;          /* la pantalla a la que vuelve */
     bool run_screen;         /* X: ver la pantalla del Xbox en vez del registro */
     char toast[160];         /* un aviso en el registro (el volcado) */

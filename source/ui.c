@@ -811,6 +811,9 @@ static void diag_prof(const UiState *s)
         o += snprintf(t + o, sizeof(t) - (size_t)o, "%s %s %u%%", i ? " ·" : "", prof_name((ProfPart)i),
                       (s->prof[i] + 5) / 10);
     }
+    if (s->ui_async && o < (int)sizeof(t) - 40) {
+        snprintf(t + o, sizeof(t) - (size_t)o, " · la pantalla aparte (núcleo 1): %u ms por dibujo", s->ui_ms);
+    }
     diag_add(t);
 }
 
@@ -1003,11 +1006,7 @@ static void draw_xbox_screen(const UiState *s)
         }
         /* el perfil del CPU: qué instrucciones se quedan fuera del JIT (cada ~60 dibujos de la pantalla) */
         {
-            static CpuProfile pf;
-            static unsigned tick;
-            if (tick++ % 60 == 0) {
-                cpu_profile((Cpu *)&r->cpu, &pf);
-            }
+            const CpuProfile pf = s->pf;
             int o3 = snprintf(e, sizeof(e), "Lentas: %.0f%% de %.0fM instr, %.1f por bloque ·",
                               pf.insns ? 100.0 * (double)pf.slow / (double)pf.insns : 0.0, pf.insns / 1e6,
                               pf.blocks ? (double)pf.insns / (double)pf.blocks : 0.0);

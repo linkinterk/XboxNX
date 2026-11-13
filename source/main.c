@@ -32,7 +32,7 @@
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.40"
+#define APP_VER   "0.18.41"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -205,12 +205,10 @@ static void load_into_memory(void)
     g_ui.screen = UI_MEMORY;
 }
 
-static void present(void)
+/* Dibujar la pantalla y mandarla a la Switch. */
+static void present_body(void)
 {
-    if (g_ui.screen == UI_RUN) {
-        prof_take(g_ui.prof);
-    }
-    prof_push(PROF_UI);
+    u64 t0 = armGetSystemTick();
     ui_draw(&g_ui);
     {
         u32 stride;
@@ -220,10 +218,103 @@ static void present(void)
         }
         framebufferEnd(&g_fb);
     }
+    g_ui.ui_ms = (unsigned)(armTicksToNs(armGetSystemTick() - t0) / 1000000);
     if (g_gpu_log && ++g_gpu_frames == 1) { /* ya se mostró el menú: todo bien */
         gpu_log_line("listo");
         gpu_log_close();
     }
+}
+
+/* Etapa 5: mientras se juega, la pantalla se dibuja en otro hilo (núcleo 1)
+ * y el juego no la espera: si el dibujo anterior no terminó, este se salta.
+ * El hilo solo lee el estado del emulador (contadores, la RAM del cuadro);
+ * lo que recorre estructuras que el CPU cambia (el perfil de bloques) lo
+ * hace este hilo antes de pedir el dibujo. */
+static Thread g_ui_thr;
+static Mutex g_ui_m;
+static CondVar g_ui_cv;
+static volatile bool g_ui_busy, g_ui_quit;
+static bool g_ui_thr_ok;
+
+static void ui_thread(void *arg)
+{
+    (void)arg;
+    mutexLock(&g_ui_m);
+    for (;;) {
+        while (!g_ui_busy && !g_ui_quit) {
+            condvarWait(&g_ui_cv, &g_ui_m);
+        }
+        if (g_ui_quit) {
+            break;
+        }
+        mutexUnlock(&g_ui_m);
+        present_body();
+        mutexLock(&g_ui_m);
+        g_ui_busy = false;
+        condvarWakeAll(&g_ui_cv);
+    }
+    mutexUnlock(&g_ui_m);
+}
+
+static void ui_thread_start(void)
+{
+    mutexInit(&g_ui_m);
+    condvarInit(&g_ui_cv);
+    g_ui_thr_ok = R_SUCCEEDED(threadCreate(&g_ui_thr, ui_thread, NULL, NULL, 0x40000, 0x2C, 1)) &&
+                  R_SUCCEEDED(threadStart(&g_ui_thr));
+}
+
+static void ui_wait_idle(void)
+{
+    if (!g_ui_thr_ok) {
+        return;
+    }
+    mutexLock(&g_ui_m);
+    while (g_ui_busy) {
+        condvarWait(&g_ui_cv, &g_ui_m);
+    }
+    mutexUnlock(&g_ui_m);
+}
+
+static void ui_thread_stop(void)
+{
+    if (!g_ui_thr_ok) {
+        return;
+    }
+    ui_wait_idle();
+    mutexLock(&g_ui_m);
+    g_ui_quit = true;
+    condvarWakeAll(&g_ui_cv);
+    mutexUnlock(&g_ui_m);
+    threadWaitForExit(&g_ui_thr);
+    threadClose(&g_ui_thr);
+    g_ui_thr_ok = false;
+}
+
+static void present(void)
+{
+    static unsigned prof_tick;
+    bool async = g_ui_thr_ok && g_ui.screen == UI_RUN && g_ui.run_screen;
+    if (async && g_ui_busy) {
+        return; /* todavía dibuja el anterior: el juego sigue */
+    }
+    ui_wait_idle();
+    if (g_ui.screen == UI_RUN) {
+        prof_take(g_ui.prof);
+        if (prof_tick++ % 15 == 0) {
+            cpu_profile(&g_run.cpu, &g_ui.pf);
+        }
+    }
+    g_ui.ui_async = async;
+    if (async) {
+        mutexLock(&g_ui_m);
+        g_ui_busy = true;
+        condvarWakeAll(&g_ui_cv);
+        mutexUnlock(&g_ui_m);
+        return;
+    }
+    prof_push(PROF_UI);
+    present_body();
     prof_pop();
 }
 
@@ -398,6 +489,7 @@ int main(int argc, char **argv)
     apu_set_threaded(true); /* el audio en el núcleo 1 */
     clocks_raise(); /* CPU 1785 MHz, memoria 1600, GPU de juego (al salir, como estaban) */
     sound_init(); /* 3h: el audio del Xbox por la Switch */
+    ui_thread_start(); /* etapa 5: la pantalla en el núcleo 1 mientras se juega */
     s32 prev_touches = 0;
 
     g_ui.version = APP_VER;
@@ -684,6 +776,7 @@ int main(int argc, char **argv)
         }
     }
 
+    ui_thread_stop();
     kio_sync(); /* lo que falte escribir en la SD */
     sound_exit();
     clocks_restore();
