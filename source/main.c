@@ -33,7 +33,7 @@
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.44"
+#define APP_VER   "0.18.45"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -132,7 +132,37 @@ static void load_into_memory(void);
 /* El tiempo virtual por instrucción (Y en el registro): 2 ns es un
  * Pentium III de 733 MHz; más, y el juego avanza más por cada instrucción
  * (sus esperas activas terminan antes) aunque crea tener una CPU lenta. */
-static unsigned g_nspi = 2;
+static unsigned g_nspi = 8; /* 8 ns: con lo que el juego corre más rápido (Y lo cambia; se guarda) */
+
+/* Los ajustes que se recuerdan entre arranques (sdmc:/switch/XboxNX/ajustes.txt). */
+#define AJUSTES "sdmc:/switch/XboxNX/ajustes.txt"
+
+static void ajustes_guardar(void)
+{
+    FILE *f = fopen(AJUSTES, "w");
+    if (f) {
+        fprintf(f, "reloj=%u\ncuadros=%u\n", g_nspi, hw_frameskip());
+        fclose(f);
+    }
+}
+
+static void ajustes_leer(void)
+{
+    FILE *f = fopen(AJUSTES, "r");
+    if (!f) {
+        return;
+    }
+    char line[64];
+    while (fgets(line, sizeof(line), f)) {
+        unsigned v;
+        if (sscanf(line, "reloj=%u", &v) == 1 && (v == 1 || v == 2 || v == 4 || v == 8)) {
+            g_nspi = v;
+        } else if (sscanf(line, "cuadros=%u", &v) == 1 && v >= 1 && v <= 6) {
+            hw_set_frameskip(v);
+        }
+    }
+    fclose(f);
+}
 
 /* El intérprete por budget ns. Si XboxNX falla (un acceso inválido en este
  * hilo o en un ayudante), el juego se detiene con el informe en pantalla en
@@ -504,7 +534,8 @@ int main(int argc, char **argv)
     apu_set_threaded(true); /* el audio en el núcleo 1 */
     clocks_raise(); /* CPU 1785 MHz, memoria 1600, GPU de juego (al salir, como estaban) */
     sound_init(); /* 3h: el audio del Xbox por la Switch */
-    ui_thread_start(); /* etapa 5: la pantalla en el núcleo 1 mientras se juega */
+    ui_thread_start(); /* etapa 5: la pantalla en el núcleo 2 mientras se juega */
+    ajustes_leer(); /* el reloj y los cuadros que dejaste la última vez */
     s32 prev_touches = 0;
 
     g_ui.version = APP_VER;
@@ -677,6 +708,7 @@ int main(int argc, char **argv)
                     unsigned n = hw_frameskip();
                     n = (k & HidNpadButton_AnyRight) ? (n >= 6 ? 6 : n + 1) : (n <= 1 ? 1 : n - 1);
                     hw_set_frameskip(n);
+                    ajustes_guardar();
                     if (n == 1) {
                         snprintf(g_ui.toast, sizeof(g_ui.toast), "Dibujar todos los cuadros (más lento)");
                     } else {
@@ -706,6 +738,8 @@ int main(int argc, char **argv)
                 if (k & HidNpadButton_Y) {
                     g_nspi = g_nspi >= 8 ? 1 : g_nspi * 2;
                     g_kernel.ns_per_instr = g_nspi;
+                    ajustes_guardar(); /* para la próxima vez */
+                    snprintf(g_ui.toast, sizeof(g_ui.toast), "Reloj %u ns (se recuerda)", g_nspi);
                     dirty = true;
                 }
             }
