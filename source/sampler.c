@@ -51,7 +51,7 @@ static void add(uint32_t eip)
 
 #ifdef __SWITCH__
 static Thread g_thr;
-static bool g_on;
+static volatile bool g_on;
 
 static void report(FILE *f, unsigned secs)
 {
@@ -161,7 +161,18 @@ void sampler_start(const volatile uint32_t *cur, Vm *vm, const char *version)
         g_on = false;
     }
 }
+void sampler_stop(void)
+{
+    if (!g_on) {
+        return;
+    }
+    g_on = false;
+    threadWaitForExit(&g_thr);
+    threadClose(&g_thr);
+}
 #else
+void sampler_stop(void) {}
+
 void sampler_start(const volatile uint32_t *cur, Vm *vm, const char *version)
 {
     (void)cur;

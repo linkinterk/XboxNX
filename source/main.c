@@ -33,7 +33,7 @@
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.49"
+#define APP_VER   "0.18.50"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -825,7 +825,11 @@ int main(int argc, char **argv)
         }
     }
 
+    /* etapa 5: los hilos que leen la RAM del Xbox terminan antes de liberarla
+     * (si no, al salir con + uno de ellos leía memoria ya liberada: error) */
     ui_thread_stop();
+    sampler_stop();
+    apu_exit();
     kio_sync(); /* lo que falte escribir en la SD */
     sound_exit();
     clocks_restore();

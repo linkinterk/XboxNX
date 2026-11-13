@@ -20,6 +20,8 @@ typedef void (*ApuOutFn)(void *ctx, const int16_t *stereo, unsigned n);
 
 /* Los cuadros en su propio hilo (true en la Switch) o en el del intérprete. */
 void apu_set_threaded(bool on);
+/* al salir de la app: termina el hilo de los cuadros */
+void apu_exit(void);
 bool apu_init(struct Kernel *k);
 uint32_t apu_read(struct Kernel *k, uint32_t off, int size);
 void apu_write(struct Kernel *k, uint32_t off, int size, uint32_t v);

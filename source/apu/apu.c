@@ -197,6 +197,7 @@ static void route(uint32_t *off, ApuRead *rd, ApuWrite *wr)
 static volatile bool g_dsp_busy; /* el hilo de los cuadros corre el DSP sin g_mx */
 static pthread_cond_t g_cv_dsp = PTHREAD_COND_INITIALIZER;
 static volatile bool g_sleeping; /* el hilo de los cuadros espera (hay que avisarle) */
+static volatile bool g_quit; /* al salir de la app: el hilo de los cuadros termina */
 
 uint32_t apu_read(Kernel *k, uint32_t off, int size)
 {
@@ -311,7 +312,7 @@ static void run_frames(MCPXAPUState *d, uint64_t now)
     if (now > g_next_frame_ns && now - g_next_frame_ns > 100000000ull) {
         __atomic_store_n(&g_next_frame_ns, now - 100000000ull, __ATOMIC_RELAXED);
     }
-    while (g_next_frame_ns <= now) {
+    while (g_next_frame_ns <= now && !g_quit) {
         __atomic_store_n(&g_next_frame_ns, g_next_frame_ns + GP_FRAME_NS, __ATOMIC_RELAXED);
         uint32_t fectl = d->regs[NV_PAPU_FECTL];
         if (GET_MASK(d->regs[NV_PAPU_SECTL], NV_PAPU_SECTL_XCNTMODE) == NV_PAPU_SECTL_XCNTMODE_OFF ||
@@ -350,6 +351,9 @@ static void *frame_thread(void *arg)
     (void)arg;
     pthread_mutex_lock(&g_mx);
     for (;;) {
+        if (g_quit) {
+            break;
+        }
         MCPXAPUState *d = g_state;
         uint64_t target = __atomic_load_n(&g_target_ns, __ATOMIC_RELAXED);
         if (!d || target < g_next_frame_ns) {
@@ -367,6 +371,7 @@ static void *frame_thread(void *arg)
         }
         run_frames(d, target);
     }
+    pthread_mutex_unlock(&g_mx);
     return NULL;
 }
 
@@ -424,6 +429,24 @@ void apu_set_threaded(bool on)
     } else {
         g_thread_on = false;
     }
+}
+
+/* Al salir de la app, antes de liberar la RAM del Xbox: el hilo de los
+ * cuadros termina (si no, seguía leyendo las voces de una RAM ya liberada). */
+void apu_exit(void)
+{
+    if (!g_thread_on) {
+        return;
+    }
+    pthread_mutex_lock(&g_mx);
+    g_quit = true;
+    pthread_mutex_unlock(&g_mx);
+    pthread_cond_broadcast(&g_cv);
+#ifdef __SWITCH__
+    threadWaitForExit(&g_thr);
+    threadClose(&g_thr);
+#endif
+    g_thread_on = false;
 }
 
 bool apu_next_frame(uint64_t *ns)

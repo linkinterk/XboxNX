@@ -11,5 +11,7 @@
 
 /* cur: Cpu.jit_cur (el bloque que corre ahora, 0 fuera del JIT). */
 void sampler_start(const volatile uint32_t *cur, Vm *vm, const char *version);
+/* al salir de la app (antes de liberar la RAM del Xbox) */
+void sampler_stop(void);
 
 #endif
