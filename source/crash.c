@@ -1,5 +1,6 @@
 /* XboxNX — cierres del propio emulador (ver crash.h). */
 #include "crash.h"
+#include "clocks.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -274,6 +275,9 @@ void __libnx_exception_handler(ThreadExceptionDump *ctx)
     g_crash.guarded = gi >= 0;
     if (gi < 0 || !g_guard[gi].quiet) {
         report();
+    }
+    if (gi < 0) {
+        clocks_restore(); /* la app se cierra: los relojes como estaban */
     }
     if (gi >= 0) {
         jmp_buf *jb = g_guard[gi].jb;

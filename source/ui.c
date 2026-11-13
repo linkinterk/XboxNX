@@ -14,6 +14,7 @@
 #include "gfx.h"
 #include "hw.h"
 #include "gpu.h"
+#include "clocks.h"
 #include "apu/apu.h"
 #include "nv2a_sw.h"
 #include "prof.h"
@@ -960,7 +961,7 @@ static void draw_run(const UiState *s)
         /* en qué se va el tiempo real */
         double fps, spd;
         game_rate(s->run, &fps, &spd);
-        int o = snprintf(sub, sizeof(sub), "%.1f FPS · juego al %.0f%% · Tiempo:", fps, spd * 100.0);
+        int o = snprintf(sub, sizeof(sub), "%.1f FPS · juego al %.0f%% · %s · Tiempo:", fps, spd * 100.0, clocks_info());
         for (int i = 0; i < PROF_N && o < (int)sizeof(sub) - 20; i++) {
             o += snprintf(sub + o, sizeof(sub) - (size_t)o, "%s %s %u%%", i ? " ·" : "", prof_name((ProfPart)i),
                           (s->prof[i] + 5) / 10);

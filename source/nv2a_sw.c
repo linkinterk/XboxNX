@@ -1301,10 +1301,172 @@ static void transform(const float in[16][4], OutVert *o)
 /* ---- etapa 4c: el dibujo a la GPU ---- */
 
 /* Una cara de la textura de la etapa, a ARGB (para subirla a la GPU). */
+static inline uint32_t pk8(float x) { return (uint32_t)(clamp01(x) * 255 + 0.5f); }
+
+/* DXT1/3/5 por bloques de 4x4 (las mismas cuentas que dxt_texel, una vez por bloque) */
+static void decode_dxt(const Tex *t, uint32_t *out)
+{
+    uint32_t bw = (t->w + 3) / 4, bh = (t->h + 3) / 4;
+    unsigned bs = t->fmt == 0x0C ? 8 : 16;
+    for (uint32_t by = 0; by < bh; by++) {
+        for (uint32_t bx = 0; bx < bw; bx++) {
+            const uint8_t *b = t->base + (by * bw + bx) * bs;
+            const uint8_t *cb = t->fmt == 0x0C ? b : b + 8;
+            uint16_t c0 = (uint16_t)(cb[0] | cb[1] << 8), c1 = (uint16_t)(cb[2] | cb[3] << 8);
+            float a[4], bb[4], pal[4][4];
+            rgb565(c0, a);
+            rgb565(c1, bb);
+            float pa[4] = {1, 1, 1, 1};
+            memcpy(pal[0], a, sizeof(a));
+            memcpy(pal[1], bb, sizeof(bb));
+            if (c0 > c1 || t->fmt != 0x0C) {
+                for (int k = 2; k < 4; k++) {
+                    float f = k == 2 ? 2.0f / 3 : 1.0f / 3;
+                    for (int i = 0; i < 3; i++) {
+                        pal[k][i] = a[i] * f + bb[i] * (1 - f);
+                    }
+                }
+            } else {
+                for (int i = 0; i < 3; i++) {
+                    pal[2][i] = (a[i] + bb[i]) / 2;
+                    pal[3][i] = 0;
+                }
+                pa[3] = 0;
+            }
+            uint32_t rgb[4];
+            for (int k = 0; k < 4; k++) {
+                rgb[k] = pk8(pal[k][0]) << 16 | pk8(pal[k][1]) << 8 | pk8(pal[k][2]);
+            }
+            uint32_t a5[8] = {0};
+            if (t->fmt == 0x0F) {
+                unsigned a0 = b[0], a1 = b[1];
+                for (unsigned ai = 0; ai < 8; ai++) {
+                    float v;
+                    if (ai == 0) {
+                        v = (float)a0;
+                    } else if (ai == 1) {
+                        v = (float)a1;
+                    } else if (a0 > a1) {
+                        v = ((8 - ai) * a0 + (ai - 1) * a1) / 7.0f;
+                    } else if (ai < 6) {
+                        v = ((6 - ai) * a0 + (ai - 1) * a1) / 5.0f;
+                    } else {
+                        v = ai == 6 ? 0 : 255;
+                    }
+                    a5[ai] = pk8(v / 255.0f);
+                }
+            }
+            uint64_t abits = 0;
+            if (t->fmt == 0x0F) {
+                for (int i = 0; i < 6; i++) {
+                    abits |= (uint64_t)b[2 + i] << (8 * i);
+                }
+            }
+            for (uint32_t yy = 0; yy < 4; yy++) {
+                uint32_t y = by * 4 + yy;
+                if (y >= t->h) {
+                    break;
+                }
+                for (uint32_t xx = 0; xx < 4; xx++) {
+                    uint32_t x = bx * 4 + xx;
+                    if (x >= t->w) {
+                        break;
+                    }
+                    unsigned idx = (cb[4 + yy] >> (2 * xx)) & 3;
+                    uint32_t al;
+                    if (t->fmt == 0x0E) {
+                        unsigned n = (b[yy * 2 + xx / 2] >> (4 * (xx & 1))) & 0xF;
+                        al = pk8(n / 15.0f);
+                    } else if (t->fmt == 0x0F) {
+                        al = a5[(abits >> (3 * (yy * 4 + xx))) & 7];
+                    } else {
+                        al = pk8(pa[idx]);
+                    }
+                    out[y * t->w + x] = al << 24 | rgb[idx];
+                }
+            }
+        }
+    }
+}
+
+/* Las de 16 y 32 bits más comunes sin pasar por float (tablas con las mismas
+ * cuentas que texel). false: no es una de estas. */
+static bool decode_fast(const Tex *t, uint32_t *out)
+{
+    static uint8_t l5[32], l6[64], l4[16];
+    static bool init;
+    if (!init) {
+        for (int i = 0; i < 32; i++) {
+            l5[i] = (uint8_t)pk8(i / 31.0f);
+        }
+        for (int i = 0; i < 64; i++) {
+            l6[i] = (uint8_t)pk8(i / 63.0f);
+        }
+        for (int i = 0; i < 16; i++) {
+            l4[i] = (uint8_t)pk8(i / 15.0f);
+        }
+        init = true;
+    }
+    unsigned f = t->fmt, bpp = fmt_bpp(f);
+    int kind;
+    switch (f) {
+    case 0x02: case 0x10: kind = 1; break;   /* A1R5G5B5 */
+    case 0x03: case 0x1C: kind = 2; break;   /* X1R5G5B5 */
+    case 0x04: case 0x1D: kind = 3; break;   /* A4R4G4B4 */
+    case 0x05: case 0x11: kind = 4; break;   /* R5G6B5 */
+    case 0x07: case 0x1E: kind = 5; break;   /* X8R8G8B8 */
+    case 0x06: case 0x12: kind = 6; break;   /* A8R8G8B8 */
+    default: return false;
+    }
+    if (bpp != (kind <= 4 ? 2u : 4u)) {
+        return false;
+    }
+    for (uint32_t y = 0; y < t->h; y++) {
+        const uint8_t *row = t->linear ? t->base + y * t->pitch : NULL;
+        uint32_t ym = t->linear ? 0 : t->ym[y];
+        for (uint32_t x = 0; x < t->w; x++) {
+            const uint8_t *p = row ? row + x * bpp : t->base + (t->xm[x] | ym) * bpp;
+            uint32_t v, o;
+            if (bpp == 4) {
+                v = (uint32_t)(p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24);
+                o = kind == 5 ? (v | 0xFF000000u) : v;
+            } else {
+                v = (uint32_t)(p[0] | p[1] << 8);
+                switch (kind) {
+                case 1:
+                    o = (v >> 15 ? 0xFF000000u : 0) | (uint32_t)l5[(v >> 10) & 31] << 16 |
+                        (uint32_t)l5[(v >> 5) & 31] << 8 | l5[v & 31];
+                    break;
+                case 2:
+                    o = 0xFF000000u | (uint32_t)l5[(v >> 10) & 31] << 16 | (uint32_t)l5[(v >> 5) & 31] << 8 |
+                        l5[v & 31];
+                    break;
+                case 3:
+                    o = (uint32_t)l4[v >> 12] << 24 | (uint32_t)l4[(v >> 8) & 15] << 16 |
+                        (uint32_t)l4[(v >> 4) & 15] << 8 | l4[v & 15];
+                    break;
+                default:
+                    o = 0xFF000000u | (uint32_t)l5[v >> 11] << 16 | (uint32_t)l6[(v >> 5) & 63] << 8 | l5[v & 31];
+                    break;
+                }
+            }
+            *out++ = o;
+        }
+    }
+    return true;
+}
+
 static void gpu_decode(int stage, int face, uint32_t *out)
 {
     Tex t = g_tex[stage];
     t.base += (uint32_t)face * t.face_bytes;
+    if (t.fmt == 0x0C || t.fmt == 0x0E || t.fmt == 0x0F) {
+        decode_dxt(&t, out);
+        return;
+    }
+    if (decode_fast(&t, out)) {
+        return;
+    }
     for (uint32_t y = 0; y < t.h; y++) {
         for (uint32_t x = 0; x < t.w; x++) {
             float c[4];

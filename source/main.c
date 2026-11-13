@@ -23,6 +23,7 @@
 #include "dump.h"
 #include "probe.h"
 #include "crash.h"
+#include "clocks.h"
 #include "gpu.h"
 #include "hw.h"
 #include "ui.h"
@@ -30,7 +31,7 @@
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.34"
+#define APP_VER   "0.18.35"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -394,6 +395,7 @@ int main(int argc, char **argv)
     padInitializeDefault(&pad);
     hidInitializeTouchScreen();
     apu_set_threaded(true); /* el audio en el núcleo 1 */
+    clocks_raise(); /* CPU 1785 MHz, memoria 1600, GPU de juego (al salir, como estaban) */
     s32 prev_touches = 0;
 
     g_ui.version = APP_VER;
@@ -677,6 +679,7 @@ int main(int argc, char **argv)
     }
 
     kio_sync(); /* lo que falte escribir en la SD */
+    clocks_restore();
     vm_free(&g_vm);
     game_close(&g_game);
     for (int i = 0; i < g_ncards; i++) {

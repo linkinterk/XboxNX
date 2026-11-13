@@ -467,6 +467,62 @@ static bool init_inner(void *nwin)
 
 /* ------------------------------------------------------------ superficies */
 
+/* ---- caché de estado de gpu_draw: en la Switch cada llamada a mesa cuesta,
+ * así que solo se manda lo que cambió desde el dibujo anterior. Cualquier
+ * otra función que toque el estado pone SC.valid = false. ---- */
+#define U_SLOTS 20
+static struct {
+    bool valid;
+    GLuint fbo, prog;
+    int vp[4], sc[4];
+    int caps; /* bits: 1 scissor, 2 depth clamp, 4 depth test, 8 cull, 16 blend */
+    int known_caps;
+    GLenum dfunc, cullf, frontf, bsrc, bdst, beq;
+    int dmask;
+    unsigned cmask;
+    float bcol[4];
+    uint8_t ulen[U_SLOTS];
+    uint8_t u[U_SLOTS][128];
+} SC;
+
+static void sc_check(void)
+{
+    if (!SC.valid) {
+        memset(&SC, 0, sizeof(SC));
+        SC.fbo = SC.prog = 0xFFFFFFFFu;
+        SC.dfunc = SC.cullf = SC.frontf = SC.bsrc = SC.bdst = SC.beq = 0xFFFFFFFFu;
+        SC.dmask = -1;
+        SC.cmask = 0xFFFFFFFFu;
+        SC.vp[2] = SC.sc[2] = -1;
+        SC.bcol[0] = -1;
+        SC.valid = true;
+    }
+}
+static void sc_cap(GLenum cap, int bit, bool on)
+{
+    if ((SC.known_caps & bit) && ((SC.caps & bit) != 0) == on) {
+        return;
+    }
+    if (on) {
+        glEnable(cap);
+        SC.caps |= bit;
+    } else {
+        glDisable(cap);
+        SC.caps &= ~bit;
+    }
+    SC.known_caps |= bit;
+}
+/* true: hay que mandar el uniform (y se guarda) */
+static bool sc_u(int slot, const void *v, size_t n)
+{
+    if (SC.ulen[slot] == n && !memcmp(SC.u[slot], v, n)) {
+        return false;
+    }
+    memcpy(SC.u[slot], v, n);
+    SC.ulen[slot] = (uint8_t)n;
+    return true;
+}
+
 static int surf_find(uint32_t pa)
 {
     for (int i = 0; i < MAX_SURF; i++) {
@@ -489,6 +545,7 @@ static void surf_flush(int i)
         return;
     }
     glBindFramebuffer(GL_READ_FRAMEBUFFER, s->fbo);
+    SC.valid = false; /* la caché de estado de gpu_draw ya no vale */
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glPixelStorei(GL_PACK_ROW_LENGTH, (GLint)(s->pitch / 4));
     glReadPixels(0, 0, s->w, s->h, GL_BGRA, GL_UNSIGNED_BYTE, G.ram + s->pa);
@@ -564,6 +621,7 @@ static int surf_get(uint32_t pa, uint32_t pitch, int h, unsigned fmt)
     surf_upload(s);
     glGenFramebuffers(1, &s->fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, s->fbo);
+    SC.valid = false; /* la caché de estado de gpu_draw ya no vale */
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->tex, 0);
     G.st.surfaces++;
     return best;
@@ -644,6 +702,7 @@ static GLuint fbo_get(int si, int zi)
     o->zeta = zi;
     glGenFramebuffers(1, &o->fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, o->fbo);
+    SC.valid = false; /* la caché de estado de gpu_draw ya no vale */
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, G.surf[si].tex, 0);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, G.zeta[zi].rb);
     Zeta *z = &G.zeta[zi];
@@ -878,43 +937,88 @@ bool gpu_draw(const GpuDraw *d)
         zi = zeta_get(d->zeta_pa, d->zpitch, G.surf[si].w, G.surf[si].h);
     }
     GLuint fbo = fbo_get(si, zi);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    sc_check(); /* fbo_get / zeta_get pueden haber cambiado el estado */
     Surf *s = &G.surf[si];
-    glViewport(0, 0, s->w, s->h);
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(d->x0, d->y0, d->x1 - d->x0, d->y1 - d->y0);
-    glEnable(GL_DEPTH_CLAMP);
+    if (SC.fbo != fbo) {
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        SC.fbo = fbo;
+    }
+    if (SC.vp[2] != s->w || SC.vp[3] != s->h) {
+        glViewport(0, 0, s->w, s->h);
+        SC.vp[2] = s->w, SC.vp[3] = s->h;
+    }
+    sc_cap(GL_SCISSOR_TEST, 1, true);
+    int scv[4] = {d->x0, d->y0, d->x1 - d->x0, d->y1 - d->y0};
+    if (memcmp(SC.sc, scv, sizeof(scv))) {
+        glScissor(scv[0], scv[1], scv[2], scv[3]);
+        memcpy(SC.sc, scv, sizeof(scv));
+    }
+    sc_cap(GL_DEPTH_CLAMP, 2, true);
     /* estado */
     if (zi >= 0 && d->dtest) {
-        glEnable(GL_DEPTH_TEST);
-        glDepthFunc(d->dfunc >= 0x200 && d->dfunc <= 0x207 ? d->dfunc : 0x207);
-        glDepthMask(d->dmask ? GL_TRUE : GL_FALSE);
+        sc_cap(GL_DEPTH_TEST, 4, true);
+        GLenum df = d->dfunc >= 0x200 && d->dfunc <= 0x207 ? d->dfunc : 0x207;
+        if (SC.dfunc != df) {
+            glDepthFunc(df);
+            SC.dfunc = df;
+        }
+        int dm = d->dmask ? 1 : 0;
+        if (SC.dmask != dm) {
+            glDepthMask(dm ? GL_TRUE : GL_FALSE);
+            SC.dmask = dm;
+        }
     } else {
-        glDisable(GL_DEPTH_TEST);
-        glDepthMask(GL_FALSE);
+        sc_cap(GL_DEPTH_TEST, 4, false);
+        if (SC.dmask != 0) {
+            glDepthMask(GL_FALSE);
+            SC.dmask = 0;
+        }
     }
     if (d->cull && (d->cull_face == 0x404 || d->cull_face == 0x405 || d->cull_face == 0x408)) {
-        glEnable(GL_CULL_FACE);
-        glCullFace(d->cull_face);
+        sc_cap(GL_CULL_FACE, 8, true);
+        if (SC.cullf != d->cull_face) {
+            glCullFace(d->cull_face);
+            SC.cullf = d->cull_face;
+        }
         /* la y de GL va al revés de la pantalla: el sentido se invierte */
-        glFrontFace(d->front_face == 0x900 ? GL_CCW : GL_CW);
+        GLenum ff = d->front_face == 0x900 ? GL_CCW : GL_CW;
+        if (SC.frontf != ff) {
+            glFrontFace(ff);
+            SC.frontf = ff;
+        }
     } else {
-        glDisable(GL_CULL_FACE);
+        sc_cap(GL_CULL_FACE, 8, false);
     }
     if (d->blend) {
-        glEnable(GL_BLEND);
-        glBlendFuncSeparate(blend_factor(d->sfac), blend_factor(d->dfac), blend_factor(d->sfac), blend_factor(d->dfac));
-        glBlendEquation(blend_eq(d->beq));
+        sc_cap(GL_BLEND, 16, true);
+        GLenum bs = blend_factor(d->sfac), bd = blend_factor(d->dfac), be = blend_eq(d->beq);
+        if (SC.bsrc != bs || SC.bdst != bd) {
+            glBlendFuncSeparate(bs, bd, bs, bd);
+            SC.bsrc = bs, SC.bdst = bd;
+        }
+        if (SC.beq != be) {
+            glBlendEquation(be);
+            SC.beq = be;
+        }
         float bc[4];
         argb_vec(d->bcolor, bc);
-        glBlendColor(bc[0], bc[1], bc[2], bc[3]);
+        if (memcmp(SC.bcol, bc, sizeof(bc))) {
+            glBlendColor(bc[0], bc[1], bc[2], bc[3]);
+            memcpy(SC.bcol, bc, sizeof(bc));
+        }
     } else {
-        glDisable(GL_BLEND);
+        sc_cap(GL_BLEND, 16, false);
     }
-    glColorMask((d->cmask & 0x00010000u) != 0, (d->cmask & 0x00000100u) != 0, (d->cmask & 0x00000001u) != 0,
-                (d->cmask & 0x01000000u) != 0);
+    if (SC.cmask != d->cmask) {
+        glColorMask((d->cmask & 0x00010000u) != 0, (d->cmask & 0x00000100u) != 0, (d->cmask & 0x00000001u) != 0,
+                    (d->cmask & 0x01000000u) != 0);
+        SC.cmask = d->cmask;
+    }
     /* texturas */
-    glUseProgram(G.prog);
+    if (SC.prog != G.prog) {
+        glUseProgram(G.prog);
+        SC.prog = G.prog;
+    }
     GLint tmode[4] = {0}, tcube[4] = {0};
     float tscale[8];
     for (int i = 0; i < 4; i++) {
@@ -935,34 +1039,50 @@ bool gpu_draw(const GpuDraw *d)
         tcube[i] = t->cube;
     }
     glActiveTexture(GL_TEXTURE0);
-    /* uniforms */
-    float vp[4] = {2.0f / (float)s->w, 2.0f / (float)s->h, d->zmax > 0 ? 2.0f / d->zmax : 1.0f, 0};
-    glUniform4fv(G.u_vp, 1, vp);
-    glUniform1iv(G.u_tmode, 4, tmode);
-    glUniform1iv(G.u_tcube, 4, tcube);
-    glUniform2fv(G.u_tscale, 4, tscale);
-    glUniform1ui(G.u_cctl, d->cctl);
-    glUniform1ui(G.u_fcw0, d->fcw0);
-    glUniform1ui(G.u_fcw1, d->fcw1);
-    glUniform1uiv(G.u_icw, 8, d->c_icw);
-    glUniform1uiv(G.u_ocw, 8, d->c_ocw);
-    glUniform1uiv(G.u_aicw, 8, d->a_icw);
-    glUniform1uiv(G.u_aocw, 8, d->a_ocw);
-    float f0[32], f1[32], fog[4];
-    for (int i = 0; i < 8; i++) {
-        argb_vec(d->factor0[i], &f0[4 * i]);
-        argb_vec(d->factor1[i], &f1[4 * i]);
+    if (!SC.valid) { /* tex_get pudo copiar una superficie a la RAM */
+        sc_check();
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        SC.fbo = fbo;
+        glUseProgram(G.prog);
+        SC.prog = G.prog;
     }
-    argb_vec(d->fog_color, fog);
-    glUniform4fv(G.u_f0, 8, f0);
-    glUniform4fv(G.u_f1, 8, f1);
-    glUniform4fv(G.u_fog, 1, fog);
-    glUniform1i(G.u_atest, d->atest);
-    glUniform1ui(G.u_afunc, d->afunc);
-    glUniform1f(G.u_aref, (float)(d->aref & 0xFF));
+    /* uniforms (solo los que cambiaron) */
+    float vp[4] = {2.0f / (float)s->w, 2.0f / (float)s->h, d->zmax > 0 ? 2.0f / d->zmax : 1.0f, 0};
+    if (sc_u(0, vp, sizeof(vp))) glUniform4fv(G.u_vp, 1, vp);
+    if (sc_u(1, tmode, sizeof(tmode))) glUniform1iv(G.u_tmode, 4, tmode);
+    if (sc_u(2, tcube, sizeof(tcube))) glUniform1iv(G.u_tcube, 4, tcube);
+    if (sc_u(3, tscale, sizeof(tscale))) glUniform2fv(G.u_tscale, 4, tscale);
+    if (sc_u(4, &d->cctl, 4)) glUniform1ui(G.u_cctl, d->cctl);
+    if (sc_u(5, &d->fcw0, 4)) glUniform1ui(G.u_fcw0, d->fcw0);
+    if (sc_u(6, &d->fcw1, 4)) glUniform1ui(G.u_fcw1, d->fcw1);
+    if (sc_u(7, d->c_icw, 32)) glUniform1uiv(G.u_icw, 8, d->c_icw);
+    if (sc_u(8, d->c_ocw, 32)) glUniform1uiv(G.u_ocw, 8, d->c_ocw);
+    if (sc_u(9, d->a_icw, 32)) glUniform1uiv(G.u_aicw, 8, d->a_icw);
+    if (sc_u(10, d->a_ocw, 32)) glUniform1uiv(G.u_aocw, 8, d->a_ocw);
+    if (sc_u(11, d->factor0, 32) | sc_u(12, d->factor1, 32)) {
+        float f0[32], f1[32];
+        for (int i = 0; i < 8; i++) {
+            argb_vec(d->factor0[i], &f0[4 * i]);
+            argb_vec(d->factor1[i], &f1[4 * i]);
+        }
+        glUniform4fv(G.u_f0, 8, f0);
+        glUniform4fv(G.u_f1, 8, f1);
+    }
+    if (sc_u(13, &d->fog_color, 4)) {
+        float fog[4];
+        argb_vec(d->fog_color, fog);
+        glUniform4fv(G.u_fog, 1, fog);
+    }
+    int at = d->atest;
+    if (sc_u(14, &at, 4)) glUniform1i(G.u_atest, d->atest);
+    if (sc_u(15, &d->afunc, 4)) glUniform1ui(G.u_afunc, d->afunc);
+    if (sc_u(16, &d->aref, 4)) glUniform1f(G.u_aref, (float)(d->aref & 0xFF));
     /* vértices */
-    glBindVertexArray(G.vao);
-    glBindBuffer(GL_ARRAY_BUFFER, G.vbo);
+    if (!(SC.known_caps & 32)) {
+        glBindVertexArray(G.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, G.vbo);
+        SC.known_caps |= 32;
+    }
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)d->nverts * GPU_VERT_FLOATS * 4, d->verts, GL_STREAM_DRAW);
     unsigned n = d->nverts;
     switch (d->prim) {
@@ -1002,8 +1122,7 @@ bool gpu_draw(const GpuDraw *d)
     }
     default: break;
     }
-    glBindVertexArray(0);
-    s->dirty = true;
+    s->dirty = true; /* el VAO queda puesto para el dibujo siguiente */
     G.st.draws++;
     return true;
 }
@@ -1019,6 +1138,7 @@ bool gpu_clear_color(uint32_t pa, uint32_t pitch, int h, int x0, int y0, int x1,
     }
     Surf *s = &G.surf[si];
     glBindFramebuffer(GL_FRAMEBUFFER, s->fbo);
+    SC.valid = false; /* la caché de estado de gpu_draw ya no vale */
     glEnable(GL_SCISSOR_TEST);
     glScissor(x0, y0, x1 - x0, y1 - y0);
     glColorMask((mask & 4) != 0, (mask & 2) != 0, (mask & 1) != 0, (mask & 8) != 0);
@@ -1064,6 +1184,7 @@ bool gpu_clear_zeta(uint32_t pa, uint32_t zpitch, int h, int x0, int y0, int x1,
         }
         return true;
     }
+    SC.valid = false;
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glEnable(GL_SCISSOR_TEST);
     glScissor(x0, y0, x1 - x0, y1 - y0);
@@ -1143,6 +1264,7 @@ bool gpu_present_ui(const uint32_t *rgba, int w, int h)
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    SC.valid = false; /* la caché de estado de gpu_draw ya no vale */
     EGLint sw = w, sh = h;
     eglQuerySurface(G.dpy, G.win, EGL_WIDTH, &sw);
     eglQuerySurface(G.dpy, G.win, EGL_HEIGHT, &sh);
