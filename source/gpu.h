@@ -116,6 +116,11 @@ bool gpu_present_ui(const uint32_t *rgba, int w, int h);
 typedef struct GpuStats {
     unsigned draws, fallbacks, uploads, flushes, surfaces, textures;
     unsigned vs_draws, vs_progs, vs_bad, vs_cached, vs_saved, vs_const_vec;
+    unsigned vs_known, vs_pre; /* vertex shaders guardados en la SD de otras veces y cuántos ya se compilaron por adelantado */
+    unsigned vs_deferred; /* dibujos que esperaron un cuadro a que su programa se compile (los hizo la CPU) */
+    bool sso;             /* programas por etapa: el fragment shader se compila una sola vez */
+    uint64_t ns_link;     /* tiempo compilando programas */
+    uint64_t ns_rp;       /* tiempo dentro de glReadPixels al terminar cada cuadro */
     unsigned indexed; /* etapa 5: dibujos con índices (cada vértice una vez) */
     unsigned queries; /* informes de visibilidad leídos */
     bool bin_ok;      /* el driver da binarios de programas (la caché de shaders en la SD funciona) */ /* 4c: dibujos con el vertex shader en el GPU, programas, los que no compilaron */
@@ -123,6 +128,16 @@ typedef struct GpuStats {
     uint64_t ns_draw, ns_tex, ns_read, ns_vbuf, ns_query, ns_call; /* etapa 5: tiempo en gpu_draw (todo), en decodificar+subir texturas y en leer cuadros a la RAM */
 } GpuStats;
 const GpuStats *gpu_stats(void);
+/* Cuánto tiempo de programas nuevos se compila por cuadro antes de dejar los
+ * demás para el siguiente (replay lo quita para comparar imágenes). */
+void gpu_set_link_budget(uint64_t ns);
+/* El vertex program con esa clave: 0 no lo tiene, 1 listo, 2 no compila. */
+int gpu_vs_state(uint64_t key);
+/* Deja listo el programa (lo compila con src si falta y hay tiempo en este
+ * cuadro). false: este dibujo lo transforma la CPU. */
+bool gpu_vs_prepare(uint64_t key, const char *src);
+/* Al salir de la app. */
+void gpu_exit(void);
 
 /* Olvidar todas las superficies y texturas (otra ejecución, o la RAM cambió por otro lado). */
 void gpu_reset(void);

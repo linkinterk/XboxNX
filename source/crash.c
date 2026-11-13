@@ -24,6 +24,19 @@ static struct {
     bool quiet;
 } g_guard[MAX_GUARDS];
 static const uint32_t *g_eip;
+static const char *volatile g_step; /* el paso de la salida, o NULL */
+static char g_why[160];             /* abort / assert / diag: el motivo */
+
+void crash_step(const char *step) { g_step = step; }
+
+void crash_mem(unsigned *used_mb, unsigned *total_mb)
+{
+    u64 used = 0, total = 0;
+    svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+    svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
+    *used_mb = (unsigned)(used >> 20);
+    *total_mb = (unsigned)(total >> 20);
+}
 
 /* La ranura del hilo h; con claim, toma una libre (sin carreras entre hilos). */
 static int guard_slot(Handle h, bool claim)
@@ -124,6 +137,9 @@ static const char *desc_name(uint32_t d)
     case 0x104: return "trampa";
     case 0x106: return "error del sistema (SError)";
     case 0x301: return "llamada al sistema inválida";
+    case 0xAB0: return "abort (la app se detuvo a propósito)";
+    case 0xAB1: return "assert (una comprobación falló)";
+    case 0xAB2: return "libnx: error fatal (diagAbort)";
     default: return "otra";
     }
 }
@@ -222,6 +238,21 @@ static void report(void)
     put(g_crash.part ? g_crash.part : "?");
     put("\neip x86 ");
     hex(g_crash.guest_eip);
+    if (g_why[0]) {
+        put("\nmotivo ");
+        put(g_why);
+    }
+    if (g_step) {
+        put("\nal salir, en: ");
+        put(g_step);
+    }
+    {
+        unsigned u, t;
+        crash_mem(&u, &t);
+        char mb[48];
+        snprintf(mb, sizeof(mb), "\nmemoria %u de %u MB", u, t);
+        put(mb);
+    }
     put("\nsp ");
     hex(g_crash.sp);
     put("  base ");
@@ -244,22 +275,79 @@ static void report(void)
     }
     put("\n");
 
-    FsFileSystem *fs = fsdevGetDeviceFileSystem("sdmc");
+    /* al salir la SD ya puede estar desmontada: entonces se abre aparte */
+    FsFileSystem own, *fs = fsdevGetDeviceFileSystem("sdmc");
+    bool opened = false;
     if (!fs) {
-        return;
+        if (R_FAILED(fsOpenSdCardFileSystem(&own))) {
+            return;
+        }
+        fs = &own;
+        opened = true;
     }
     static const char path[] = "/switch/XboxNX/cierre.txt";
     fsFsCreateDirectory(fs, "/switch");
     fsFsCreateDirectory(fs, "/switch/XboxNX");
     fsFsDeleteFile(fs, path);
-    if (R_FAILED(fsFsCreateFile(fs, path, (s64)g_rn, 0))) {
+    if (R_SUCCEEDED(fsFsCreateFile(fs, path, (s64)g_rn, 0))) {
+        FsFile f;
+        if (R_SUCCEEDED(fsFsOpenFile(fs, path, FsOpenMode_Write, &f))) {
+            fsFileWrite(&f, 0, g_rep, g_rn, FsWriteOption_Flush);
+            fsFileClose(&f);
+        }
+    }
+    fsFsCommit(fs);
+    if (opened) {
+        fsFsClose(&own);
+    }
+}
+
+/* Los cierres que no son excepciones (abort, assert, diagAbort): antes daban
+ * la pantalla de error de la Switch sin dejar cierre.txt. Se enlazan con
+ * -Wl,--wrap (Makefile): toda llamada a abort() pasa primero por aquí. */
+static void report_here(uint32_t desc, uint64_t pc)
+{
+    static volatile int busy;
+    if (busy) {
         return;
     }
-    FsFile f;
-    if (R_SUCCEEDED(fsFsOpenFile(fs, path, FsOpenMode_Write, &f))) {
-        fsFileWrite(&f, 0, g_rep, g_rn, FsWriteOption_Flush);
-        fsFileClose(&f);
-    }
+    busy = 1;
+    ThreadExceptionDump ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.error_desc = desc;
+    ctx.pc.x = pc;
+    ctx.lr.x = pc;
+    ctx.sp.x = (u64)(uintptr_t)__builtin_frame_address(0);
+    fill(&ctx);
+    report();
+    clocks_restore();
+}
+
+void __real_abort(void) __attribute__((noreturn));
+void __wrap_abort(void) __attribute__((noreturn));
+void __wrap_abort(void)
+{
+    report_here(g_why[0] && !strncmp(g_why, "assert", 6) ? 0xAB1 : 0xAB0, (u64)(uintptr_t)__builtin_return_address(0));
+    __real_abort();
+}
+
+void __wrap___assert_func(const char *file, int line, const char *func, const char *expr) __attribute__((noreturn));
+void __wrap___assert_func(const char *file, int line, const char *func, const char *expr)
+{
+    const char *f = file ? strrchr(file, '/') : NULL;
+    snprintf(g_why, sizeof(g_why), "assert %s:%d %s: %s", f ? f + 1 : file ? file : "?", line, func ? func : "?",
+             expr ? expr : "?");
+    __wrap_abort();
+}
+
+void __real_diagAbortWithResult(Result res) __attribute__((noreturn));
+void __wrap_diagAbortWithResult(Result res) __attribute__((noreturn));
+void __wrap_diagAbortWithResult(Result res)
+{
+    snprintf(g_why, sizeof(g_why), "diagAbort resultado 0x%X (módulo %u, código %u)", (unsigned)res,
+             (unsigned)R_MODULE(res), (unsigned)R_DESCRIPTION(res));
+    report_here(0xAB2, (u64)(uintptr_t)__builtin_return_address(0));
+    __real_diagAbortWithResult(res);
 }
 
 /*
@@ -331,6 +419,8 @@ bool crash_last(char *out, size_t n)
 void crash_guard_push(jmp_buf *jb, bool quiet) { (void)jb, (void)quiet; }
 void crash_guard_pop(void) {}
 void crash_set_eip(const uint32_t *eip) { (void)eip; }
+void crash_step(const char *step) { (void)step; }
+void crash_mem(unsigned *used_mb, unsigned *total_mb) { *used_mb = *total_mb = 0; }
 bool crash_last(char *out, size_t n)
 {
     if (n) {

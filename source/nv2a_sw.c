@@ -73,6 +73,10 @@ static struct {
     SwStats st;
 } S;
 
+/* S.prog ya se intentó decodificar para el programa puesto (S.pok dice si
+ * salió). Fuera de S: el estado capturado (sw_state_get) no cambia de forma. */
+static bool g_pparsed;
+
 void sw_init(uint8_t *ram, uint32_t ram_size, SwDmaFn dma)
 {
     if (S.pok) {
@@ -97,6 +101,7 @@ void sw_init(uint8_t *ram, uint32_t ram_size, SwDmaFn dma)
     for (int i = 0; i < 16; i++) {
         S.cur[i][3] = 1.0f;
     }
+    S.pdirty = true;
 }
 
 const SwStats *sw_stats(void) { return &S.st; }
@@ -1329,32 +1334,46 @@ static bool target(Target *t)
     return true;
 }
 
+/* El vertex program puesto: su clave (el hash de sus palabras hasta la marca
+ * de fin). Etapa 5: el juego vuelve a cargar el programa muchas veces por
+ * cuadro; solo se saca la clave, y el programa se decodifica (prog_parse)
+ * cuando de verdad hace falta: la primera vez que se ve, o si lo va a correr
+ * la CPU. */
 static bool run_program(void)
 {
-    if (S.pdirty || !S.pok) {
+    if (S.pdirty) {
         if (S.pok) {
             nv2a_vsh_program_destroy(&S.prog);
             S.pok = false;
         }
+        g_pparsed = false;
+        unsigned start = S.pstart < PROG_SLOTS ? S.pstart : 0;
+        const uint32_t *w = S.pmem + start * 4;
+        unsigned n = 0, max = PROG_SLOTS - start;
+        while (n + 1 < max && !(w[n * 4 + 3] & 1u)) {
+            n++;
+        }
+        n++;
+        uint64_t h = 1469598103934665603ull;
+        for (unsigned i = 0; i < n * 4; i++) {
+            h = (h ^ w[i]) * 1099511628211ull;
+        }
+        S.pkey = h | 1;
+        S.pdirty = false;
+    }
+    return true;
+}
+
+/* El programa decodificado en S.prog. false: no es válido. */
+static bool prog_parse(void)
+{
+    if (!g_pparsed) {
         unsigned start = S.pstart < PROG_SLOTS ? S.pstart : 0;
         S.pok = nv2a_vsh_parse_program(&S.prog, S.pmem + start * 4, PROG_SLOTS - start) == NV2AVPR_SUCCESS;
         if (!S.pok) {
             S.st.vs_errors++;
-        } else {
-            /* el hash de las palabras del programa (hasta la marca de fin) */
-            unsigned n = 0;
-            while (n < PROG_SLOTS - start && !S.prog.steps[n].is_final) {
-                n++;
-            }
-            n++;
-            uint64_t h = 1469598103934665603ull;
-            const uint32_t *w = S.pmem + start * 4;
-            for (unsigned i = 0; i < n * 4; i++) {
-                h = (h ^ w[i]) * 1099511628211ull;
-            }
-            S.pkey = h | 1;
         }
-        S.pdirty = false;
+        g_pparsed = true;
     }
     return S.pok;
 }
@@ -1570,7 +1589,7 @@ static void gpu_decode(int stage, int face, uint32_t *out)
 static bool g_vs_draw;
 static bool g_vs_gpu = true;
 static uint64_t g_vs_key;
-static bool g_vs_ok;
+static uint64_t g_src_key; /* de qué programa es el texto de g_vs_src */
 static uint16_t g_vs_mask;
 static char g_vs_src[48 * 1024];
 
@@ -1733,7 +1752,7 @@ static bool gpu_try(const Target *t, const OutVert *ov)
         d.vs_mask = g_vs_mask;
         d.vs_consts = S.consts;
         d.vs_key = g_vs_key;
-        d.vs_src = g_vs_src;
+        d.vs_src = g_src_key == g_vs_key ? g_vs_src : NULL; /* el GPU ya lo tiene compilado */
     }
     d.color_pa = (uint32_t)(t->color - S.ram);
     d.pitch = t->pitch;
@@ -1802,21 +1821,65 @@ static void transform_part(void *arg, int part, int n)
 
 void sw_set_vs_gpu(bool on) { g_vs_gpu = on; }
 
+/* Lo que ya se sabe de cada vertex program visto, por su clave: si tiene
+ * versión GLSL y qué entradas usa. Así, cuando el juego vuelve a poner un
+ * programa que ya se vio (pasa cientos de veces por cuadro), no hay que
+ * decodificarlo ni escribir su GLSL otra vez. */
+typedef struct VsEnt {
+    uint64_t key;
+    uint16_t mask;
+    uint8_t st; /* 1: con GLSL · 2: sin traducir (lo hace la CPU) · 3: programa inválido */
+} VsEnt;
+#define VS_ENTS 4096
+static VsEnt g_vsent[VS_ENTS];
+
+static VsEnt *vs_ent(void)
+{
+    VsEnt *e = &g_vsent[(S.pkey >> 1) & (VS_ENTS - 1)];
+    if (e->key != S.pkey) {
+        e->key = S.pkey;
+        e->mask = 0;
+        if (!prog_parse()) {
+            e->st = 3;
+        } else if (vsh_glsl(&S.prog, g_vs_src, sizeof(g_vs_src), &e->mask)) {
+            e->st = 1;
+            g_src_key = S.pkey;
+        } else {
+            e->st = 2;
+            g_src_key = 0;
+            S.st.vs_untranslated++;
+        }
+    }
+    return e;
+}
+
 static bool gpu_try_vs(const Target *t)
 {
     if (!g_vs_gpu) {
         return false;
     }
-    if (g_vs_key != S.pkey) {
-        g_vs_key = S.pkey;
-        g_vs_ok = vsh_glsl(&S.prog, g_vs_src, sizeof(g_vs_src), &g_vs_mask);
-        if (!g_vs_ok) {
-            S.st.vs_untranslated++;
-        }
-    }
-    if (!g_vs_ok) {
+    VsEnt *e = vs_ent();
+    if (e->st != 1) {
         return false;
     }
+    int gs = gpu_vs_state(S.pkey);
+    if (gs == 2) {
+        return false;
+    }
+    if (gs == 0) { /* el GPU todavía no lo tiene: con su texto, que lo compile */
+        if (g_src_key != S.pkey) {
+            g_src_key = 0;
+            if (!prog_parse() || !vsh_glsl(&S.prog, g_vs_src, sizeof(g_vs_src), &e->mask)) {
+                return false;
+            }
+            g_src_key = S.pkey;
+        }
+        if (!gpu_vs_prepare(S.pkey, g_vs_src)) {
+            return false; /* no compila, o le toca en el cuadro siguiente: la CPU */
+        }
+    }
+    g_vs_key = S.pkey;
+    g_vs_mask = e->mask;
     g_vs_draw = true;
     bool ok = gpu_try(t, NULL);
     g_vs_draw = false;
@@ -1854,9 +1917,7 @@ static void draw_(void)
         S.st.no_target++;
         return;
     }
-    if (!run_program()) {
-        return;
-    }
+    run_program(); /* la clave del programa puesto */
     for (int s = 0; s < 4; s++) {
         g_tex_mode[s] = (S.shader_prog >> (5 * s)) & 0x1F;
         g_tex_on[s] = g_tex_mode[s] && ((S.t_ctl0[s] >> 30) & 1);
@@ -1866,6 +1927,9 @@ static void draw_(void)
     }
     if (gpu_enabled() && gpu_try_vs(&t)) {
         return; /* los vértices los transformó el GPU */
+    }
+    if (!prog_parse()) {
+        return; /* programa inválido */
     }
     if (g_nidx) {
         idx_materialize(); /* la CPU: todos los vértices armados, como antes */

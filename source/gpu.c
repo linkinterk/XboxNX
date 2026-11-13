@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <time.h>
 
@@ -54,6 +55,25 @@ static void (*p_glGetProgramBinary)(GLuint, GLsizei, GLsizei *, GLenum *, void *
 static void (*p_glProgramBinary)(GLuint, GLenum, const void *, GLsizei);
 static void (*p_glProgramParameteri)(GLuint, GLenum, GLint);
 static void (*p_glGetIntegerv)(GLenum, GLint *);
+/* Opcionales (GL 4.1): programas por etapa. El fragment shader (los combiners
+ * interpretados, grande) se compila UNA vez y cada vertex program del juego
+ * es un programa aparte que se junta con él en un "pipeline". Sin esto, cada
+ * vertex program nuevo recompilaba también el fragment shader entero: 0,6 s
+ * por programa en la Switch (el juego se congelaba al entrar a un nivel). */
+static void (*p_glGenProgramPipelines)(GLsizei, GLuint *);
+static void (*p_glDeleteProgramPipelines)(GLsizei, const GLuint *);
+static void (*p_glBindProgramPipeline)(GLuint);
+static void (*p_glUseProgramStages)(GLuint, GLbitfield, GLuint);
+static void (*p_glProgramUniform1i)(GLuint, GLint, GLint);
+static void (*p_glProgramUniform1ui)(GLuint, GLint, GLuint);
+static void (*p_glProgramUniform1f)(GLuint, GLint, GLfloat);
+static void (*p_glProgramUniform1iv)(GLuint, GLint, GLsizei, const GLint *);
+static void (*p_glProgramUniform1uiv)(GLuint, GLint, GLsizei, const GLuint *);
+static void (*p_glProgramUniform2fv)(GLuint, GLint, GLsizei, const GLfloat *);
+static void (*p_glProgramUniform4fv)(GLuint, GLint, GLsizei, const GLfloat *);
+#define GL_PROGRAM_SEPARABLE 0x8258
+#define GL_VERTEX_SHADER_BIT 0x00000001
+#define GL_FRAGMENT_SHADER_BIT 0x00000002
 #define GL_PROGRAM_BINARY_RETRIEVABLE_HINT 0x8257
 #define GL_PROGRAM_BINARY_LENGTH 0x8741
 #define GL_NUM_PROGRAM_BINARY_FORMATS 0x87FE
@@ -118,9 +138,10 @@ typedef struct TexEnt {
  * uno por cada vertex program del juego (4c, el vertex shader en el GPU).
  * Cada uno guarda sus uniforms (los valores son de cada programa). */
 #define U_SLOTS 20
-#define MAX_PROG 128
+#define MAX_PROG 192
 typedef struct Prog {
     GLuint prog;
+    GLuint pipe;    /* por etapas: el pipeline (este vertex shader + el fragment shader común) */
     uint64_t key;   /* el hash del vertex program (0: el de siempre) */
     bool bad;       /* no compiló: lo hace la CPU */
     unsigned used;
@@ -130,6 +151,8 @@ typedef struct Prog {
     uint8_t u[U_SLOTS][128];
     float c[192 * 4];
     bool c_ok;
+    int c_n;        /* cuántas constantes c[] tiene de verdad el programa (el driver recorta las que no usa) */
+    bool c_seq;     /* sus posiciones son seguidas (u_c + k) */
 } Prog;
 
 static struct {
@@ -144,6 +167,11 @@ static struct {
     GLuint ui_prog, ui_tex, ui_vao;
     int ui_w, ui_h;
     Prog progs[MAX_PROG]; /* [0]: el de siempre */
+    uint8_t pfast[256];   /* clave -> ranura probable (prog_find) */
+    bool sso;             /* programas por etapa (GL 4.1) */
+    Prog fsp;             /* por etapas: el fragment shader común y sus uniforms */
+    unsigned link_frame;  /* el cuadro de los últimos programas compilados... */
+    uint64_t link_ns;     /* ...y cuánto llevan (para repartir los nuevos entre cuadros) */
     bool bin_ok;          /* el driver da binarios de programas (caché en la SD) */
     uint64_t drv_hash;    /* el hash del driver y del fragment shader (parte de la clave) */
     /* el vertex shader en el GPU: sus entradas empaquetadas */
@@ -194,7 +222,8 @@ static const char *k_vs =
     "layout(location=5) in vec4 a_t2;\n"
     "layout(location=6) in vec4 a_t3;\n"
     "uniform vec4 u_vp;\n" /* 2/W, 2/H, 2/zmax */
-    "out vec4 v_c0; out vec4 v_c1; out vec4 v_t0; out vec4 v_t1; out vec4 v_t2; out vec4 v_t3;\n"
+    "LOC(0) out vec4 v_c0; LOC(1) out vec4 v_c1; LOC(2) out vec4 v_t0; LOC(3) out vec4 v_t1;\n"
+    "LOC(4) out vec4 v_t2; LOC(5) out vec4 v_t3;\n"
     "void main() {\n"
     "  float w = a_pos.w;\n"
     "  if (!(abs(w) > 1e-20) || isinf(w)) w = 1.0;\n"
@@ -206,7 +235,8 @@ static const char *k_vs =
 /* Los register combiners interpretados (lo mismo que combine() de nv2a_sw.c). */
 static const char *k_fs =
     "#version 330 core\n"
-    "in vec4 v_c0; in vec4 v_c1; in vec4 v_t0; in vec4 v_t1; in vec4 v_t2; in vec4 v_t3;\n"
+    "LOC(0) in vec4 v_c0; LOC(1) in vec4 v_c1; LOC(2) in vec4 v_t0; LOC(3) in vec4 v_t1;\n"
+    "LOC(4) in vec4 v_t2; LOC(5) in vec4 v_t3;\n"
     "out vec4 o_color;\n"
     "uniform sampler2D s2d0; uniform sampler2D s2d1; uniform sampler2D s2d2; uniform sampler2D s2d3;\n"
     "uniform samplerCube scb0; uniform samplerCube scb1; uniform samplerCube scb2; uniform samplerCube scb3;\n"
@@ -324,10 +354,23 @@ static const char *k_ui_fs =
     "in vec2 v_uv; out vec4 o; uniform sampler2D t;\n"
     "void main() { o = vec4(texture(t, v_uv).rgb, 1.0); }\n";
 
+/* Los shaders empiezan con "#version 330 core": aquí se cambia esa línea por
+ * la cabecera que toca. Por etapas, las variables entre el vertex y el
+ * fragment shader llevan posición fija (LOC), que es como se emparejan dos
+ * programas compilados por separado. */
 static GLuint compile(GLenum type, const char *src)
 {
+    static const char ver[] = "#version 330 core\n";
+    if (!strncmp(src, ver, sizeof(ver) - 1)) {
+        src += sizeof(ver) - 1;
+    }
+    const char *parts[3] = {
+        G.sso ? "#version 330 core\n#extension GL_ARB_separate_shader_objects : enable\n"
+                "#define LOC(n) layout(location = n)\n"
+              : "#version 330 core\n#define LOC(n)\n",
+        G.sso && type == GL_VERTEX_SHADER ? "out gl_PerVertex { vec4 gl_Position; };\n" : "", src};
     GLuint s = glCreateShader(type);
-    glShaderSource(s, 1, &src, NULL);
+    glShaderSource(s, 3, parts, NULL);
     glCompileShader(s);
     GLint ok = 0;
     glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
@@ -372,24 +415,121 @@ static GLuint link2(const char *vs, const char *fs, bool keep_bin)
 static GLuint link(const char *vs, const char *fs) { return link2(vs, fs, false); }
 static GLuint link_vs(const char *vs) { return link2(vs, k_fs, true); }
 
+/* Por etapas: un programa con un solo shader. */
+static GLuint stage_prog(GLenum type, const char *src, bool keep_bin)
+{
+    GLuint sh = compile(type, src);
+    if (!sh) {
+        return 0;
+    }
+    GLuint p = glCreateProgram();
+    p_glProgramParameteri(p, GL_PROGRAM_SEPARABLE, GL_TRUE);
+    if (keep_bin && G.bin_ok) {
+        p_glProgramParameteri(p, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
+    }
+    glAttachShader(p, sh);
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    glDeleteShader(sh);
+    if (!ok) {
+        char log[600];
+        glGetProgramInfoLog(p, sizeof(log), NULL, log);
+        snprintf(G.info, sizeof(G.info), "link: %.150s", log);
+        fprintf(stderr, "XboxNX GL link (etapa):\n%s\n", log);
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+/* Los uniforms: por etapas van directo al programa p (glProgramUniform); si
+ * no, al programa puesto con glUseProgram, que es p. */
+static void pu1i(GLuint p, GLint l, GLint v) { if (G.sso) p_glProgramUniform1i(p, l, v); else glUniform1i(l, v); }
+static void pu1ui(GLuint p, GLint l, GLuint v) { if (G.sso) p_glProgramUniform1ui(p, l, v); else glUniform1ui(l, v); }
+static void pu1f(GLuint p, GLint l, GLfloat v) { if (G.sso) p_glProgramUniform1f(p, l, v); else glUniform1f(l, v); }
+static void pu1iv(GLuint p, GLint l, GLsizei n, const GLint *v) { if (G.sso) p_glProgramUniform1iv(p, l, n, v); else glUniform1iv(l, n, v); }
+static void pu1uiv(GLuint p, GLint l, GLsizei n, const GLuint *v) { if (G.sso) p_glProgramUniform1uiv(p, l, n, v); else glUniform1uiv(l, n, v); }
+static void pu2fv(GLuint p, GLint l, GLsizei n, const GLfloat *v) { if (G.sso) p_glProgramUniform2fv(p, l, n, v); else glUniform2fv(l, n, v); }
+static void pu4fv(GLuint p, GLint l, GLsizei n, const GLfloat *v) { if (G.sso) p_glProgramUniform4fv(p, l, n, v); else glUniform4fv(l, n, v); }
+
+/* Los uniforms del fragment shader del programa prog, en F. */
+static void fs_locs(Prog *F, GLuint prog)
+{
+#define U(f) F->f = glGetUniformLocation(prog, #f)
+    U(u_tmode); U(u_tcube); U(u_tscale); U(u_cctl); U(u_fcw0); U(u_fcw1); U(u_icw); U(u_ocw);
+    U(u_aicw); U(u_aocw); U(u_f0); U(u_f1); U(u_fog); U(u_atest); U(u_afunc); U(u_aref);
+#undef U
+    static const char *s2[4] = {"s2d0", "s2d1", "s2d2", "s2d3"}, *sc[4] = {"scb0", "scb1", "scb2", "scb3"};
+    for (int i = 0; i < 4; i++) {
+        F->u_s2d[i] = glGetUniformLocation(prog, s2[i]);
+        F->u_scb[i] = glGetUniformLocation(prog, sc[i]);
+        pu1i(prog, F->u_s2d[i], i);
+        pu1i(prog, F->u_scb[i], 4 + i);
+    }
+}
+
 /* Las posiciones de los uniforms de un programa y sus samplers fijos. */
 static void prog_locs(Prog *P)
 {
-#define U(f) P->f = glGetUniformLocation(P->prog, #f)
-    U(u_vp); U(u_tmode); U(u_tcube); U(u_tscale); U(u_cctl); U(u_fcw0); U(u_fcw1); U(u_icw); U(u_ocw);
-    U(u_aicw); U(u_aocw); U(u_f0); U(u_f1); U(u_fog); U(u_atest); U(u_afunc); U(u_aref);
-#undef U
+    P->u_vp = glGetUniformLocation(P->prog, "u_vp");
     P->u_c = glGetUniformLocation(P->prog, "c");
-    glUseProgram(P->prog);
-    static const char *s2[4] = {"s2d0", "s2d1", "s2d2", "s2d3"}, *sc[4] = {"scb0", "scb1", "scb2", "scb3"};
-    for (int i = 0; i < 4; i++) {
-        P->u_s2d[i] = glGetUniformLocation(P->prog, s2[i]);
-        P->u_scb[i] = glGetUniformLocation(P->prog, sc[i]);
-        glUniform1i(P->u_s2d[i], i);
-        glUniform1i(P->u_scb[i], 4 + i);
+    /* Cuántas c[] quedaron: el driver puede recortar el arreglo a las que el
+     * programa usa, y entonces u_c + k (k fuera) sería OTRO uniform. */
+    P->c_n = 0;
+    P->c_seq = true;
+    if (P->u_c >= 0) {
+        int lo = 0, hi = 191;
+        while (lo < hi) {
+            int mid = (lo + hi + 1) / 2;
+            char nm[16];
+            snprintf(nm, sizeof(nm), "c[%d]", mid);
+            if (glGetUniformLocation(P->prog, nm) >= 0) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        P->c_n = lo + 1;
+        char nm[16];
+        snprintf(nm, sizeof(nm), "c[%d]", lo);
+        P->c_seq = glGetUniformLocation(P->prog, nm) == P->u_c + lo;
+    }
+    if (!G.sso) {
+        glUseProgram(P->prog);
+        fs_locs(P, P->prog);
     }
     memset(P->ulen, 0, sizeof(P->ulen));
     P->c_ok = false;
+}
+
+/* Por etapas: el pipeline de P (su vertex shader + el fragment shader común). */
+static bool pipe_make(Prog *P)
+{
+    p_glGenProgramPipelines(1, &P->pipe);
+    p_glUseProgramStages(P->pipe, GL_VERTEX_SHADER_BIT, P->prog);
+    p_glUseProgramStages(P->pipe, GL_FRAGMENT_SHADER_BIT, G.fsp.prog);
+    if (glGetError() != GL_NO_ERROR) {
+        while (glGetError() != GL_NO_ERROR) {
+        }
+        p_glDeleteProgramPipelines(1, &P->pipe);
+        P->pipe = 0;
+        return false;
+    }
+    return true;
+}
+
+/* Soltar el programa de P (y su pipeline). */
+static void prog_free(Prog *P)
+{
+    if (P->pipe) {
+        p_glDeleteProgramPipelines(1, &P->pipe);
+    }
+    if (P->prog) {
+        glDeleteProgram(P->prog);
+    }
+    P->pipe = 0;
+    P->prog = 0;
 }
 
 /* ------------------------------------------------------------ EGL */
@@ -417,6 +557,18 @@ static void teardown(void)
     G.ctx = EGL_NO_CONTEXT;
     G.win = EGL_NO_SURFACE;
     G.ready = G.on = false;
+}
+
+/* Al salir de la app: soltar el contexto y la memoria del driver. */
+void gpu_exit(void)
+{
+    if (G.dpy == EGL_NO_DISPLAY) {
+        return;
+    }
+    if (G.ready) {
+        glFinish(); /* que no quede nada en curso (lecturas de cuadros, consultas) */
+    }
+    teardown();
 }
 
 bool gpu_init(void *nwin)
@@ -515,6 +667,26 @@ static bool init_inner(void *nwin)
     *(void **)&p_glProgramBinary = egl_proc("glProgramBinary");
     *(void **)&p_glProgramParameteri = egl_proc("glProgramParameteri");
     *(void **)&p_glGetIntegerv = egl_proc("glGetIntegerv");
+    *(void **)&p_glGenProgramPipelines = egl_proc("glGenProgramPipelines");
+    *(void **)&p_glDeleteProgramPipelines = egl_proc("glDeleteProgramPipelines");
+    *(void **)&p_glBindProgramPipeline = egl_proc("glBindProgramPipeline");
+    *(void **)&p_glUseProgramStages = egl_proc("glUseProgramStages");
+    *(void **)&p_glProgramUniform1i = egl_proc("glProgramUniform1i");
+    *(void **)&p_glProgramUniform1ui = egl_proc("glProgramUniform1ui");
+    *(void **)&p_glProgramUniform1f = egl_proc("glProgramUniform1f");
+    *(void **)&p_glProgramUniform1iv = egl_proc("glProgramUniform1iv");
+    *(void **)&p_glProgramUniform1uiv = egl_proc("glProgramUniform1uiv");
+    *(void **)&p_glProgramUniform2fv = egl_proc("glProgramUniform2fv");
+    *(void **)&p_glProgramUniform4fv = egl_proc("glProgramUniform4fv");
+    G.sso = p_glGenProgramPipelines && p_glDeleteProgramPipelines && p_glBindProgramPipeline &&
+            p_glUseProgramStages && p_glProgramParameteri && p_glProgramUniform1i && p_glProgramUniform1ui &&
+            p_glProgramUniform1f && p_glProgramUniform1iv && p_glProgramUniform1uiv && p_glProgramUniform2fv &&
+            p_glProgramUniform4fv;
+#ifndef __SWITCH__
+    if (getenv("XBOXNX_NO_SSO")) { /* la PC (replay): comparar con los programas enteros */
+        G.sso = false;
+    }
+#endif
     {
         GLint nf = 0;
         if (p_glGetIntegerv) {
@@ -527,12 +699,43 @@ static bool init_inner(void *nwin)
         h = fnv(h, r ? r : "", r ? strlen(r) : 0);
         h = fnv(h, v ? v : "", v ? strlen(v) : 0);
         h = fnv(h, k_fs, strlen(k_fs));
-        h = fnv(h, "vsh1", 4); /* subir si cambia vsh_glsl */
+        h = fnv(h, "vsh2", 4); /* subir si cambia vsh_glsl */
         G.drv_hash = h;
     }
     PASO("shaders");
-    G.progs[0].prog = link(k_vs, k_fs);
-    G.ui_prog = link(k_ui_vs, k_ui_fs);
+    if (G.sso) {
+        /* el fragment shader común y el vertex shader de siempre, cada uno su programa */
+        while (glGetError() != GL_NO_ERROR) {
+        }
+        G.fsp.prog = stage_prog(GL_FRAGMENT_SHADER, k_fs, false);
+        G.progs[0].prog = G.fsp.prog ? stage_prog(GL_VERTEX_SHADER, k_vs, false) : 0;
+        if (G.progs[0].prog && !pipe_make(&G.progs[0])) {
+            glDeleteProgram(G.progs[0].prog);
+            G.progs[0].prog = 0;
+        }
+        if (!G.progs[0].prog) { /* este driver no puede: como antes */
+            PASO("sin programas por etapa");
+            if (G.fsp.prog) {
+                glDeleteProgram(G.fsp.prog);
+            }
+            memset(&G.fsp, 0, sizeof(G.fsp));
+            G.sso = false;
+        } else {
+            fs_locs(&G.fsp, G.fsp.prog);
+            PASO("programas por etapa");
+        }
+    }
+    G.drv_hash = fnv(G.drv_hash, G.sso ? "sso" : "uno", 3);
+    G.st.sso = G.sso;
+    if (!G.sso) {
+        G.progs[0].prog = link(k_vs, k_fs);
+    }
+    {
+        bool sso = G.sso;
+        G.sso = false; /* el de la pantalla, entero (se usa con glUseProgram) */
+        G.ui_prog = link(k_ui_vs, k_ui_fs);
+        G.sso = sso;
+    }
     if (!G.progs[0].prog || !G.ui_prog) {
         return false;
     }
@@ -572,6 +775,7 @@ static bool init_inner(void *nwin)
 static struct {
     bool valid;
     GLuint fbo, prog, vao;
+    bool nouse; /* por etapas: ya se hizo glUseProgram(0) */
     int vp[4], sc[4];
     int caps; /* bits: 1 scissor, 2 depth clamp, 4 depth test, 8 cull, 16 blend */
     int known_caps;
@@ -607,6 +811,20 @@ static void sc_cap(GLenum cap, int bit, bool on)
         SC.caps &= ~bit;
     }
     SC.known_caps |= bit;
+}
+/* Poner el programa de P para dibujar. */
+static void prog_use(Prog *P)
+{
+    if (G.sso) {
+        if (!SC.nouse) {
+            glUseProgram(0); /* con un programa puesto, el pipeline no cuenta */
+            SC.nouse = true;
+        }
+        p_glBindProgramPipeline(P->pipe);
+    } else {
+        glUseProgram(P->prog);
+    }
+    SC.prog = P->prog;
 }
 /* true: hay que mandar el uniform (y se guarda) */
 static bool sc_u(Prog *P, int slot, const void *v, size_t n)
@@ -704,55 +922,260 @@ static void cache_save(uint64_t key, GLuint p)
     free(buf);
 }
 
-/* El programa del vertex program de este dibujo (compilado una vez). NULL: no se pudo. */
-static Prog *vs_prog(const GpuDraw *d)
+static uint64_t g_link_budget = 40000000ull; /* 40 ms de programas nuevos por cuadro; luego, al siguiente */
+void gpu_set_link_budget(uint64_t ns) { g_link_budget = ns; }
+
+/* El programa con esa clave, si ya está (compilado o marcado como malo). */
+static Prog *prog_find(uint64_t key)
+{
+    unsigned h = (unsigned)(key >> 1) & 255u;
+    int i = G.pfast[h];
+    if (i > 0 && G.progs[i].key == key && (G.progs[i].prog || G.progs[i].bad)) {
+        return &G.progs[i];
+    }
+    for (i = 1; i < MAX_PROG; i++) {
+        if (G.progs[i].key == key && (G.progs[i].prog || G.progs[i].bad)) {
+            G.pfast[h] = (uint8_t)i;
+            return &G.progs[i];
+        }
+    }
+    return NULL;
+}
+
+/* Una ranura para un programa nuevo: libre o, si evict, la menos usada. */
+static Prog *prog_slot(bool evict)
 {
     int free_i = -1, old = -1;
     for (int i = 1; i < MAX_PROG; i++) {
         Prog *P = &G.progs[i];
-        if (P->key == d->vs_key && (P->prog || P->bad)) {
-            P->used = G.frame;
-            return P->bad ? NULL : P;
-        }
         if (!P->prog && !P->bad) {
-            if (free_i < 0) {
-                free_i = i;
-            }
-        } else if (old < 0 || P->used < G.progs[old].used) {
+            free_i = i;
+            break;
+        }
+        if (old < 0 || P->used < G.progs[old].used) {
             old = i;
         }
     }
-    if (!d->vs_src) {
+    if (free_i < 0 && !evict) {
         return NULL;
     }
-    int i = free_i >= 0 ? free_i : old;
-    Prog *P = &G.progs[i];
-    if (P->prog) {
-        glDeleteProgram(P->prog);
-    }
+    Prog *P = &G.progs[free_i >= 0 ? free_i : old];
+    prog_free(P);
     memset(P, 0, sizeof(*P));
-    P->key = d->vs_key;
-    P->used = G.frame;
-    P->prog = cache_load(d->vs_key);
+    return P;
+}
+
+/* Compila src en P (ya vacío). false: no compiló (P queda vacío). */
+static bool prog_build(Prog *P, uint64_t key, const char *src)
+{
+    uint64_t t0 = now_ns();
+    P->key = key;
+    P->prog = cache_load(key);
     if (P->prog) {
         G.st.vs_cached++;
     } else {
         char keep[sizeof(G.info)];
         memcpy(keep, G.info, sizeof(keep));
-        P->prog = link_vs(d->vs_src);
+        P->prog = G.sso ? stage_prog(GL_VERTEX_SHADER, src, true) : link_vs(src);
         memcpy(G.info, keep, sizeof(keep));
         if (P->prog) {
-            cache_save(d->vs_key, P->prog);
+            cache_save(key, P->prog);
         }
     }
-    SC.valid = false; /* link / prog_locs cambian el programa puesto */
-    if (!P->prog) {
+    if (P->prog && G.sso && !pipe_make(P)) {
+        prog_free(P);
+    }
+    if (!G.sso) {
+        SC.valid = false; /* link / prog_locs cambian el programa puesto */
+    }
+    if (P->prog) {
+        prog_locs(P);
+        G.st.vs_progs++;
+    }
+    uint64_t dt = now_ns() - t0;
+    if (G.link_frame != G.frame) {
+        G.link_frame = G.frame;
+        G.link_ns = 0;
+    }
+    G.link_ns += dt;
+    G.st.ns_link += dt;
+    return P->prog != 0;
+}
+
+/* ---- los vertex shaders ya vistos, en la SD (su texto GLSL): el driver de
+ * la Switch no da binarios, así que cada vez que se abre el juego hay que
+ * compilarlos de nuevo. Con la lista guardada se compilan de a uno por cuadro
+ * desde el arranque (durante las pantallas de carga) en vez de congelar el
+ * juego la primera vez que cada uno hace falta. ---- */
+#define PRE_EXT ".v2" /* subir si cambia vsh_glsl */
+#define PRE_MAX 512
+static struct {
+    bool scanned;
+    uint64_t key[PRE_MAX];
+    int n, at;
+    char src[48 * 1024];
+} PRE;
+
+static void pre_path(char *o, size_t n, uint64_t key)
+{
+    snprintf(o, n, "%s/%016llx" PRE_EXT, shader_dir(), (unsigned long long)key);
+}
+
+static void pre_save(uint64_t key, const char *src)
+{
+    if (!shader_dir()) {
+        return;
+    }
+    char path[300], tmp[310];
+    pre_path(path, sizeof(path), key);
+    struct stat sb;
+    if (stat(path, &sb) == 0) {
+        return; /* ya estaba */
+    }
+    mkdir(shader_dir(), 0777);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "wb");
+    if (!f) {
+        return;
+    }
+    size_t len = strlen(src);
+    bool ok = fwrite(src, 1, len, f) == len;
+    ok = fclose(f) == 0 && ok;
+    if (ok) {
+        remove(path);
+        ok = rename(tmp, path) == 0; /* entero o nada: uno a medias no compilaría */
+    }
+    if (ok) {
+        G.st.vs_known++;
+    } else {
+        remove(tmp);
+    }
+}
+
+static void pre_scan(void)
+{
+    PRE.scanned = true;
+    PRE.n = PRE.at = 0;
+    if (!shader_dir()) {
+        return;
+    }
+    DIR *dir = opendir(shader_dir());
+    if (!dir) {
+        return;
+    }
+    struct dirent *e;
+    while ((e = readdir(dir)) != NULL && PRE.n < PRE_MAX) {
+        size_t l = strlen(e->d_name);
+        if (l != 16 + sizeof(PRE_EXT) - 1 || strcmp(e->d_name + 16, PRE_EXT)) {
+            continue;
+        }
+        char *end = NULL;
+        unsigned long long k = strtoull(e->d_name, &end, 16);
+        if (end == e->d_name + 16 && k) {
+            PRE.key[PRE.n++] = k;
+        }
+    }
+    closedir(dir);
+    G.st.vs_known = (unsigned)PRE.n;
+}
+
+/* Uno por cuadro, si en este cuadro no se compiló ya otro. */
+static void pre_step(void)
+{
+    if (!PRE.scanned) {
+        pre_scan();
+    }
+    while (PRE.at < PRE.n) {
+        if (G.link_frame == G.frame && G.link_ns > 0) {
+            return;
+        }
+        uint64_t key = PRE.key[PRE.at];
+        if (prog_find(key)) {
+            PRE.at++;
+            continue;
+        }
+        Prog *P = prog_slot(false);
+        if (!P) {
+            PRE.at = PRE.n; /* la tabla está llena: los demás, cuando hagan falta */
+            return;
+        }
+        PRE.at++;
+        char path[300];
+        pre_path(path, sizeof(path), key);
+        FILE *f = fopen(path, "rb");
+        if (!f) {
+            continue;
+        }
+        size_t len = fread(PRE.src, 1, sizeof(PRE.src) - 1, f);
+        fclose(f);
+        PRE.src[len] = 0;
+        if (len < 64 || len >= sizeof(PRE.src) - 1 || !prog_build(P, key, PRE.src)) {
+            memset(P, 0, sizeof(*P));
+            remove(path); /* no sirve: que se genere de nuevo cuando haga falta */
+            continue;
+        }
+        P->used = 0; /* si falta lugar, primero se van los que no se usaron */
+        G.st.vs_pre++;
+        return;
+    }
+}
+
+int gpu_vs_state(uint64_t key)
+{
+    if (!G.on) {
+        return 2;
+    }
+    Prog *P = prog_find(key);
+    return !P ? 0 : P->bad ? 2 : 1;
+}
+
+bool gpu_vs_prepare(uint64_t key, const char *src)
+{
+    if (!G.on) {
+        return false;
+    }
+    Prog *P = prog_find(key);
+    if (P) {
+        return !P->bad;
+    }
+    if (!src) {
+        return false;
+    }
+    /* etapa 5: compilar cuesta (décimas de segundo en la Switch). Si en este
+     * cuadro ya se fue bastante en programas nuevos, este espera al cuadro
+     * siguiente: mientras, el dibujo lo transforma la CPU (más lento, pero el
+     * juego no se congela varios segundos al entrar a un nivel). */
+    if (G.link_frame == G.frame && G.link_ns > g_link_budget) {
+        G.st.vs_deferred++;
+        return false;
+    }
+    int zone = g_zone;
+    g_zone = Z_GL_PROG;
+    P = prog_slot(true);
+    bool ok = prog_build(P, key, src);
+    if (ok) {
+        P->used = G.frame;
+        pre_save(key, src);
+    } else {
+        P->key = key;
         P->bad = true;
         G.st.vs_bad++;
+    }
+    g_zone = zone;
+    return ok;
+}
+
+/* El programa del vertex program de este dibujo (compilado una vez). NULL: no se pudo
+ * (o todavía no: ver g_link_budget). */
+static Prog *vs_prog(const GpuDraw *d)
+{
+    if (!gpu_vs_prepare(d->vs_key, d->vs_src)) {
         return NULL;
     }
-    prog_locs(P);
-    G.st.vs_progs++;
+    Prog *P = prog_find(d->vs_key);
+    if (P) {
+        P->used = G.frame;
+    }
     return P;
 }
 
@@ -1003,7 +1426,9 @@ static void surf_flush_async(int i)
     SC.valid = false;
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glPixelStorei(GL_PACK_ROW_LENGTH, (GLint)(s->pitch / 4));
+    uint64_t t0 = now_ns();
     glReadPixels(0, 0, s->w, s->h, GL_BGRA, GL_UNSIGNED_BYTE, (void *)0);
+    G.st.ns_rp += now_ns() - t0; /* si es grande, el driver espera a la GPU aquí (no es asíncrono) */
     glPixelStorei(GL_PACK_ROW_LENGTH, 0);
     glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
     RB.fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
@@ -1592,8 +2017,7 @@ static bool gpu_draw_(const GpuDraw *d)
     }
     /* texturas */
     if (SC.prog != P->prog) {
-        glUseProgram(P->prog);
-        SC.prog = P->prog;
+        prog_use(P);
     }
     g_zone = Z_GL_TEXS;
     GLint tmode[4] = {0}, tcube[4] = {0};
@@ -1620,52 +2044,60 @@ static bool gpu_draw_(const GpuDraw *d)
         sc_check();
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         SC.fbo = fbo;
-        glUseProgram(P->prog);
-        SC.prog = P->prog;
+        prog_use(P);
     }
     g_zone = Z_GL_UNIF;
     /* uniforms (solo los que cambiaron) */
     float vp[4] = {2.0f / (float)s->w, 2.0f / (float)s->h, d->zmax > 0 ? 2.0f / d->zmax : 1.0f, 0};
-    if (sc_u(P, 0, vp, sizeof(vp))) glUniform4fv(P->u_vp, 1, vp);
-    if (sc_u(P, 1, tmode, sizeof(tmode))) glUniform1iv(P->u_tmode, 4, tmode);
-    if (sc_u(P, 2, tcube, sizeof(tcube))) glUniform1iv(P->u_tcube, 4, tcube);
-    if (sc_u(P, 3, tscale, sizeof(tscale))) glUniform2fv(P->u_tscale, 4, tscale);
-    if (sc_u(P, 4, &d->cctl, 4)) glUniform1ui(P->u_cctl, d->cctl);
-    if (sc_u(P, 5, &d->fcw0, 4)) glUniform1ui(P->u_fcw0, d->fcw0);
-    if (sc_u(P, 6, &d->fcw1, 4)) glUniform1ui(P->u_fcw1, d->fcw1);
-    if (sc_u(P, 7, d->c_icw, 32)) glUniform1uiv(P->u_icw, 8, d->c_icw);
-    if (sc_u(P, 8, d->c_ocw, 32)) glUniform1uiv(P->u_ocw, 8, d->c_ocw);
-    if (sc_u(P, 9, d->a_icw, 32)) glUniform1uiv(P->u_aicw, 8, d->a_icw);
-    if (sc_u(P, 10, d->a_ocw, 32)) glUniform1uiv(P->u_aocw, 8, d->a_ocw);
-    if (sc_u(P, 11, d->factor0, 32) | sc_u(P, 12, d->factor1, 32)) {
+    Prog *F = G.sso ? &G.fsp : P; /* de quién son los uniforms del fragment shader */
+    GLuint vp_ = P->prog, fp = F->prog;
+    if (sc_u(P, 0, vp, sizeof(vp))) pu4fv(vp_, P->u_vp, 1, vp);
+    if (sc_u(F, 1, tmode, sizeof(tmode))) pu1iv(fp, F->u_tmode, 4, tmode);
+    if (sc_u(F, 2, tcube, sizeof(tcube))) pu1iv(fp, F->u_tcube, 4, tcube);
+    if (sc_u(F, 3, tscale, sizeof(tscale))) pu2fv(fp, F->u_tscale, 4, tscale);
+    if (sc_u(F, 4, &d->cctl, 4)) pu1ui(fp, F->u_cctl, d->cctl);
+    if (sc_u(F, 5, &d->fcw0, 4)) pu1ui(fp, F->u_fcw0, d->fcw0);
+    if (sc_u(F, 6, &d->fcw1, 4)) pu1ui(fp, F->u_fcw1, d->fcw1);
+    if (sc_u(F, 7, d->c_icw, 32)) pu1uiv(fp, F->u_icw, 8, d->c_icw);
+    if (sc_u(F, 8, d->c_ocw, 32)) pu1uiv(fp, F->u_ocw, 8, d->c_ocw);
+    if (sc_u(F, 9, d->a_icw, 32)) pu1uiv(fp, F->u_aicw, 8, d->a_icw);
+    if (sc_u(F, 10, d->a_ocw, 32)) pu1uiv(fp, F->u_aocw, 8, d->a_ocw);
+    if (sc_u(F, 11, d->factor0, 32) | sc_u(F, 12, d->factor1, 32)) {
         float f0[32], f1[32];
         for (int i = 0; i < 8; i++) {
             argb_vec(d->factor0[i], &f0[4 * i]);
             argb_vec(d->factor1[i], &f1[4 * i]);
         }
-        glUniform4fv(P->u_f0, 8, f0);
-        glUniform4fv(P->u_f1, 8, f1);
+        pu4fv(fp, F->u_f0, 8, f0);
+        pu4fv(fp, F->u_f1, 8, f1);
     }
-    if (sc_u(P, 13, &d->fog_color, 4)) {
+    if (sc_u(F, 13, &d->fog_color, 4)) {
         float fog[4];
         argb_vec(d->fog_color, fog);
-        glUniform4fv(P->u_fog, 1, fog);
+        pu4fv(fp, F->u_fog, 1, fog);
     }
     int at = d->atest;
-    if (sc_u(P, 14, &at, 4)) glUniform1i(P->u_atest, d->atest);
-    if (sc_u(P, 15, &d->afunc, 4)) glUniform1ui(P->u_afunc, d->afunc);
-    if (sc_u(P, 16, &d->aref, 4)) glUniform1f(P->u_aref, (float)(d->aref & 0xFF));
+    if (sc_u(F, 14, &at, 4)) pu1i(fp, F->u_atest, d->atest);
+    if (sc_u(F, 15, &d->afunc, 4)) pu1ui(fp, F->u_afunc, d->afunc);
+    if (sc_u(F, 16, &d->aref, 4)) pu1f(fp, F->u_aref, (float)(d->aref & 0xFF));
     /* vértices */
     if (d->vs_in || d->vs_pk) {
-        if (!P->c_ok) {
-            glUniform4fv(P->u_c, 192, d->vs_consts);
-            memcpy(P->c, d->vs_consts, sizeof(P->c));
+        /* solo las c[] que el programa tiene (P->c_n): las demás no las lee */
+        int cn = P->c_n;
+        if (cn <= 0) {
+            P->c_ok = true;
+        } else if (!P->c_ok || !P->c_seq) {
+            if (!P->c_ok || memcmp(P->c, d->vs_consts, (size_t)cn * 16)) {
+                pu4fv(vp_, P->u_c, cn, d->vs_consts);
+                memcpy(P->c, d->vs_consts, (size_t)cn * 16);
+                G.st.vs_const_vec += (unsigned)cn;
+            }
             P->c_ok = true;
         } else {
             /* etapa 5: solo las constantes que cambiaron (el juego cambia unas
              * pocas, las matrices, entre dibujo y dibujo) */
             int first = -1, last = -1;
-            for (int k = 0; k < 192; k++) {
+            for (int k = 0; k < cn; k++) {
                 if (memcmp(&P->c[k * 4], &d->vs_consts[k * 4], 16)) {
                     if (first < 0) {
                         first = k;
@@ -1674,7 +2106,7 @@ static bool gpu_draw_(const GpuDraw *d)
                 }
             }
             if (first >= 0) {
-                glUniform4fv(P->u_c + first, last - first + 1, &d->vs_consts[first * 4]);
+                pu4fv(vp_, P->u_c + first, last - first + 1, &d->vs_consts[first * 4]);
                 memcpy(&P->c[first * 4], &d->vs_consts[first * 4], (size_t)(last - first + 1) * 16);
                 G.st.vs_const_vec += (unsigned)(last - first + 1);
             }
@@ -1867,6 +2299,12 @@ bool gpu_clear_zeta(uint32_t pa, uint32_t zpitch, int h, int x0, int y0, int x1,
 
 void gpu_end_frame(void)
 {
+    if (G.on) {
+        int zone = g_zone;
+        g_zone = Z_GL_PROG;
+        pre_step();
+        g_zone = zone;
+    }
     G.frame++;
 }
 
@@ -1979,9 +2417,13 @@ void gpu_readback_poll(void) {}
 void gpu_flush_all(void) {}
 void gpu_invalidate(uint32_t pa, uint32_t len) { (void)pa, (void)len; }
 void gpu_end_frame(void) {}
+int gpu_vs_state(uint64_t key) { (void)key; return 2; }
+bool gpu_vs_prepare(uint64_t key, const char *src) { (void)key, (void)src; return false; }
 bool gpu_present_ui(const uint32_t *rgba, int w, int h) { (void)rgba, (void)w, (void)h; return false; }
 const GpuStats *gpu_stats(void) { return &g_nost; }
 void gpu_set_ram(uint8_t *ram, uint32_t size) { (void)ram, (void)size; }
 void gpu_reset(void) {}
+void gpu_set_link_budget(uint64_t ns) { (void)ns; }
+void gpu_exit(void) {}
 
 #endif

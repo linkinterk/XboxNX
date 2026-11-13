@@ -521,6 +521,41 @@ static void cap_method(uint32_t m, uint32_t v)
     g_cap.rec[g_cap.n++] = (CapRec){m, v, base};
 }
 
+/* GET_REPORT: escribe en la RAM cuántos píxeles pasaron la prueba de Z desde
+ * CLEAR_REPORT_VALUE (lo usan las pruebas de visibilidad: luces, destellos). */
+static void get_report(Kernel *k, uint32_t v)
+{
+    g_hw.st.reports++;
+    if (!g_hw.report_inst) {
+        g_hw.st.reports_noinst++;
+    }
+    if (g_hw.report_inst) {
+        uint32_t pa = dma_base(g_hw.report_inst) + (v & 0x00FFFFFFu);
+        uint32_t *p = phys32(k, pa);
+        if (p && phys32(k, pa + 12)) {
+            /* en los cuadros que no se dibujan (saltar cuadros) no hay
+             * cuenta: la última de ese mismo informe */
+            static struct {
+                uint32_t off, n;
+            } last[64];
+            unsigned slot = ((v & 0x00FFFFFFu) >> 4) & 63;
+            uint32_t n;
+            if (sw_skipping()) {
+                n = last[slot].off == (v & 0x00FFFFFFu) ? last[slot].n : 0;
+            } else {
+                n = sw_zpass_result();
+                last[slot].off = v & 0x00FFFFFFu;
+                last[slot].n = n;
+            }
+            uint64_t ts = k->now_ns;
+            p[0] = (uint32_t)ts;
+            p[1] = (uint32_t)(ts >> 32);
+            p[2] = n;
+            p[3] = 0;
+        }
+    }
+}
+
 /* Un método del push buffer. Devuelve PB_GO o el motivo de parar. */
 static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
 {
@@ -547,6 +582,14 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         return PB_TRAP;
     }
     if (g_hw.obj_class[subch] != 0x97) {
+        /* el informe de visibilidad no es de ninguna otra clase: si llega por
+         * otro subcanal (clase mal hallada), igual se atiende; si no, el juego
+         * esperaba un resultado que nunca llegaba */
+        if (m == NV097_GET_REPORT) {
+            g_hw.st.reports_other++;
+            g_hw.st.other_class = g_hw.obj_class[subch] | (uint32_t)subch << 8 | 0x10000u;
+            get_report(k, v);
+        }
         return PB_GO;
     }
     draw_method(m, v);
@@ -620,35 +663,7 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         g_hw.st.zpass_tests++;
         break;
     case NV097_GET_REPORT: /* los píxeles que pasaron Z (pruebas de visibilidad), informe listo */
-        g_hw.st.reports++;
-        if (!g_hw.report_inst) {
-            g_hw.st.reports_noinst++;
-        }
-        if (g_hw.report_inst) {
-            uint32_t pa = dma_base(g_hw.report_inst) + (v & 0x00FFFFFFu);
-            uint32_t *p = phys32(k, pa);
-            if (p && phys32(k, pa + 12)) {
-                /* en los cuadros que no se dibujan (saltar cuadros) no hay
-                 * cuenta: la última de ese mismo informe */
-                static struct {
-                    uint32_t off, n;
-                } last[64];
-                unsigned slot = ((v & 0x00FFFFFFu) >> 4) & 63;
-                uint32_t n;
-                if (sw_skipping()) {
-                    n = last[slot].off == (v & 0x00FFFFFFu) ? last[slot].n : 0;
-                } else {
-                    n = sw_zpass_result();
-                    last[slot].off = v & 0x00FFFFFFu;
-                    last[slot].n = n;
-                }
-                uint64_t ts = k->now_ns;
-                p[0] = (uint32_t)ts;
-                p[1] = (uint32_t)(ts >> 32);
-                p[2] = n;
-                p[3] = 0;
-            }
-        }
+        get_report(k, v);
         break;
     default:
         break;

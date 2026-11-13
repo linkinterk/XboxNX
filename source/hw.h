@@ -54,7 +54,9 @@ typedef struct HwStats {
     unsigned traps, flips, sem_releases;
     unsigned frames;        /* cambios de PCRTC_START: cuadros mostrados */
     unsigned clears;        /* CLEAR_SURFACE hechos */
-    unsigned reports, zpass_tests, reports_noinst; /* GET_REPORT recibidos, pruebas de visibilidad (CLEAR_REPORT_VALUE), informes sin DMA */
+    unsigned reports, zpass_tests, reports_noinst;
+    unsigned reports_other;  /* GET_REPORT por un subcanal que no era Kelvin (antes se perdían) */
+    unsigned other_class;    /* la última clase (no Kelvin) por la que llegó un método de Kelvin */ /* GET_REPORT recibidos, pruebas de visibilidad (CLEAR_REPORT_VALUE), informes sin DMA */
     unsigned av_modes;      /* llamadas a AvSetDisplayMode */
     HwDraws last;           /* el último cuadro */
     uint64_t total_draws;

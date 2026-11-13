@@ -43,66 +43,114 @@ static const char k_head[] =
     "#version 330 core\n"
     "uniform vec4 c[192];\n"
     "uniform vec4 u_vp;\n"
-    "out vec4 v_c0; out vec4 v_c1; out vec4 v_t0; out vec4 v_t1; out vec4 v_t2; out vec4 v_t3;\n"
+    /* LOC(n): la posición fija de cada salida (la define gpu.c al compilar) */
+    "LOC(0) out vec4 v_c0; LOC(1) out vec4 v_c1; LOC(2) out vec4 v_t0; LOC(3) out vec4 v_t1;\n"
+    "LOC(4) out vec4 v_t2; LOC(5) out vec4 v_t3;\n"
     "const float FMAX = 3.40282347e38;\n"
-    "vec4 crel(int k) { return (k >= 0 && k < 192) ? c[k] : vec4(0.0); }\n"
-    /* fix_inf_mult: si a*b da infinito sin que a o b lo sean, el máximo con su signo */
-    "vec4 mulx(vec4 a, vec4 b) {\n"
-    "  vec4 r = a * b;\n"
-    "  vec4 f = vec4(isinf(r)) * (1.0 - vec4(isinf(a))) * (1.0 - vec4(isinf(b)));\n"
-    "  return mix(r, sign(r) * FMAX, f);\n"
-    "}\n"
+    /* fix_inf_mult: un producto que se pasa a infinito queda en el máximo con
+     * su signo (así un 0 * resultado posterior no da NaN). Con clamp: una sola
+     * operación por producto; antes eran trece, y como casi todas las
+     * instrucciones multiplican, el shader tardaba el doble en compilar. */
+    "vec4 mulx(vec4 a, vec4 b) { return clamp(a * b, -FMAX, FMAX); }\n"
     "float fixinf(float x) { return isinf(x) ? sign(x) * FMAX : x; }\n"
     "vec4 dp3(vec4 a, vec4 b) { vec4 m = mulx(a, b); return vec4(fixinf(m.x + m.y + m.z)); }\n"
     "vec4 dph(vec4 a, vec4 b) { vec4 m = mulx(a, b); return vec4(fixinf(m.x + m.y + m.z + b.w)); }\n"
     "vec4 dp4(vec4 a, vec4 b) { vec4 m = mulx(a, b); return vec4(fixinf(m.x + m.y + m.z + m.w)); }\n"
-    "vec4 dst(vec4 a, vec4 b) { return vec4(1.0, mulx(a, b).y, a.z, b.w); }\n"
-    "vec4 vmin(vec4 a, vec4 b) { return mix(b, a, vec4(lessThan(a, b))); }\n"
-    "vec4 vmax(vec4 a, vec4 b) { return mix(b, a, vec4(greaterThan(a, b))); }\n"
-    "vec4 slt(vec4 a, vec4 b) {\n"
-    "  vec4 l = vec4(lessThan(a, b));\n"
-    "  vec4 z = vec4(equal(floatBitsToUint(a), uvec4(0x80000000u))) * vec4(equal(floatBitsToUint(b), uvec4(0u)));\n"
-    "  return min(l + z, vec4(1.0));\n"
-    "}\n"
-    "vec4 sge(vec4 a, vec4 b) { return vec4(1.0) - slt(a, b); }\n"
-    "vec4 arl(vec4 a) { return vec4(floor(a.x + 0.001)); }\n"
-    "vec4 rcp(vec4 a) {\n"
-    "  float x = a.x, r;\n"
-    "  if (x == 1.0) r = 1.0;\n"
-    "  else if (x == 0.0) r = (floatBitsToUint(x) & 0x80000000u) != 0u ? uintBitsToFloat(0xFF800000u) : uintBitsToFloat(0x7F800000u);\n"
-    "  else r = 1.0 / x;\n"
-    "  return vec4(r);\n"
-    "}\n"
-    "vec4 rcc(vec4 a) {\n"
-    "  float x = a.x, r;\n"
-    "  if (x == 1.0) r = 1.0;\n"
-    "  else {\n"
-    "    r = 1.0 / x;\n"
-    "    if (r > 0.0) { if (r < 5.42101e-020) r = 5.42101e-020; else if (r > 1.884467e+019) r = uintBitsToFloat(0x5F800000u); }\n"
-    "    else { if (r < -1.884467e+019) r = uintBitsToFloat(0xDF800000u); else if (r > -5.42101e-020) r = -5.42101e-020; }\n"
-    "  }\n"
-    "  return vec4(r);\n"
-    "}\n"
-    "vec4 rsq(vec4 a) {\n"
-    "  float x = abs(a.x), r;\n"
-    "  if (x == 1.0) r = 1.0; else if (x == 0.0) r = uintBitsToFloat(0x7F800000u); else r = 1.0 / sqrt(x);\n"
-    "  return vec4(r);\n"
-    "}\n"
-    "vec4 vexp(vec4 a) { float t = floor(a.x); return vec4(exp2(t), a.x - t, exp2(a.x), 1.0); }\n"
-    "vec4 vlog(vec4 a) {\n"
-    "  float t = abs(a.x);\n"
-    "  if (t == 0.0) return vec4(uintBitsToFloat(0xFF800000u), 1.0, uintBitsToFloat(0xFF800000u), 1.0);\n"
-    "  if (isinf(t)) return vec4(uintBitsToFloat(0x7F800000u), 1.0, uintBitsToFloat(0x7F800000u), 1.0);\n"
-    "  uint u = floatBitsToUint(t);\n"
-    "  float e = float(int((u >> 23) & 0xFFu) - 127);\n"
-    "  return vec4(e, uintBitsToFloat((u & 0x7FFFFFu) | 0x3F800000u), log2(t), 1.0);\n"
-    "}\n"
-    "vec4 lit(vec4 a) {\n"
-    "  vec4 r = vec4(1.0, 0.0, 0.0, 1.0);\n"
-    "  float p = clamp(a.w, -127.9961, 127.9961);\n"
-    "  if (a.x > 0.0) { r.y = a.x; if (a.y > 0.0) r.z = pow(a.y, p); }\n"
-    "  return r;\n"
-    "}\n";
+    "";
+
+/* Las funciones que no todos los programas usan: solo se agregan las que
+ * hacen falta (menos texto que compilar por programa). El orden es el de
+ * Nv2aVshOpcode no importa: se buscan por nombre. */
+static const struct {
+    const char *name, *src;
+} k_fn[] = {
+    {"crel",
+      "vec4 crel(int k) { return (k >= 0 && k < 192) ? c[k] : vec4(0.0); }\n"
+    },
+    {"dst",
+      "vec4 dst(vec4 a, vec4 b) { return vec4(1.0, mulx(a, b).y, a.z, b.w); }\n"
+    },
+    {"vmin",
+      "vec4 vmin(vec4 a, vec4 b) { return mix(b, a, vec4(lessThan(a, b))); }\n"
+    },
+    {"vmax",
+      "vec4 vmax(vec4 a, vec4 b) { return mix(b, a, vec4(greaterThan(a, b))); }\n"
+    },
+    {"slt",
+      "vec4 slt(vec4 a, vec4 b) {\n"
+      "  vec4 l = vec4(lessThan(a, b));\n"
+      "  vec4 z = vec4(equal(floatBitsToUint(a), uvec4(0x80000000u))) * vec4(equal(floatBitsToUint(b), uvec4(0u)));\n"
+      "  return min(l + z, vec4(1.0));\n"
+      "}\n"
+    },
+    {"sge",
+      "vec4 sge(vec4 a, vec4 b) { return vec4(1.0) - slt(a, b); }\n"
+    },
+    {"arl",
+      "vec4 arl(vec4 a) { return vec4(floor(a.x + 0.001)); }\n"
+    },
+    {"rcp",
+      "vec4 rcp(vec4 a) {\n"
+      "  float x = a.x, r;\n"
+      "  if (x == 1.0) r = 1.0;\n"
+      "  else if (x == 0.0) r = (floatBitsToUint(x) & 0x80000000u) != 0u ? uintBitsToFloat(0xFF800000u) : uintBitsToFloat(0x7F800000u);\n"
+      "  else r = 1.0 / x;\n"
+      "  return vec4(r);\n"
+      "}\n"
+    },
+    {"rcc",
+      "vec4 rcc(vec4 a) {\n"
+      "  float x = a.x, r;\n"
+      "  if (x == 1.0) r = 1.0;\n"
+      "  else {\n"
+      "    r = 1.0 / x;\n"
+      "    if (r > 0.0) { if (r < 5.42101e-020) r = 5.42101e-020; else if (r > 1.884467e+019) r = uintBitsToFloat(0x5F800000u); }\n"
+      "    else { if (r < -1.884467e+019) r = uintBitsToFloat(0xDF800000u); else if (r > -5.42101e-020) r = -5.42101e-020; }\n"
+      "  }\n"
+      "  return vec4(r);\n"
+      "}\n"
+    },
+    {"rsq",
+      "vec4 rsq(vec4 a) {\n"
+      "  float x = abs(a.x), r;\n"
+      "  if (x == 1.0) r = 1.0; else if (x == 0.0) r = uintBitsToFloat(0x7F800000u); else r = 1.0 / sqrt(x);\n"
+      "  return vec4(r);\n"
+      "}\n"
+    },
+    {"vexp",
+      "vec4 vexp(vec4 a) { float t = floor(a.x); return vec4(exp2(t), a.x - t, exp2(a.x), 1.0); }\n"
+    },
+    {"vlog",
+      "vec4 vlog(vec4 a) {\n"
+      "  float t = abs(a.x);\n"
+      "  if (t == 0.0) return vec4(uintBitsToFloat(0xFF800000u), 1.0, uintBitsToFloat(0xFF800000u), 1.0);\n"
+      "  if (isinf(t)) return vec4(uintBitsToFloat(0x7F800000u), 1.0, uintBitsToFloat(0x7F800000u), 1.0);\n"
+      "  uint u = floatBitsToUint(t);\n"
+      "  float e = float(int((u >> 23) & 0xFFu) - 127);\n"
+      "  return vec4(e, uintBitsToFloat((u & 0x7FFFFFu) | 0x3F800000u), log2(t), 1.0);\n"
+      "}\n"
+    },
+    {"lit",
+      "vec4 lit(vec4 a) {\n"
+      "  vec4 r = vec4(1.0, 0.0, 0.0, 1.0);\n"
+      "  float p = clamp(a.w, -127.9961, 127.9961);\n"
+      "  if (a.x > 0.0) { r.y = a.x; if (a.y > 0.0) r.z = pow(a.y, p); }\n"
+      "  return r;\n"
+      "}\n"
+    },
+};
+
+#define N_FN (sizeof(k_fn) / sizeof(k_fn[0]))
+static uint32_t g_fn_used; /* bit i: el programa usa k_fn[i] */
+
+static void use_fn(const char *name)
+{
+    for (unsigned i = 0; i < N_FN; i++) {
+        if (!strcmp(k_fn[i].name, name)) {
+            g_fn_used |= 1u << i;
+        }
+    }
+}
 
 static const char k_sw[4] = {'x', 'y', 'z', 'w'};
 
@@ -130,6 +178,7 @@ static bool src(Out *o, const Nv2aVshInput *in, uint16_t *mask)
     case NV2ART_CONTEXT:
         if (in->is_relative) {
             snprintf(base, sizeof(base), "crel(%d + int(a0.x))", (int)in->index);
+            use_fn("crel");
         } else if (in->index < 192) {
             snprintf(base, sizeof(base), "c[%u]", (unsigned)in->index);
         } else {
@@ -155,18 +204,18 @@ static bool op_expr(Out *o, Nv2aVshOpcode op, const char *a, const char *b, cons
     case NV2AOP_DP3: put(o, "dp3(%s, %s)", a, b); break;
     case NV2AOP_DPH: put(o, "dph(%s, %s)", a, b); break;
     case NV2AOP_DP4: put(o, "dp4(%s, %s)", a, b); break;
-    case NV2AOP_DST: put(o, "dst(%s, %s)", a, b); break;
-    case NV2AOP_MIN: put(o, "vmin(%s, %s)", a, b); break;
-    case NV2AOP_MAX: put(o, "vmax(%s, %s)", a, b); break;
-    case NV2AOP_SLT: put(o, "slt(%s, %s)", a, b); break;
-    case NV2AOP_SGE: put(o, "sge(%s, %s)", a, b); break;
-    case NV2AOP_ARL: put(o, "arl(%s)", a); break;
-    case NV2AOP_RCP: put(o, "rcp(%s)", a); break;
-    case NV2AOP_RCC: put(o, "rcc(%s)", a); break;
-    case NV2AOP_RSQ: put(o, "rsq(%s)", a); break;
-    case NV2AOP_EXP: put(o, "vexp(%s)", a); break;
-    case NV2AOP_LOG: put(o, "vlog(%s)", a); break;
-    case NV2AOP_LIT: put(o, "lit(%s)", a); break;
+    case NV2AOP_DST: use_fn("dst"); put(o, "dst(%s, %s)", a, b); break;
+    case NV2AOP_MIN: use_fn("vmin"); put(o, "vmin(%s, %s)", a, b); break;
+    case NV2AOP_MAX: use_fn("vmax"); put(o, "vmax(%s, %s)", a, b); break;
+    case NV2AOP_SLT: use_fn("slt"); put(o, "slt(%s, %s)", a, b); break;
+    case NV2AOP_SGE: use_fn("slt"); use_fn("sge"); put(o, "sge(%s, %s)", a, b); break;
+    case NV2AOP_ARL: use_fn("arl"); put(o, "arl(%s)", a); break;
+    case NV2AOP_RCP: use_fn("rcp"); put(o, "rcp(%s)", a); break;
+    case NV2AOP_RCC: use_fn("rcc"); put(o, "rcc(%s)", a); break;
+    case NV2AOP_RSQ: use_fn("rsq"); put(o, "rsq(%s)", a); break;
+    case NV2AOP_EXP: use_fn("vexp"); put(o, "vexp(%s)", a); break;
+    case NV2AOP_LOG: use_fn("vlog"); put(o, "vlog(%s)", a); break;
+    case NV2AOP_LIT: use_fn("lit"); put(o, "lit(%s)", a); break;
     default: return false;
     }
     return true;
@@ -237,6 +286,7 @@ bool vsh_glsl(const Nv2aVshProgram *p, char *buf, size_t n, uint16_t *in_mask)
     /* primero el cuerpo (para saber qué entradas usa), luego la cabecera */
     static char body[96 * 1024];
     Out b = {body, sizeof(body), 0, false};
+    g_fn_used = 0;
     put(&b, "  vec4 r0 = vec4(0.0), r1 = vec4(0.0), r2 = vec4(0.0), r3 = vec4(0.0), r4 = vec4(0.0), r5 = vec4(0.0);\n"
             "  vec4 r6 = vec4(0.0), r7 = vec4(0.0), r8 = vec4(0.0), r9 = vec4(0.0), r10 = vec4(0.0), r11 = vec4(0.0);\n"
             "  vec4 a0 = vec4(0.0);\n");
@@ -298,6 +348,11 @@ bool vsh_glsl(const Nv2aVshProgram *p, char *buf, size_t n, uint16_t *in_mask)
         return false;
     }
     put(&o, "%s", k_head);
+    for (unsigned i = 0; i < N_FN; i++) {
+        if (g_fn_used & (1u << i)) {
+            put(&o, "%s", k_fn[i].src);
+        }
+    }
     for (int i = 0; i < 16; i++) {
         if (mask & (1u << i)) {
             put(&o, "layout(location=%d) in vec4 v%d;\n", i, i);

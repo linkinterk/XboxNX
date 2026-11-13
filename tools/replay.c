@@ -90,6 +90,14 @@ int main(int argc, char **argv)
         }
         gpu_set_ram(g_ram, RAM);
         gpu_enable(true);
+        if (getenv("PRE")) { /* cuadros previos: los shaders guardados se compilan de a uno */
+            for (int i = atoi(getenv("PRE")); i > 0; i--) {
+                gpu_end_frame();
+            }
+        }
+        if (!getenv("PRESUPUESTO")) { /* un solo cuadro: todos los programas ya, para comparar la imagen */
+            gpu_set_link_budget(~0ull);
+        }
         sw_set_vs_gpu(!getenv("VS_CPU")); /* VS_CPU=1: los vértices en la CPU, como antes */
         fprintf(stderr, "GPU: %s\n", gpu_info());
     }
@@ -188,6 +196,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "GPU: %u dibujos, %u a la CPU; vs en el GPU %u (%u programas, %u sin compilar, %u sin traducir)\n",
                 g->draws, g->fallbacks, g->vs_draws, g->vs_progs, g->vs_bad, st->vs_untranslated);
         fprintf(stderr, "caché de shaders: %u leídos, %u guardados · constantes subidas %u vec4 · con índices %u\n", g->vs_cached, g->vs_saved, g->vs_const_vec, g->indexed);
+        fprintf(stderr, "compilar programas: %.1f ms (%s) · %u dibujos esperaron · %u guardados de antes, %u por adelantado\n",
+                (double)g->ns_link / 1e6, g->sso ? "por etapas" : "enteros", g->vs_deferred, g->vs_known, g->vs_pre);
     }
     FILE *o = fopen(argv[3], "wb");
     fprintf(o, "P6\n%d %d\n255\n", w, h);

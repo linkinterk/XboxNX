@@ -5,6 +5,7 @@
  * superficies grises y el verde de la época de Xbox aclarado para leerse.
  */
 #include "ui.h"
+#include "crash.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -908,7 +909,7 @@ static void draw_xbox_screen(const UiState *s)
         /* el dibujo por software: el último dibujo con lo que dio */
         const SwStats *sw = sw_stats();
         const __typeof__(sw->last) *L = &sw->last;
-        char e[420];
+        char e[600];
         int ly = 40;
         snprintf(e, sizeof(e), "Software: %llu triángulos, %llu píxeles · sin shader %u · sin destino %u (motivo %u: fmt %X pitch %X clip %X %X) · shader con error %u · se muestra %08X",
                  (unsigned long long)sw->triangles, (unsigned long long)sw->pixels, sw->skipped_ff, sw->no_target,
@@ -978,10 +979,12 @@ static void draw_xbox_screen(const UiState *s)
             ovl_text(ly, C_WARN, e);
             ly += 22;
         }
-        snprintf(e, sizeof(e), "JIT %s: %llu traducidos, búfer %.1f de %.0f MB, vaciado %u veces · %llu decodificados · código reescrito %llu veces",
+        unsigned mem_u, mem_t;
+        crash_mem(&mem_u, &mem_t);
+        snprintf(e, sizeof(e), "JIT %s: %llu traducidos, búfer %.1f de %.0f MB, vaciado %u veces · %llu decodificados · código reescrito %llu veces · memoria de la app %u de %u MB",
                  js.on ? "activo" : "apagado", (unsigned long long)js.compiled, js.used / 1048576.0,
                  js.size / 1048576.0, js.flushes, (unsigned long long)js.decodes,
-                 (unsigned long long)r->cpu.vm->rewrites);
+                 (unsigned long long)r->cpu.vm->rewrites, mem_u, mem_t);
         ovl_text(ly, C_WARN, e);
         ly += 22;
         /* dónde se va el tiempo del CPU (muestreado en run_blocks) */
@@ -1007,10 +1010,11 @@ static void draw_xbox_screen(const UiState *s)
         /* el perfil por bloques: sampler.c, en perfil.txt */
         {
             const GpuStats *gs = gpu_stats();
-            snprintf(e, sizeof(e), "GPU %s · %u dibujos (vértices en GPU %u · %u shaders%s · caché %u leídos %u guardados%s) · %u por software · %u subidas (%.0f MB) · %u copias · en gpu_draw %.1f s (vértices %.1f s, texturas %.1f s, llamada %.1f s), leer cuadros %.1f s, visibilidad %u (%.1f s; pruebas %u, informes %u, sin DMA %u) · %s",
+            snprintf(e, sizeof(e), "GPU %s · %u dibujos (vértices en GPU %u · %u shaders%s, %s: compilar %.1f s · %u de otras veces, %u ya listos · %u dibujos esperaron) · %u por software · %u subidas (%.0f MB) · %u copias · en gpu_draw %.1f s (vértices %.1f s, texturas %.1f s, llamada %.1f s), leer cuadros %.1f s (glReadPixels %.1f s), visibilidad %u (%.1f s; pruebas %u, informes %u, sin DMA %u, por otro subcanal %u clase %X) · %s",
                      gpu_enabled() ? "activa" : gpu_ready() ? "apagada (L3)" : "no", gs->draws, gs->vs_draws, gs->vs_progs,
-                     gs->vs_bad ? " · fallos" : "", gs->vs_cached, gs->vs_saved, gs->bin_ok ? "" : ", sin binarios", gs->fallbacks, gs->uploads, gs->upload_bytes / 1048576.0, gs->flushes,
-                     gs->ns_draw / 1e9, gs->ns_vbuf / 1e9, gs->ns_tex / 1e9, gs->ns_call / 1e9, gs->ns_read / 1e9, gs->queries, gs->ns_query / 1e9, hw_stats()->zpass_tests, hw_stats()->reports, hw_stats()->reports_noinst, gpu_info());
+                     gs->vs_bad ? " · fallos" : "", gs->sso ? "por etapas" : "enteros", gs->ns_link / 1e9, gs->vs_known,
+                     gs->vs_pre, gs->vs_deferred, gs->fallbacks, gs->uploads, gs->upload_bytes / 1048576.0, gs->flushes,
+                     gs->ns_draw / 1e9, gs->ns_vbuf / 1e9, gs->ns_tex / 1e9, gs->ns_call / 1e9, gs->ns_read / 1e9, gs->ns_rp / 1e9, gs->queries, gs->ns_query / 1e9, hw_stats()->zpass_tests, hw_stats()->reports, hw_stats()->reports_noinst, hw_stats()->reports_other, hw_stats()->other_class, gpu_info());
             ovl_text(ly, gpu_enabled() ? C_GREEN : C_WARN, e);
         }
         ly += 22;

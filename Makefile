@@ -40,7 +40,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET		:=	XboxNX
 APP_TITLE	:=	XboxNX
 APP_AUTHOR	:=	Jairo (basado en hakuX)
-APP_VERSION	:=	0.18.52
+APP_VERSION	:=	0.18.53
 BUILD		:=	build
 SOURCES		:=	source source/apu source/apu/vp source/apu/dsp source/vsh source/usb
 DATA		:=	data
@@ -60,7 +60,8 @@ CFLAGS	+=	$(INCLUDE) -D__SWITCH__
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions
 
 ASFLAGS	:=	-g $(ARCH)
-LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) \
+		-Wl,--wrap=abort,--wrap=__assert_func,--wrap=diagAbortWithResult
 
 LIBS	:= -lEGL -lglapi -ldrm_nouveau -lstdc++ -lnx -lm
 

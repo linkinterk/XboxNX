@@ -33,7 +33,7 @@
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.52"
+#define APP_VER   "0.18.53"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -827,18 +827,31 @@ int main(int argc, char **argv)
 
     /* etapa 5: los hilos que leen la RAM del Xbox terminan antes de liberarla
      * (si no, al salir con + uno de ellos leía memoria ya liberada: error) */
+    crash_step("parar la pantalla");
     ui_thread_stop();
+    crash_step("parar el muestreo");
     sampler_stop();
+    crash_step("parar el audio del Xbox");
     apu_exit();
+    crash_step("escribir lo pendiente en la SD");
     kio_sync(); /* lo que falte escribir en la SD */
+    crash_step("parar el sonido");
     sound_exit();
     clocks_restore();
+    /* la GPU, en orden y antes de soltar la RAM del Xbox (si no, el driver lo
+     * hacía por su cuenta al terminar el programa, ya sin la RAM) */
+    crash_step("cerrar la GPU");
+    gpu_exit();
+    crash_step("soltar la RAM del Xbox");
     vm_free(&g_vm);
+    crash_step("cerrar el juego");
     game_close(&g_game);
     for (int i = 0; i < g_ncards; i++) {
         ui_card_free(&g_cards[i]);
     }
+    crash_step("cerrar la pantalla");
     framebufferClose(&g_fb);
     plExit();
+    crash_step("después de main (libnx/Mesa al terminar)");
     return 0;
 }
