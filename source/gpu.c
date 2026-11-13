@@ -75,6 +75,7 @@ static uint64_t fnv(uint64_t h, const void *p, size_t n)
 #define MAX_ZETA 12
 #define MAX_FBO 32
 #define MAX_TEX 384
+#define RING_SIZE (16u << 20) /* el anillo de los vértices (vbo2) */
 
 typedef struct Surf {
     uint32_t pa, pitch;
@@ -146,6 +147,10 @@ static struct {
     /* el vertex shader en el GPU: sus entradas empaquetadas */
     GLuint vao2, vbo2;
     uint16_t vao2_mask;
+    size_t ring_pos;      /* etapa 5: vbo2 es un anillo; se escribe sin sincronizar */
+    GLint draw_first;     /* el primer vértice de este dibujo en el anillo */
+    GLuint qibo[2];       /* índices fijos de quads y de tiras de quads */
+    uint32_t qibo_n[2];   /* para cuántos vértices alcanzan */
     float *vsbuf;
     size_t vsbuf_n;
     Surf surf[MAX_SURF];
@@ -754,15 +759,46 @@ static bool vs_upload(const GpuDraw *d)
         k = 1;
     }
     size_t need = (size_t)d->nverts * k * 4;
-    if (need > G.vsbuf_n) {
-        free(G.vsbuf);
-        G.vsbuf = malloc(need * sizeof(float));
-        G.vsbuf_n = G.vsbuf ? need : 0;
-        if (!G.vsbuf) {
-            return false;
+    size_t stride = (size_t)k * 16, bytes = need * sizeof(float);
+    if (SC.vao != G.vao2) {
+        glBindVertexArray(G.vao2);
+        SC.vao = G.vao2;
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, G.vbo2);
+    /* etapa 5: el anillo (antes glBufferData con cada dibujo: memoria nueva
+     * cada vez). La posición múltiplo del tamaño del vértice: así el dibujo
+     * empieza en el vértice pos / stride. Al dar la vuelta, memoria nueva
+     * para el anillo entero (lo de antes puede estar todavía en uso). */
+    float *o = NULL;
+    if (bytes <= RING_SIZE) {
+        size_t pos = (G.ring_pos + stride - 1) / stride * stride;
+        if (!G.ring_pos || pos + bytes > RING_SIZE) {
+            glBufferData(GL_ARRAY_BUFFER, RING_SIZE, NULL, GL_STREAM_DRAW);
+            pos = 0;
+        }
+        o = glMapBufferRange(GL_ARRAY_BUFFER, (GLintptr)pos, (GLsizeiptr)bytes,
+                             GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT | GL_MAP_INVALIDATE_RANGE_BIT);
+        if (o) {
+            G.draw_first = (GLint)(pos / stride);
+            G.ring_pos = pos + bytes;
+            if (!G.ring_pos) {
+                G.ring_pos = 1;
+            }
         }
     }
-    float *o = G.vsbuf;
+    bool mapped = o != NULL;
+    if (!mapped) {
+        if (need > G.vsbuf_n) {
+            free(G.vsbuf);
+            G.vsbuf = malloc(need * sizeof(float));
+            G.vsbuf_n = G.vsbuf ? need : 0;
+            if (!G.vsbuf) {
+                return false;
+            }
+        }
+        o = G.vsbuf;
+    }
+    float *o0 = o;
     for (unsigned v = 0; v < d->nverts; v++) {
         const float *in = d->vs_in + (size_t)v * 64;
         for (unsigned a = 0; a < 16; a++) {
@@ -772,11 +808,9 @@ static bool vs_upload(const GpuDraw *d)
             }
         }
     }
-    if (SC.vao != G.vao2) {
-        glBindVertexArray(G.vao2);
-        SC.vao = G.vao2;
+    if (mapped) {
+        glUnmapBuffer(GL_ARRAY_BUFFER);
     }
-    glBindBuffer(GL_ARRAY_BUFFER, G.vbo2);
     if (G.vao2_mask != d->vs_mask) {
         unsigned at = 0;
         for (unsigned a = 0; a < 16; a++) {
@@ -790,7 +824,51 @@ static bool vs_upload(const GpuDraw *d)
         }
         G.vao2_mask = d->vs_mask;
     }
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(need * sizeof(float)), G.vsbuf, GL_STREAM_DRAW);
+    if (!mapped) {
+        G.ring_pos = 0; /* el anillo se rehace la próxima vez */
+        G.draw_first = 0;
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)bytes, o0, GL_STREAM_DRAW);
+    }
+    return true;
+}
+
+/* Índices fijos para quads (8) y tiras de quads (9) hasta n vértices: se hacen
+ * una vez (antes se subían con cada dibujo). */
+static bool quad_ibo(int which, uint32_t n)
+{
+    if (!G.qibo[which]) {
+        glGenBuffers(1, &G.qibo[which]);
+    }
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, G.qibo[which]);
+    if (G.qibo_n[which] >= n) {
+        return true;
+    }
+    uint32_t cap = 4096;
+    while (cap < n) {
+        cap *= 2;
+    }
+    size_t need = (size_t)cap * 3;
+    uint32_t *idx = malloc(need * 4);
+    if (!idx) {
+        return false;
+    }
+    size_t k = 0;
+    if (which == 0) {
+        for (uint32_t i = 0; i + 3 < cap; i += 4) {
+            uint32_t q[6] = {i, i + 1, i + 2, i, i + 2, i + 3};
+            memcpy(&idx[k], q, sizeof(q));
+            k += 6;
+        }
+    } else {
+        for (uint32_t i = 0; i + 3 < cap; i += 2) {
+            uint32_t q[6] = {i, i + 1, i + 3, i, i + 3, i + 2};
+            memcpy(&idx[k], q, sizeof(q));
+            k += 6;
+        }
+    }
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(k * 4), idx, GL_STATIC_DRAW);
+    free(idx);
+    G.qibo_n[which] = cap;
     return true;
 }
 
@@ -1507,7 +1585,10 @@ static bool gpu_draw_(const GpuDraw *d)
                 G.st.vs_const_vec += (unsigned)(last - first + 1);
             }
         }
-        if (!vs_upload(d)) {
+        uint64_t tv = now_ns();
+        bool up = vs_upload(d);
+        G.st.ns_vbuf += now_ns() - tv;
+        if (!up) {
             return false;
         }
         G.st.vs_draws++;
@@ -1518,15 +1599,22 @@ static bool gpu_draw_(const GpuDraw *d)
         }
         glBindBuffer(GL_ARRAY_BUFFER, G.vbo);
         glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)d->nverts * GPU_VERT_FLOATS * 4, d->verts, GL_STREAM_DRAW);
+        G.draw_first = 0;
     }
     unsigned n = d->nverts;
+    GLint f0 = G.draw_first;
     switch (d->prim) {
-    case 5: glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(n - n % 3)); break;
-    case 6: glDrawArrays(GL_TRIANGLE_STRIP, 0, (GLsizei)n); break;
+    case 5: glDrawArrays(GL_TRIANGLES, f0, (GLsizei)(n - n % 3)); break;
+    case 6: glDrawArrays(GL_TRIANGLE_STRIP, f0, (GLsizei)n); break;
     case 7:
-    case 10: glDrawArrays(GL_TRIANGLE_FAN, 0, (GLsizei)n); break;
+    case 10: glDrawArrays(GL_TRIANGLE_FAN, f0, (GLsizei)n); break;
     case 8:
     case 9: {
+        if (n >= 4 && quad_ibo(d->prim == 8 ? 0 : 1, n)) {
+            uint32_t k = d->prim == 8 ? n / 4 * 6 : (n - 2) / 2 * 6;
+            glDrawElementsBaseVertex(GL_TRIANGLES, (GLsizei)k, GL_UNSIGNED_INT, 0, f0);
+            break;
+        }
         size_t need = (size_t)n * 3;
         if (need > G.idx_n) {
             free(G.idx);

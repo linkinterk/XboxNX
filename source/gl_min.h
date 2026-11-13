@@ -25,6 +25,10 @@ typedef struct __GLsync *GLsync;
 typedef uint64_t GLuint64;
 
 #define GL_PIXEL_PACK_BUFFER 0x88EB
+#define GL_MAP_WRITE_BIT 0x0002
+#define GL_STATIC_DRAW 0x88E4
+#define GL_MAP_INVALIDATE_RANGE_BIT 0x0004
+#define GL_MAP_UNSYNCHRONIZED_BIT 0x0020
 #define GL_STREAM_READ 0x88E1
 #define GL_MAP_READ_BIT 0x0001
 #define GL_SYNC_GPU_COMMANDS_COMPLETE 0x9117
@@ -173,6 +177,7 @@ typedef uint64_t GLuint64;
     X(glDisableVertexAttribArray, void, (GLuint))                                                           \
     X(glDrawArrays, void, (GLenum, GLint, GLsizei))                                                         \
     X(glDrawElements, void, (GLenum, GLsizei, GLenum, const void *))                                        \
+    X(glDrawElementsBaseVertex, void, (GLenum, GLsizei, GLenum, const void *, GLint))                       \
     X(glFinish, void, (void))                                                                               \
     X(glFlush, void, (void))
 
