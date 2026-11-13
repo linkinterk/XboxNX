@@ -565,7 +565,7 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         g_frame_no++;
         if (!g_skipping && g_hw.color_inst) {
             g_last_drawn = dma_base(g_hw.color_inst) + g_hw.color_offset;
-            gpu_flush_surface(g_last_drawn); /* 4c: el cuadro terminado, a la RAM (para la pantalla) */
+            gpu_flush_surface_async(g_last_drawn); /* 4c: el cuadro terminado, a la RAM (para la pantalla; sin esperar a la GPU) */
         }
         gpu_end_frame();
         g_skipping = g_frameskip > 1 && g_cap.state != 2 && g_cap.state != 1 && (g_frame_no % g_frameskip) != 0;

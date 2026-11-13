@@ -21,7 +21,17 @@ typedef char GLchar;
 typedef unsigned char GLubyte;
 typedef ptrdiff_t GLsizeiptr;
 typedef ptrdiff_t GLintptr;
+typedef struct __GLsync *GLsync;
+typedef uint64_t GLuint64;
 
+#define GL_PIXEL_PACK_BUFFER 0x88EB
+#define GL_STREAM_READ 0x88E1
+#define GL_MAP_READ_BIT 0x0001
+#define GL_SYNC_GPU_COMMANDS_COMPLETE 0x9117
+#define GL_SYNC_FLUSH_COMMANDS_BIT 0x00000001
+#define GL_ALREADY_SIGNALED 0x911A
+#define GL_CONDITION_SATISFIED 0x911C
+#define GL_TIMEOUT_EXPIRED 0x911B
 #define GL_FALSE 0
 #define GL_TRUE 1
 #define GL_NO_ERROR 0
@@ -153,6 +163,11 @@ typedef ptrdiff_t GLintptr;
     X(glGenBuffers, void, (GLsizei, GLuint *))                                                              \
     X(glBindBuffer, void, (GLenum, GLuint))                                                                 \
     X(glBufferData, void, (GLenum, GLsizeiptr, const void *, GLenum))                                       \
+    X(glMapBufferRange, void *, (GLenum, GLintptr, GLsizeiptr, GLbitfield))                                 \
+    X(glUnmapBuffer, GLboolean, (GLenum))                                                                   \
+    X(glFenceSync, GLsync, (GLenum, GLbitfield))                                                            \
+    X(glClientWaitSync, GLenum, (GLsync, GLbitfield, GLuint64))                                             \
+    X(glDeleteSync, void, (GLsync))                                                                         \
     X(glVertexAttribPointer, void, (GLuint, GLint, GLenum, GLboolean, GLsizei, const void *))               \
     X(glEnableVertexAttribArray, void, (GLuint))                                                            \
     X(glDisableVertexAttribArray, void, (GLuint))                                                           \

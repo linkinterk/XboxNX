@@ -63,7 +63,7 @@ static void report(FILE *f, unsigned secs)
     for (unsigned i = 0; i < HSIZE; i++) {
         in_jit += g_h[i].n;
     }
-    fprintf(f, "En el JIT %.1f%%; fuera:", 100.0 * in_jit / g_total);
+    fprintf(f, "Código del juego (JIT) %.1f%%; lo demás:", 100.0 * in_jit / g_total);
     for (int p = 0; p <= PROF_N; p++) {
         if (g_out[p]) {
             fprintf(f, " %s %.1f%%", p < PROF_N ? prof_name((ProfPart)p) : "otro", 100.0 * g_out[p] / g_total);
@@ -109,10 +109,12 @@ static void thr(void *arg)
     while (g_on) {
         svcSleepThread(250000);
         uint32_t eip = *g_cur;
-        if (eip) {
-            add(eip);
+        int p = prof_now();
+        if (eip && (p < 0 || p == PROF_CPU)) {
+            add(eip); /* en el código del juego (o en lo que llama del CPU) */
         } else {
-            int p = prof_now();
+            /* fuera del JIT, o dentro pero en el GPU/kernel/audio (lo que una
+             * escritura a un registro dispara): la parte */
             g_out[p >= 0 && p < PROF_N ? p : PROF_N]++;
         }
         g_total++;

@@ -33,7 +33,7 @@
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.42"
+#define APP_VER   "0.18.43"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -262,7 +262,10 @@ static void ui_thread_start(void)
 {
     mutexInit(&g_ui_m);
     condvarInit(&g_ui_cv);
-    g_ui_thr_ok = R_SUCCEEDED(threadCreate(&g_ui_thr, ui_thread, NULL, NULL, 0x40000, 0x2C, 1)) &&
+    /* núcleo 2 y prioridad baja: en el 1 está el hilo del audio (APU), que
+     * tiene el candado de sus registros mientras hace un cuadro; si la
+     * pantalla lo desplazaba, el juego esperaba ese candado */
+    g_ui_thr_ok = R_SUCCEEDED(threadCreate(&g_ui_thr, ui_thread, NULL, NULL, 0x40000, 0x30, 2)) &&
                   R_SUCCEEDED(threadStart(&g_ui_thr));
 }
 
@@ -315,6 +318,7 @@ static void present(void)
     ui_wait_idle();
     if (g_ui.screen == UI_RUN) {
         prof_take(g_ui.prof);
+        gpu_readback_poll(); /* el último cuadro que la GPU ya terminó, a la RAM (para verlo) */
     }
     g_ui.ui_async = async;
     if (async) {

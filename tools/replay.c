@@ -173,6 +173,10 @@ int main(int argc, char **argv)
             }
         }
     }
+    if (getenv("ASYNC")) { /* el camino de la Switch: al PBO y a la RAM después */
+        gpu_flush_surface_async(dst);
+        gpu_readback_poll();
+    }
     gpu_flush_all();
     const SwStats *st = sw_stats();
     fprintf(stderr, "%zu métodos, %u dibujos, %llu triángulos, %llu píxeles, sin destino %u, vs con error %u, ff %u\n", n,

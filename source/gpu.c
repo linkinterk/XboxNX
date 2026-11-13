@@ -794,9 +794,90 @@ static int surf_find(uint32_t pa)
     return -1;
 }
 
+/* Etapa 5: el cuadro terminado se lee a un PBO sin esperar a la GPU (antes
+ * glReadPixels a la RAM paraba todo hasta que la GPU acababa el cuadro); se
+ * copia a la RAM cuando la GPU terminó (o cuando alguien necesita la RAM). */
+static struct {
+    GLuint pbo;
+    size_t cap;
+    GLsync fence;
+    bool on;
+    uint32_t pa, bytes;
+} RB;
+
+static void rb_finish(bool wait)
+{
+    if (!RB.on) {
+        return;
+    }
+    GLenum r = glClientWaitSync(RB.fence, GL_SYNC_FLUSH_COMMANDS_BIT, wait ? 2000000000ull : 0);
+    if (!wait && r == GL_TIMEOUT_EXPIRED) {
+        return;
+    }
+    glDeleteSync(RB.fence);
+    RB.on = false;
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, RB.pbo);
+    const void *p = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, (GLsizeiptr)RB.bytes, GL_MAP_READ_BIT);
+    if (p && G.ram && (uint64_t)RB.pa + RB.bytes <= G.ram_size) {
+        memcpy(G.ram + RB.pa, p, RB.bytes);
+    }
+    if (p) {
+        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+}
+
+/* Lo que la GPU ya terminó, a la RAM, sin esperar (antes de mostrar la pantalla). */
+void gpu_readback_poll(void)
+{
+    if (G.ready) {
+        rb_finish(false);
+    }
+}
+
+/* La superficie i a la RAM sin esperar: al PBO, y a la RAM luego. */
+static void surf_flush_async(int i)
+{
+    Surf *s = &G.surf[i];
+    if (!s->dirty || !G.ram) {
+        return;
+    }
+    rb_finish(true); /* la anterior primero */
+    uint64_t end = (uint64_t)s->pa + (uint64_t)s->pitch * (uint64_t)s->h;
+    if (end > G.ram_size) {
+        s->dirty = false;
+        return;
+    }
+    size_t bytes = (size_t)s->pitch * (size_t)s->h;
+    if (!RB.pbo) {
+        glGenBuffers(1, &RB.pbo);
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, RB.pbo);
+    if (RB.cap < bytes) {
+        glBufferData(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)bytes, NULL, GL_STREAM_READ);
+        RB.cap = bytes;
+    }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, s->fbo);
+    SC.valid = false;
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glPixelStorei(GL_PACK_ROW_LENGTH, (GLint)(s->pitch / 4));
+    glReadPixels(0, 0, s->w, s->h, GL_BGRA, GL_UNSIGNED_BYTE, (void *)0);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    RB.fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    RB.on = RB.fence != NULL;
+    RB.pa = s->pa;
+    RB.bytes = (uint32_t)bytes;
+    s->dirty = false;
+    G.st.flushes++;
+}
+
 static void surf_flush(int i)
 {
     Surf *s = &G.surf[i];
+    if (RB.on && s->pa < RB.pa + RB.bytes && RB.pa < s->pa + s->pitch * (uint32_t)s->h) {
+        rb_finish(true); /* lo que venía en camino, antes (si no, lo pisaría después) */
+    }
     if (!s->dirty || !G.ram) {
         return;
     }
@@ -981,6 +1062,9 @@ static GLuint fbo_get(int si, int zi)
 /* Las superficies con datos nuevos que se cruzan con [pa, pa+len): a la RAM. */
 static void flush_range(uint32_t pa, uint32_t len)
 {
+    if (RB.on && pa < RB.pa + RB.bytes && RB.pa < pa + len) {
+        rb_finish(true); /* alguien va a leer esa RAM */
+    }
     for (int i = 0; i < MAX_SURF; i++) {
         Surf *s = &G.surf[i];
         if (s->tex && s->dirty && pa < s->pa + s->pitch * (uint32_t)s->h && s->pa < pa + len) {
@@ -1000,11 +1084,23 @@ void gpu_flush_surface(uint32_t pa)
     }
 }
 
+void gpu_flush_surface_async(uint32_t pa)
+{
+    if (!G.ready) {
+        return;
+    }
+    int i = surf_find(pa);
+    if (i >= 0) {
+        surf_flush_async(i);
+    }
+}
+
 void gpu_flush_all(void)
 {
     if (!G.ready) {
         return;
     }
+    rb_finish(true);
     for (int i = 0; i < MAX_SURF; i++) {
         if (G.surf[i].tex) {
             surf_flush(i);
@@ -1510,6 +1606,10 @@ void gpu_reset(void)
     if (!G.ready) {
         return;
     }
+    if (RB.on) { /* lo que venía en camino ya no vale (la RAM puede ser otra) */
+        glDeleteSync(RB.fence);
+        RB.on = false;
+    }
     for (int f = 0; f < MAX_FBO; f++) {
         if (G.fbo[f].fbo) {
             glDeleteFramebuffers(1, &G.fbo[f].fbo);
@@ -1603,6 +1703,8 @@ bool gpu_clear_zeta(uint32_t pa, uint32_t zpitch, int h, int x0, int y0, int x1,
     return false;
 }
 void gpu_flush_surface(uint32_t pa) { (void)pa; }
+void gpu_flush_surface_async(uint32_t pa) { (void)pa; }
+void gpu_readback_poll(void) {}
 void gpu_flush_all(void) {}
 void gpu_invalidate(uint32_t pa, uint32_t len) { (void)pa, (void)len; }
 void gpu_end_frame(void) {}

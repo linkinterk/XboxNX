@@ -87,6 +87,10 @@ bool gpu_clear_zeta(uint32_t pa, uint32_t zpitch, int h, int x0, int y0, int x1,
                     unsigned flags);
 /* Copiar a la RAM la superficie que empieza en pa (la que se va a mostrar). */
 void gpu_flush_surface(uint32_t pa);
+/* Etapa 5: igual pero sin esperar a la GPU (la RAM se pone al día después:
+ * gpu_readback_poll o cuando algo necesite esa RAM). */
+void gpu_flush_surface_async(uint32_t pa);
+void gpu_readback_poll(void);
 /* Copiar a la RAM todas las superficies (antes de que el CPU lea). */
 void gpu_flush_all(void);
 /* La RAM de la superficie cambió por otro lado: volver a subirla. */

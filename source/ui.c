@@ -812,7 +812,7 @@ static void diag_prof(const UiState *s)
                       (s->prof[i] + 5) / 10);
     }
     if (s->ui_async && o < (int)sizeof(t) - 40) {
-        snprintf(t + o, sizeof(t) - (size_t)o, " · la pantalla aparte (núcleo 1): %u ms por dibujo", s->ui_ms);
+        snprintf(t + o, sizeof(t) - (size_t)o, " · la pantalla aparte (núcleo 2): %u ms por dibujo", s->ui_ms);
     }
     diag_add(t);
 }
