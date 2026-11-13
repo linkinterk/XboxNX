@@ -99,7 +99,7 @@ bool gpu_present_ui(const uint32_t *rgba, int w, int h);
 
 typedef struct GpuStats {
     unsigned draws, fallbacks, uploads, flushes, surfaces, textures;
-    unsigned vs_draws, vs_progs, vs_bad, vs_cached, vs_saved; /* 4c: dibujos con el vertex shader en el GPU, programas, los que no compilaron */
+    unsigned vs_draws, vs_progs, vs_bad, vs_cached, vs_saved, vs_const_vec; /* 4c: dibujos con el vertex shader en el GPU, programas, los que no compilaron */
     uint64_t upload_bytes;
 } GpuStats;
 const GpuStats *gpu_stats(void);

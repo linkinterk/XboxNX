@@ -2364,6 +2364,7 @@ static bool ends_block(InsnFn f)
 }
 
 static uint64_t g_decodes; /* bloques decodificados (para la pantalla) */
+static bool g_superblocks = true; /* etapa 5: los jcc no terminan el bloque */
 static uint64_t g_compile_ticks; /* tiempo traduciendo al JIT */
 
 static inline uint32_t nb_end_off(const Insn *in, unsigned n)
@@ -2430,7 +2431,9 @@ static Block *get_block(Cpu *c, uint32_t eip)
             break;
         }
         n++;
-        if (ends_block(tmp[n - 1].fn)) {
+        /* etapa 5, superbloques: un jcc no termina el bloque (si salta, se
+         * sale ahí); sí el que vuelve al principio (bucles, esperas) */
+        if (ends_block(tmp[n - 1].fn) && !(tmp[n - 1].fn == x_jcc && tmp[n - 1].imm != eip && g_superblocks)) {
             break;
         }
     }
@@ -2559,6 +2562,39 @@ void cpu_profile(Cpu *c, CpuProfile *p)
     }
 }
 
+
+#if defined(CPU_TEST_API) && defined(HAVE_JIT)
+/* Pruebas (tests/jit_size.c): traduce el bloque de eip y dice cuánto ocupa. */
+size_t cpu_test_jit(Cpu *c, uint32_t eip, unsigned *ninsn, size_t *code_bytes)
+{
+    Block *b = get_block(c, eip);
+    if (!b || !b->n) {
+        return 0;
+    }
+    size_t before = g_jit.used;
+    if (!jit_compile(c, b) || g_jit.used < before) {
+        return 0;
+    }
+    *ninsn = b->n;
+    *code_bytes = (g_jit.used - before) - sizeof(JHdr) - (((size_t)b->n * sizeof(Insn) + 15) & ~(size_t)15);
+    const char *dump = getenv("JIT_DUMP");
+    if (dump) {
+        FILE *f = fopen(dump, "ab");
+        if (f) {
+            fwrite(b->jit, 1, *code_bytes, f);
+            fclose(f);
+        }
+    }
+    return g_jit.used - before;
+}
+
+uint32_t cpu_test_block_end(Cpu *c, uint32_t eip)
+{
+    Block *b = get_block(c, eip);
+    return b && b->n ? b->in[b->n - 1].next : 0;
+}
+#endif
+
 void cpu_jit_range(uintptr_t *rx, size_t *size)
 {
     *rx = 0;
@@ -2661,7 +2697,7 @@ static CpuStop run_blocks(Cpu *c, uint64_t max)
                 }
                 uint64_t t0 = smp ? cpu_tick() : 0;
                 /* corre este y los que encadene, hasta max - done instrucciones */
-                unsigned k = ((JitFn)b->jit)(c, max - done);
+                unsigned k = ((JitEnter)g_jit.enter_rx)(c, max - done, b->jit_chain);
                 if (smp) {
                     c->st_t_jit += cpu_tick() - t0;
                 }

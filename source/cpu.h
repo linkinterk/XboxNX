@@ -87,7 +87,7 @@ typedef struct Cpu {
     const uint64_t *clock_ns;   /* tiempo virtual (para rdtsc), hasta clock_icount */
     uint64_t clock_icount;
     unsigned ns_per_instr;      /* el tiempo virtual de cada instrucción (0: 1 ns) */
-    uint8_t lf_op, lf_sz, lf_cin; /* flags perezosos (cpu.c): la última operación */
+    uint8_t lf_op, lf_sz, lf_cin, lf_pad; /* flags perezosos (cpu.c): la última operación (el JIT escribe los 4 de una vez) */
     uint32_t lf_a, lf_b, lf_res;
     bool use_blocks;            /* cpu_run por bloques decodificados (etapa 2d.1) */
     const volatile uint8_t *yield; /* si vale 1, cpu_run vuelve al terminar el bloque (una interrupción) */

@@ -1347,10 +1347,27 @@ bool gpu_draw(const GpuDraw *d)
     if (sc_u(P, 16, &d->aref, 4)) glUniform1f(P->u_aref, (float)(d->aref & 0xFF));
     /* vértices */
     if (d->vs_in) {
-        if (!P->c_ok || memcmp(P->c, d->vs_consts, sizeof(P->c))) {
+        if (!P->c_ok) {
             glUniform4fv(P->u_c, 192, d->vs_consts);
             memcpy(P->c, d->vs_consts, sizeof(P->c));
             P->c_ok = true;
+        } else {
+            /* etapa 5: solo las constantes que cambiaron (el juego cambia unas
+             * pocas, las matrices, entre dibujo y dibujo) */
+            int first = -1, last = -1;
+            for (int k = 0; k < 192; k++) {
+                if (memcmp(&P->c[k * 4], &d->vs_consts[k * 4], 16)) {
+                    if (first < 0) {
+                        first = k;
+                    }
+                    last = k;
+                }
+            }
+            if (first >= 0) {
+                glUniform4fv(P->u_c + first, last - first + 1, &d->vs_consts[first * 4]);
+                memcpy(&P->c[first * 4], &d->vs_consts[first * 4], (size_t)(last - first + 1) * 16);
+                G.st.vs_const_vec += (unsigned)(last - first + 1);
+            }
         }
         if (!vs_upload(d)) {
             return false;

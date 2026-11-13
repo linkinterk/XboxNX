@@ -32,7 +32,7 @@
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.39"
+#define APP_VER   "0.18.40"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 

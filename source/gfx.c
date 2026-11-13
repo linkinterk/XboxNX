@@ -166,18 +166,51 @@ void gfx_circle(int cx, int cy, int r, uint32_t c)
     gfx_rrect(cx - r, cy - r, 2 * r, 2 * r, r, c);
 }
 
+/* Bilineal en enteros (etapa 5: la versión con floats por canal tardaba
+ * ~100 ms por cuadro en la Switch). Pesos de 7 bits y dos canales a la vez. */
+static inline uint32_t lerp2(uint32_t a, uint32_t b, uint32_t f)
+{
+    uint32_t nf = 128 - f;
+    uint32_t rb = (((a & 0x00FF00FFu) * nf + (b & 0x00FF00FFu) * f) >> 7) & 0x00FF00FFu;
+    uint32_t ga = ((((a >> 8) & 0x00FF00FFu) * nf + ((b >> 8) & 0x00FF00FFu) * f) >> 7) & 0x00FF00FFu;
+    return rb | ga << 8;
+}
+
 void gfx_image(const XImage *img, int x, int y, int w, int h, int r)
 {
-    if (!img || !img->px || w <= 0 || h <= 0) {
+    if (!img || !img->px || w <= 0 || h <= 0 || img->w <= 0 || img->h <= 0) {
         return;
     }
+    static int xa_t[4096], xb_t[4096];
+    static uint8_t fx_t[4096];
+    if (w > 4096) {
+        w = 4096;
+    }
+    for (int xx = 0; xx < w; xx++) {
+        int sx = (int)(((int64_t)(2 * xx + 1) * img->w * 128) / (2 * w)) - 64; /* en 1/128 de píxel */
+        int x0 = sx >> 7;
+        fx_t[xx] = (uint8_t)(sx & 127);
+        xa_t[xx] = x0 < 0 ? 0 : (x0 >= img->w ? img->w - 1 : x0);
+        xb_t[xx] = x0 + 1 >= img->w ? img->w - 1 : (x0 + 1 < 0 ? 0 : x0 + 1);
+    }
+    const uint32_t *px = (const uint32_t *)img->px;
     for (int yy = 0; yy < h; yy++) {
-        float sy = ((float)yy + 0.5f) * (float)img->h / (float)h - 0.5f;
-        int y0 = (int)floorf(sy);
-        float fy = sy - (float)y0;
+        int dy = y + yy;
+        if ((unsigned)dy >= (unsigned)g.h) {
+            continue;
+        }
+        int sy = (int)(((int64_t)(2 * yy + 1) * img->h * 128) / (2 * h)) - 64;
+        int y0 = sy >> 7;
+        uint32_t fy = (uint32_t)(sy & 127);
         int ya = y0 < 0 ? 0 : (y0 >= img->h ? img->h - 1 : y0);
         int yb = y0 + 1 >= img->h ? img->h - 1 : (y0 + 1 < 0 ? 0 : y0 + 1);
+        const uint32_t *ra = px + (size_t)ya * img->w, *rb = px + (size_t)yb * img->w;
+        uint32_t *dst = &g.px[(size_t)dy * g.stride];
         for (int xx = 0; xx < w; xx++) {
+            int dx = x + xx;
+            if ((unsigned)dx >= (unsigned)g.w) {
+                continue;
+            }
             uint32_t cov = 255;
             if (r > 0) {
                 cov = rr_cov((float)xx + 0.5f, (float)yy + 0.5f, 0, 0, (float)w, (float)h, (float)r);
@@ -185,21 +218,15 @@ void gfx_image(const XImage *img, int x, int y, int w, int h, int r)
                     continue;
                 }
             }
-            float sx = ((float)xx + 0.5f) * (float)img->w / (float)w - 0.5f;
-            int x0 = (int)floorf(sx);
-            float fx = sx - (float)x0;
-            int xa = x0 < 0 ? 0 : (x0 >= img->w ? img->w - 1 : x0);
-            int xb = x0 + 1 >= img->w ? img->w - 1 : (x0 + 1 < 0 ? 0 : x0 + 1);
-            const uint8_t *p00 = img->px + (ya * img->w + xa) * 4, *p01 = img->px + (ya * img->w + xb) * 4;
-            const uint8_t *p10 = img->px + (yb * img->w + xa) * 4, *p11 = img->px + (yb * img->w + xb) * 4;
-            uint32_t out = 0;
-            for (int ch = 0; ch < 4; ch++) {
-                float top = p00[ch] + (p01[ch] - p00[ch]) * fx;
-                float bot = p10[ch] + (p11[ch] - p10[ch]) * fx;
-                int v = (int)(top + (bot - top) * fy + 0.5f);
-                out |= (uint32_t)(v < 0 ? 0 : v > 255 ? 255 : v) << (ch * 8);
+            uint32_t f = fx_t[xx];
+            uint32_t top = lerp2(ra[xa_t[xx]], ra[xb_t[xx]], f);
+            uint32_t bot = lerp2(rb[xa_t[xx]], rb[xb_t[xx]], f);
+            uint32_t out = lerp2(top, bot, fy);
+            if (cov == 255 && (out >> 24) == 255) {
+                dst[dx] = out;
+            } else {
+                dst[dx] = blend(dst[dx], out, cov);
             }
-            put(x + xx, y + yy, out, cov);
         }
     }
 }
@@ -275,6 +302,27 @@ static uint32_t utf8_next(const char **ps)
     return c;
 }
 
+/* El kerning de un par (stbtt lo busca en la tabla cada vez: caro). */
+static int kern(uint32_t a, uint32_t b)
+{
+    static struct {
+        uint32_t key;
+        int v;
+        bool ok;
+    } cache[4096];
+    if (a > 0xFFFF || b > 0xFFFF) {
+        return stbtt_GetCodepointKernAdvance(&g_font, (int)a, (int)b);
+    }
+    uint32_t key = a << 16 | b;
+    unsigned h = (key * 2654435761u) >> 20;
+    if (!cache[h].ok || cache[h].key != key) {
+        cache[h].key = key;
+        cache[h].v = stbtt_GetCodepointKernAdvance(&g_font, (int)a, (int)b);
+        cache[h].ok = true;
+    }
+    return cache[h].v;
+}
+
 static int text_impl(int x, int y, int size, uint32_t c, const char *s, int maxchars_bytes, bool draw)
 {
     if (!g_font_ok) {
@@ -290,7 +338,7 @@ static int text_impl(int x, int y, int size, uint32_t c, const char *s, int maxc
     while (*s && (!end || s < end)) {
         uint32_t cp = utf8_next(&s);
         if (prev) {
-            pen += (int)lroundf((float)stbtt_GetCodepointKernAdvance(&g_font, (int)prev, (int)cp) * sc);
+            pen += (int)lroundf((float)kern(prev, cp) * sc);
         }
         const Glyph *gl = glyph(cp, size);
         if (!gl) {
@@ -329,21 +377,35 @@ int gfx_text_fit(int x, int y, int size, int maxw, uint32_t c, const char *s)
         return gfx_text(x, y, size, c, s);
     }
     int dots = gfx_text_width(size, "...");
-    /* Recorta por caracteres (UTF-8) hasta que quepa con "...". */
-    int bytes = 0, best = 0;
-    const char *p = s;
-    while (*p) {
-        const char *q = p;
-        utf8_next(&q);
-        int nb = (int)(q - s);
-        if (text_impl(0, 0, size, 0, s, nb, false) + dots > maxw) {
-            break;
+    /* Recorta por caracteres (UTF-8) hasta que quepa con "...", en una sola
+     * pasada (antes medía todo el prefijo por cada carácter: n² por línea). */
+    int best = 0;
+    if (g_font_ok) {
+        float sc = stbtt_ScaleForPixelHeight(&g_font, (float)size);
+        int pen = 0;
+        uint32_t prev = 0;
+        const char *p = s;
+        while (*p) {
+            const char *q = p;
+            uint32_t cp = utf8_next(&q);
+            int np = pen;
+            if (prev) {
+                np += (int)lroundf((float)kern(prev, cp) * sc);
+            }
+            const Glyph *gl = glyph(cp, size);
+            if (!gl) {
+                break;
+            }
+            np += gl->adv;
+            if (np + dots > maxw) {
+                break;
+            }
+            pen = np;
+            prev = cp;
+            best = (int)(q - s);
+            p = q;
         }
-        best = nb;
-        p = q;
-        bytes = nb;
     }
-    (void)bytes;
     int w = text_impl(x, y, size, c, s, best, true);
     return w + gfx_text(x + w, y, size, c, "...");
 }

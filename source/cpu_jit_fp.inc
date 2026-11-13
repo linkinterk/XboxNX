@@ -920,11 +920,16 @@ static void emit_lf_full(Em *e, unsigned kind, unsigned sz, int cin)
         e->lf_kind = (sz == 4 && cin < 0 && kind != LF_MUL) ? kind : 0;
         return;
     }
-    movw(e, W12, kind);
-    strb(e, W12, XC, OFF(lf_op));
-    movw(e, W12, sz);
-    strb(e, W12, XC, OFF(lf_sz));
-    strb(e, cin >= 0 ? cin : XZR, XC, OFF(lf_cin));
+    if (cin < 0) {
+        movw(e, W12, kind | sz << 8); /* lf_op, lf_sz, lf_cin = 0 de una vez */
+        strw(e, W12, XC, OFF(lf_op));
+    } else {
+        movw(e, W12, kind);
+        strb(e, W12, XC, OFF(lf_op));
+        movw(e, W12, sz);
+        strb(e, W12, XC, OFF(lf_sz));
+        strb(e, cin, XC, OFF(lf_cin));
+    }
     strw(e, W9, XC, OFF(lf_a));
     strw(e, W10, XC, OFF(lf_b));
     strw(e, W11, XC, OFF(lf_res));

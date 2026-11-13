@@ -1038,6 +1038,15 @@ bool hw_screen(const Kernel *k, XImage *out)
             continue;
         }
         const uint8_t *src = k->vm->ram + row;
+        if (bpp == 4) { /* BGRA -> RGBA de a 32 bits */
+            uint32_t *d32 = (uint32_t *)d;
+            for (int x = 0; x < w; x++) {
+                uint32_t v;
+                memcpy(&v, src + x * 4, 4);
+                d32[x] = ((v >> 16) & 0xFFu) | (v & 0xFF00u) | ((v & 0xFFu) << 16) | 0xFF000000u;
+            }
+            continue;
+        }
         for (int x = 0; x < w; x++, d += 4) {
             if (bpp == 4) {
                 d[0] = src[x * 4 + 2];
