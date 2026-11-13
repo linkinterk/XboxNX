@@ -27,6 +27,7 @@ typedef struct JSlot {
     void *entry;
 } JSlot;
 static JSlot g_jtab[JTAB];
+static int g_jit_no_dead = -1; /* CPU_SIN_MUERTOS=1: guardar siempre los flags (pruebas) */
 /* veces que corrió cada bloque traducido (para el perfil) */
 #define JCNT (1u << 19)
 static uint32_t g_jcnt[JCNT];
@@ -118,6 +119,7 @@ typedef struct Em {
     bool full;
     bool fallback; /* emitiendo el camino de respaldo (no cuenta como lento) */
     unsigned lf_kind; /* LF_* de 32 bits que dejó la instrucción anterior (0: no se sabe) */
+    bool lf_dead;     /* etapa 5: los flags de esta instrucción no los lee nadie (no guardarlos) */
 } Em;
 
 static inline void E(Em *e, uint32_t ins)
@@ -383,6 +385,9 @@ static void emit_call(Em *e, const Block *b, unsigned i, const Vm *vm)
 static void emit_lf(Em *e, unsigned kind)
 {
     e->lf_kind = kind;
+    if (e->lf_dead) {
+        return;
+    }
     movw(e, W12, kind);
     strb(e, W12, XC, OFF(lf_op));
     movw(e, W12, 4);
@@ -898,6 +903,32 @@ static bool emit_more(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned 
 
 /* Una instrucción; true si puede quedar en código nativo (EIP sin poner;
  * su camino lento pone el mismo next). false: la función, que pone el EIP. */
+/* Etapa 5, flags muertos: una alu/test de registros (sin memoria, sin
+ * salidas a mitad) que pone todos los flags sin leerlos. */
+static bool lf_writer_reg(const Insn *in)
+{
+    InsnFn f = in->fn;
+    if (!in->is_reg) {
+        return false;
+    }
+    if (f == x_alu_eg || f == x_alu_ge || f == x_alu_ei) {
+        return in->aop != OP_ADC && in->aop != OP_SBB;
+    }
+    return f == x_test_eg || f == x_test_ei;
+}
+
+/* Los flags de la instrucción i no hacen falta si es de registros y la
+ * siguiente (en el mismo bloque) los pisa todos sin leerlos. */
+static bool lf_dead_at(const Block *b, unsigned i)
+{
+    if (i + 1 >= b->n) {
+        return false;
+    }
+    const Insn *a = &b->in[i];
+    bool src = lf_writer_reg(a) || (a->fn == x_incdec && a->is_reg);
+    return src && lf_writer_reg(&b->in[i + 1]);
+}
+
 static bool emit_insn(Em *e, const Block *b, unsigned i, const Vm *vm)
 {
     const Insn *in = &b->in[i];
@@ -1112,7 +1143,12 @@ static bool jit_compile(Cpu *c, Block *b)
         }
         bool stale = false;
         for (unsigned i = 0; i < b->n; i++) {
+            if (g_jit_no_dead < 0) {
+                g_jit_no_dead = getenv("CPU_SIN_MUERTOS") != NULL;
+            }
+            e.lf_dead = !g_jit_no_dead && lf_dead_at(b, i);
             stale = emit_insn(&e, b, i, c->vm);
+            e.lf_dead = false;
         }
         if (stale) {
             movw(&e, W9, b->in[b->n - 1].next);

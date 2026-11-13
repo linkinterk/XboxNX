@@ -647,6 +647,34 @@ static bool emit_sse(Em *e, const Block *b, unsigned i, const Vm *vm)
             strq_r(e, 0, W10, W11);
         }
         break;
+    case 0x12: case 0x13: case 0x16: case 0x17: { /* movlps movhlps / movhps movlhps */
+        if (ss) {
+            return false;
+        }
+        bool high = op >= 0x16;
+        uint32_t half = xo + (high ? 8u : 0u);
+        if (op == 0x13 || op == 0x17) {
+            if (in->is_reg) {
+                return true; /* con registro no hace nada (como el intérprete) */
+            }
+            mem_at(e, in, 8, true, &s);
+            xmm_base(e);
+            ldrd(e, 0, W14, half);
+            strd_r(e, 0, W10, W11);
+            break;
+        }
+        if (in->is_reg) {
+            xmm_base(e);
+            ldrd(e, 0, W14, 16u * in->rm + (high ? 0u : 8u));
+            strd(e, 0, W14, half);
+            return true;
+        }
+        mem_at(e, in, 8, false, &s);
+        ldrd_r(e, 0, W10, W11);
+        xmm_base(e);
+        strd(e, 0, W14, half);
+        break;
+    }
     case 0x58: case 0x59: case 0x5C: case 0x5E: case 0x5D: case 0x5F: {
         /* v0 = a (destino), v1 = b */
         if (in->is_reg) {
@@ -839,6 +867,9 @@ static void emit_cf(Em *e, unsigned prev)
 static void emit_lf_cin(Em *e, unsigned kind)
 {
     e->lf_kind = kind;
+    if (e->lf_dead) {
+        return;
+    }
     strb(e, W12, XC, OFF(lf_cin));
     movw(e, W12, kind);
     strb(e, W12, XC, OFF(lf_op));
@@ -885,6 +916,10 @@ static bool emit_jcc_more(Em *e, const Insn *in, unsigned prev)
 /* lf_* completos: w9 = a, w10 = b, w11 = res; cin en el registro cin (o 0 si -1) */
 static void emit_lf_full(Em *e, unsigned kind, unsigned sz, int cin)
 {
+    if (e->lf_dead) {
+        e->lf_kind = (sz == 4 && cin < 0 && kind != LF_MUL) ? kind : 0;
+        return;
+    }
     movw(e, W12, kind);
     strb(e, W12, XC, OFF(lf_op));
     movw(e, W12, sz);

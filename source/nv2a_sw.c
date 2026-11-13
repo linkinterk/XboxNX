@@ -208,21 +208,36 @@ static unsigned attr_bytes(uint32_t fmt)
     return size * (type == 2 ? 4u : (type == 1 || type == 5) ? 2u : 1u);
 }
 
-static bool push_vertex(const float v[16][4])
+/* El lugar del siguiente vértice (ya con los valores actuales); NULL: no cabe.
+ * Etapa 5: se llena ahí mismo, sin copias de paso. */
+static float (*next_vertex(void))[4]
 {
     if (S.nin >= S.cap) {
         if (S.cap >= MAX_VERTS) {
-            return false;
+            return NULL;
         }
         unsigned nc = S.cap ? S.cap * 2 : 1024;
         void *n = realloc(S.in, (size_t)nc * sizeof(*S.in));
         if (!n) {
-            return false;
+            return NULL;
         }
         S.in = n;
         S.cap = nc;
     }
-    memcpy(S.in[S.nin++], v, sizeof(float) * 64);
+    float(*v)[4] = S.in[S.nin++];
+    memcpy(v, S.cur, sizeof(float) * 64);
+    return v;
+}
+
+static bool push_vertex(const float v[16][4])
+{
+    float(*d)[4] = next_vertex();
+    if (!d) {
+        return false;
+    }
+    if ((const float *)v != &S.cur[0][0]) {
+        memcpy(d, v, sizeof(float) * 64);
+    }
     return true;
 }
 
@@ -232,8 +247,10 @@ static void array_vertex(uint32_t i)
     if (g_skip) {
         return;
     }
-    float v[16][4];
-    memcpy(v, S.cur, sizeof(v));
+    float(*v)[4] = next_vertex();
+    if (!v) {
+        return;
+    }
     for (int a = 0; a < 16; a++) {
         uint32_t fmt = S.va_fmt[a];
         unsigned n = attr_bytes(fmt);
@@ -247,7 +264,6 @@ static void array_vertex(uint32_t i)
             attr_conv(fmt, p, v[a]);
         }
     }
-    push_vertex(v);
 }
 
 /* Los vértices de INLINE_ARRAY: los atributos con tamaño, en orden. */
