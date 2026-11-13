@@ -24,6 +24,7 @@
 #include "probe.h"
 #include "crash.h"
 #include "clocks.h"
+#include "sound.h"
 #include "gpu.h"
 #include "hw.h"
 #include "ui.h"
@@ -31,7 +32,7 @@
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.35"
+#define APP_VER   "0.18.36"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -396,6 +397,7 @@ int main(int argc, char **argv)
     hidInitializeTouchScreen();
     apu_set_threaded(true); /* el audio en el núcleo 1 */
     clocks_raise(); /* CPU 1785 MHz, memoria 1600, GPU de juego (al salir, como estaban) */
+    sound_init(); /* 3h: el audio del Xbox por la Switch */
     s32 prev_touches = 0;
 
     g_ui.version = APP_VER;
@@ -615,6 +617,10 @@ int main(int argc, char **argv)
                              : cs < 0 ? "No se pudo capturar el cuadro" : "Esperando el próximo cuadro para capturarlo...");
                 }
                 dirty = true;
+                if (k & HidNpadButton_A) { /* 3h: sonido sí/no */
+                    sound_set_on(!sound_on());
+                    snprintf(g_ui.toast, sizeof(g_ui.toast), "Sonido %s", sound_on() ? "encendido" : "apagado");
+                }
                 if (k & HidNpadButton_B) {
                     g_run.state = RUN_CPU_STOP;
                     snprintf(g_run.end, sizeof(g_run.end), "Detenido por ti");
@@ -679,6 +685,7 @@ int main(int argc, char **argv)
     }
 
     kio_sync(); /* lo que falte escribir en la SD */
+    sound_exit();
     clocks_restore();
     vm_free(&g_vm);
     game_close(&g_game);

@@ -15,6 +15,7 @@
 #include "hw.h"
 #include "gpu.h"
 #include "clocks.h"
+#include "sound.h"
 #include "apu/apu.h"
 #include "nv2a_sw.h"
 #include "prof.h"
@@ -97,7 +98,7 @@ static void top_bar(const UiState *s, const char *subtitle)
         gfx_text(104, 52, 18, C_ON_VAR, subtitle);
     }
     char chip[48];
-    snprintf(chip, sizeof(chip), "Etapa 2d.2  ·  v%s", s->version);
+    snprintf(chip, sizeof(chip), "Etapa 5  ·  v%s", s->version);
     int w = gfx_text_width(18, chip) + 32;
     gfx_rrect(UI_W - 40 - w, 26, w, 34, 17, C_GREEN_BG);
     gfx_text(UI_W - 40 - w + 16, 33, 18, C_GREEN, chip);
@@ -818,7 +819,7 @@ static void draw_xbox_screen(const UiState *s)
                  (unsigned long long)sw->triangles, (unsigned long long)sw->pixels, sw->skipped_ff, sw->no_target,
                  sw->no_target_why, (unsigned)sw->surf_format, (unsigned)sw->surf_pitch, (unsigned)sw->clip_h,
                  (unsigned)sw->clip_v, sw->vs_errors, (unsigned)hw_scanout());
-        gfx_rrect(14, ly - 4, UI_W - 28, 276, 10, WITH_ALPHA(HEX(0x000000), 200));
+        gfx_rrect(14, ly - 4, UI_W - 28, 298, 10, WITH_ALPHA(HEX(0x000000), 200));
         gfx_text_fit(24, ly, 16, UI_W - 48, C_ON, e);
         ly += 22;
         snprintf(e, sizeof(e), "Último: prim %u, %u vértices, %llu tri, %llu px, %u ocultos, %u tras Z · destino %08X pitch %u fmt %X · Z %08X",
@@ -932,6 +933,8 @@ static void draw_xbox_screen(const UiState *s)
                      gs->fallbacks, gs->uploads, gs->upload_bytes / 1048576.0, gs->flushes);
             gfx_text_fit(24, ly, 16, UI_W - 48, gpu_enabled() ? C_GREEN : C_WARN, e);
         }
+        ly += 22;
+        gfx_text_fit(24, ly, 16, UI_W - 48, sound_on() ? C_GREEN : C_WARN, sound_info());
     } else {
         snprintf(b, sizeof(b), "Pantalla del Xbox: el juego todavía no eligió un modo de video");
         gfx_text_center(0, UI_W, 330, 22, C_ON_VAR, "Todavía no hay imagen");
@@ -1252,8 +1255,9 @@ static void draw_run(const UiState *s)
         snprintf(clk, sizeof(clk), "Reloj %u ns", kn ? kn->ns_per_instr : 1);
         char fs[24];
         snprintf(fs, sizeof(fs), "%s 1/%u", gpu_enabled() ? "GPU" : "CPU", hw_frameskip());
-        Hint h[] = {{"Y", clk}, {"<>", fs}, {"X", "Pantalla"}, {"-", "Volcado"}, {"B", "Detener"}, {"+", "Salir"}};
-        bottom_bar(h, 6);
+        Hint h[] = {{"Y", clk}, {"<>", fs}, {"A", sound_on() ? "Sonido" : "Sin sonido"}, {"X", "Pantalla"},
+                    {"-", "Volcado"}, {"B", "Detener"}, {"+", "Salir"}};
+        bottom_bar(h, 7);
     } else {
         Hint h[] = {{"X", "Pantalla"}, {"A", "Otra vez"}, {"B", "Volver"}, {"+", "Salir"}};
         bottom_bar(h, 4);
@@ -1340,7 +1344,7 @@ static const Stage k_stages[] = {
     {"5a", "Optimización 1", "Intérprete ~40% más rápido, dibujo en 3 núcleos, reloj ajustable", 0},
     {"5b", "Optimización 2", "Flags perezosos: el intérprete ~70% más rápido que al principio", 0},
     {"5c", "Optimización 3", "El audio (DSP) en su propio núcleo, junto al intérprete", 0},
-    {"3h", "Sonido", "Sacar el audio del Xbox por la Switch", 2},
+    {"3h", "Sonido", "El audio del Xbox por la bocina de la Switch (A lo apaga)", 1},
     {"2d.1", "Bloques decodificados", "Código entendido una vez y guardado: ~1,8x; MMX del video 2,4x", 0},
     {"2d.2", "JIT a ARM64", "Bloques traducidos a código de la Switch (mov, alu, pila, memoria)", 0},
     {"2d.3", "JIT ampliado", "x87, SSE, MMX, inc/dec, desplazamientos, call/ret en el JIT", 1},
