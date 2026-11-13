@@ -890,6 +890,40 @@ static int surf_find(uint32_t pa)
     return -1;
 }
 
+/* Etapa 5: qué textura tiene cada unidad (para no volver a ponerla en cada
+ * dibujo: cada glBindTexture hace que el driver revalide las texturas). */
+static int g_unit;
+static GLuint g_bound[8][2];
+
+static void tex_unit(int u)
+{
+    if (g_unit != u) {
+        glActiveTexture(GL_TEXTURE0 + (GLenum)u);
+        g_unit = u;
+    }
+}
+
+static void tex_bind(GLenum target, GLuint tex)
+{
+    int k = target == GL_TEXTURE_CUBE_MAP ? 1 : 0;
+    if (g_bound[g_unit][k] != tex) {
+        glBindTexture(target, tex);
+        g_bound[g_unit][k] = tex;
+    }
+}
+
+static void tex_del(GLuint *tex)
+{
+    for (int u = 0; u < 8; u++) {
+        for (int k = 0; k < 2; k++) {
+            if (g_bound[u][k] == *tex) {
+                g_bound[u][k] = 0;
+            }
+        }
+    }
+    glDeleteTextures(1, tex);
+}
+
 /* Etapa 5: el cuadro terminado se lee a un PBO sin esperar a la GPU (antes
  * glReadPixels a la RAM paraba todo hasta que la GPU acababa el cuadro); se
  * copia a la RAM cuando la GPU terminó (o cuando alguien necesita la RAM). */
@@ -1006,7 +1040,7 @@ static void surf_flush(int i)
 static void surf_upload(Surf *s)
 {
     uint64_t end = (uint64_t)s->pa + (uint64_t)s->pitch * (uint64_t)s->h;
-    glBindTexture(GL_TEXTURE_2D, s->tex);
+    tex_bind(GL_TEXTURE_2D, s->tex);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)(s->pitch / 4));
     glTexImage2D(GL_TEXTURE_2D, 0, s->fmt == 8 ? GL_RGBA8 : GL_RGB8, s->w, s->h, 0, GL_BGRA, GL_UNSIGNED_BYTE,
@@ -1026,7 +1060,7 @@ static void surf_free(int i)
         }
     }
     glDeleteFramebuffers(1, &s->fbo);
-    glDeleteTextures(1, &s->tex);
+    tex_del(&s->tex);
     memset(s, 0, sizeof(*s));
 }
 
@@ -1064,7 +1098,7 @@ static int surf_get(uint32_t pa, uint32_t pitch, int h, unsigned fmt)
     s->fmt = fmt;
     s->used = G.frame;
     glGenTextures(1, &s->tex);
-    glBindTexture(GL_TEXTURE_2D, s->tex);
+    tex_bind(GL_TEXTURE_2D, s->tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     surf_upload(s);
@@ -1275,7 +1309,7 @@ static GLuint tex_get(const GpuTex *t, float scale[2])
             s->used = G.frame;
             scale[0] = 1.0f / (float)s->w;
             scale[1] = 1.0f / (float)s->h;
-            glBindTexture(GL_TEXTURE_2D, s->tex);
+            tex_bind(GL_TEXTURE_2D, s->tex);
             uint8_t key = (uint8_t)(1 + ((t->bilinear ? 1 : 0) | wkey(t->au) << 1 | wkey(t->av) << 3));
             if (s->params != key) { /* etapa 5: solo si cambió (cada llamada hace revalidar al driver) */
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, t->bilinear ? GL_LINEAR : GL_NEAREST);
@@ -1314,7 +1348,7 @@ static GLuint tex_get(const GpuTex *t, float scale[2])
         int i = free_i >= 0 ? free_i : old;
         e = &G.tex[i];
         if (e->tex) {
-            glDeleteTextures(1, &e->tex);
+            tex_del(&e->tex);
         }
         memset(e, 0, sizeof(*e));
         e->addr = t->addr;
@@ -1326,7 +1360,7 @@ static GLuint tex_get(const GpuTex *t, float scale[2])
         G.st.textures++;
     }
     e->used = G.frame;
-    glBindTexture(target, e->tex);
+    tex_bind(target, e->tex);
     if (e->checked != G.frame || !e->valid) {
         uint64_t h = hash_bytes(t->data, t->bytes) ^ (hash_bytes(t->pal, t->pal_bytes) * 31);
         e->checked = G.frame;
@@ -1463,12 +1497,14 @@ static bool gpu_draw_(const GpuDraw *d)
         return true; /* puntos y líneas: todavía no (el software tampoco) */
     }
     Prog *P = &G.progs[0];
+    g_zone = Z_GL_PROG;
     if (d->vs_in || d->vs_pk) {
         P = vs_prog(d);
         if (!P) {
             return false; /* lo hace la CPU (y luego este mismo camino con los vértices listos) */
         }
     }
+    g_zone = Z_GL_TARGET;
     int si = surf_get(d->color_pa, d->pitch, d->h, d->fmt);
     int zi = -1;
     if (d->zfmt && d->zeta_pa) {
@@ -1492,6 +1528,7 @@ static bool gpu_draw_(const GpuDraw *d)
         memcpy(SC.sc, scv, sizeof(scv));
     }
     sc_cap(GL_DEPTH_CLAMP, 2, true);
+    g_zone = Z_GL_STATE;
     /* estado */
     if (zi >= 0 && d->dtest) {
         sc_cap(GL_DEPTH_TEST, 4, true);
@@ -1557,6 +1594,7 @@ static bool gpu_draw_(const GpuDraw *d)
         glUseProgram(P->prog);
         SC.prog = P->prog;
     }
+    g_zone = Z_GL_TEXS;
     GLint tmode[4] = {0}, tcube[4] = {0};
     float tscale[8];
     for (int i = 0; i < 4; i++) {
@@ -1569,14 +1607,14 @@ static bool gpu_draw_(const GpuDraw *d)
         if (t->mode == 4) {
             continue;
         }
-        glActiveTexture(GL_TEXTURE0 + (GLenum)(t->cube ? 4 + i : i));
+        tex_unit(t->cube ? 4 + i : i);
         GLuint tx = tex_get(t, &tscale[2 * i]);
         if (!tx) {
             tmode[i] = 0;
         }
         tcube[i] = t->cube;
     }
-    glActiveTexture(GL_TEXTURE0);
+    tex_unit(0);
     if (!SC.valid) { /* tex_get pudo copiar una superficie a la RAM */
         sc_check();
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
@@ -1584,6 +1622,7 @@ static bool gpu_draw_(const GpuDraw *d)
         glUseProgram(P->prog);
         SC.prog = P->prog;
     }
+    g_zone = Z_GL_UNIF;
     /* uniforms (solo los que cambiaron) */
     float vp[4] = {2.0f / (float)s->w, 2.0f / (float)s->h, d->zmax > 0 ? 2.0f / d->zmax : 1.0f, 0};
     if (sc_u(P, 0, vp, sizeof(vp))) glUniform4fv(P->u_vp, 1, vp);
@@ -1848,7 +1887,7 @@ void gpu_reset(void)
     for (int i = 0; i < MAX_SURF; i++) {
         if (G.surf[i].tex) {
             glDeleteFramebuffers(1, &G.surf[i].fbo);
-            glDeleteTextures(1, &G.surf[i].tex);
+            tex_del(&G.surf[i].tex);
         }
     }
     memset(G.surf, 0, sizeof(G.surf));
@@ -1860,7 +1899,7 @@ void gpu_reset(void)
     memset(G.zeta, 0, sizeof(G.zeta));
     for (int i = 0; i < MAX_TEX; i++) {
         if (G.tex[i].tex) {
-            glDeleteTextures(1, &G.tex[i].tex);
+            tex_del(&G.tex[i].tex);
         }
     }
     memset(G.tex, 0, sizeof(G.tex));
@@ -1876,8 +1915,8 @@ bool gpu_present_ui(const uint32_t *rgba, int w, int h)
     if (!G.ui_tex) {
         glGenTextures(1, &G.ui_tex);
     }
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, G.ui_tex);
+    tex_unit(0);
+    tex_bind(GL_TEXTURE_2D, G.ui_tex);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     if (G.ui_w != w || G.ui_h != h) {

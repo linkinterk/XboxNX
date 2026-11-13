@@ -97,6 +97,7 @@ const char *zone_name(int z)
 {
     static const char *n[Z_N] = {"otro", "push buffer", "métodos", "preparar dibujo", "armar vértices",
                                  "estado GL", "subir vértices", "dibujar (GL)", "texturas", "visibilidad",
-                                 "vértices CPU", "píxeles CPU", "leer cuadro"};
+                                 "vértices CPU", "píxeles CPU", "leer cuadro", "borrar", "flip",
+                                 "GL destino", "GL texturas", "GL uniforms", "GL programa"};
     return z >= 0 && z < Z_N ? n[z] : "?";
 }

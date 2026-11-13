@@ -565,7 +565,12 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         g_frame_no++;
         if (!g_skipping && g_hw.color_inst) {
             g_last_drawn = dma_base(g_hw.color_inst) + g_hw.color_offset;
-            gpu_flush_surface_async(g_last_drawn); /* 4c: el cuadro terminado, a la RAM (para la pantalla; sin esperar a la GPU) */
+            {
+                int zf = g_zone;
+                g_zone = Z_FLIP;
+                gpu_flush_surface_async(g_last_drawn); /* 4c: el cuadro terminado, a la RAM (para la pantalla; sin esperar a la GPU) */
+                g_zone = zf;
+            }
         }
         gpu_end_frame();
         g_skipping = g_frameskip > 1 && g_cap.state != 2 && g_cap.state != 1 && (g_frame_no % g_frameskip) != 0;
@@ -595,7 +600,13 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
     case NV097_SET_COLOR_CLEAR_VALUE: g_hw.clear_value = v; break;
     case NV097_SET_CLEAR_RECT_HORIZONTAL: g_hw.clear_h = v; break;
     case NV097_SET_CLEAR_RECT_VERTICAL: g_hw.clear_v = v; break;
-    case NV097_CLEAR_SURFACE: clear_color(k, v); break;
+    case NV097_CLEAR_SURFACE: {
+        int zc = g_zone;
+        g_zone = Z_CLEAR;
+        clear_color(k, v);
+        g_zone = zc;
+        break;
+    }
     case NV097_SEMAPHORE_RELEASE:
         if (g_hw.sem_inst) {
             uint32_t *p = phys32(k, dma_base(g_hw.sem_inst) + g_hw.sem_offset);
@@ -605,7 +616,14 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
             }
         }
         break;
+    case 0x17C8: /* CLEAR_REPORT_VALUE */
+        g_hw.st.zpass_tests++;
+        break;
     case NV097_GET_REPORT: /* los píxeles que pasaron Z (pruebas de visibilidad), informe listo */
+        g_hw.st.reports++;
+        if (!g_hw.report_inst) {
+            g_hw.st.reports_noinst++;
+        }
         if (g_hw.report_inst) {
             uint32_t pa = dma_base(g_hw.report_inst) + (v & 0x00FFFFFFu);
             uint32_t *p = phys32(k, pa);

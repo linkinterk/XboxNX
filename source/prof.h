@@ -37,7 +37,7 @@ void prof_reset(int depth);
  * ZONE_SET guarda la anterior; ZONE_END la vuelve a poner. */
 enum {
     Z_NONE, Z_PB, Z_METH, Z_SETUP, Z_PACK, Z_GL_STATE, Z_GL_VERT, Z_GL_CALL, Z_TEX, Z_QUERY, Z_XFORM, Z_RASTER,
-    Z_READ, Z_N
+    Z_READ, Z_CLEAR, Z_FLIP, Z_GL_TARGET, Z_GL_TEXS, Z_GL_UNIF, Z_GL_PROG, Z_N
 };
 extern volatile int g_zone;
 const char *zone_name(int z);
