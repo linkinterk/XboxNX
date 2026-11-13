@@ -8,6 +8,7 @@
  * espacio de recorte, para interpolar con perspectiva.
  */
 #include "nv2a_sw.h"
+#include "prof.h"
 #include "vsh_glsl.h"
 
 /* lo que más tiempo gasta del emulador: con -O3 ~30% más rápido */
@@ -1720,7 +1721,10 @@ static bool gpu_try(const Target *t, const OutVert *ov)
     d.query = g_zpass_on;
     if (g_vs_draw) {
         if (g_nidx) {
-            if (!pk_build(&d)) {
+            g_zone = Z_PACK;
+            bool pk = pk_build(&d);
+            g_zone = Z_SETUP;
+            if (!pk) {
                 return false;
             }
         } else {
@@ -1822,7 +1826,16 @@ static bool gpu_try_vs(const Target *t)
     return ok;
 }
 
+static void draw_(void);
+
 static void draw(void)
+{
+    ZONE_SET(Z_SETUP);
+    draw_();
+    ZONE_END();
+}
+
+static void draw_(void)
 {
     if (g_skip) {
         S.st.skipped_frames_draws++;
@@ -1865,6 +1878,7 @@ static void draw(void)
         return;
     }
     g_xf_out = ov;
+    g_zone = Z_XFORM;
     if (S.nin >= 192 && workers_count() > 1) {
         workers_run(transform_part, NULL); /* los vértices repartidos entre los hilos */
     } else {
@@ -1903,6 +1917,7 @@ static void draw(void)
         /* la GPU no pudo: el software, sobre la RAM al día */
         gpu_flush_surface((uint32_t)(t.color - S.ram));
     }
+    g_zone = Z_RASTER;
     uint64_t px0 = S.st.pixels, tr0 = S.st.triangles;
     unsigned n = S.nin;
     switch (S.prim) {
@@ -2001,7 +2016,16 @@ static void set_attr(unsigned a, unsigned comp, float v, bool emit)
     }
 }
 
+static void sw_method_(uint32_t m, uint32_t v);
+
 void sw_method(uint32_t m, uint32_t v)
+{
+    ZONE_SET(Z_METH);
+    sw_method_(m, v);
+    ZONE_END();
+}
+
+static void sw_method_(uint32_t m, uint32_t v)
 {
     if (!S.ram) {
         return;

@@ -27,7 +27,7 @@ typedef struct {
 } Slot;
 
 static Slot g_h[HSIZE];
-static uint32_t g_total, g_out[PROF_N + 1];
+static uint32_t g_total, g_out[PROF_N + 1], g_zh[Z_N];
 static const volatile uint32_t *g_cur;
 static Vm *g_vm;
 static const char *g_version;
@@ -70,6 +70,15 @@ static void report(FILE *f, unsigned secs)
         }
     }
     fprintf(f, "\n");
+    if (g_out[PROF_GPU]) {
+        fprintf(f, "GPU por pasos:");
+        for (int z = 0; z < Z_N; z++) {
+            if (g_zh[z]) {
+                fprintf(f, " %s %.1f%%", zone_name(z), 100.0 * g_zh[z] / g_total);
+            }
+        }
+        fprintf(f, "\n");
+    }
     /* los 24 bloques con más muestras */
     for (int t = 0; t < 24; t++) {
         unsigned best = HSIZE;
@@ -116,6 +125,10 @@ static void thr(void *arg)
             /* fuera del JIT, o dentro pero en el GPU/kernel/audio (lo que una
              * escritura a un registro dispara): la parte */
             g_out[p >= 0 && p < PROF_N ? p : PROF_N]++;
+            if (p == PROF_GPU) {
+                int z = g_zone;
+                g_zh[z >= 0 && z < Z_N ? z : 0]++;
+            }
         }
         g_total++;
         uint64_t now = armGetSystemTick();
@@ -129,6 +142,7 @@ static void thr(void *arg)
             }
             memset(g_h, 0, sizeof(g_h));
             memset(g_out, 0, sizeof(g_out));
+            memset(g_zh, 0, sizeof(g_zh));
             g_total = 0;
         }
     }
@@ -156,6 +170,7 @@ void sampler_start(const volatile uint32_t *cur, Vm *vm, const char *version)
     (void)add;
     (void)g_total;
     (void)g_out;
+    (void)g_zh;
     (void)g_cur;
     (void)g_vm;
     (void)g_version;

@@ -90,3 +90,13 @@ int prof_now(void)
 }
 
 uint64_t prof_now_ns(void) { return now(); }
+
+volatile int g_zone;
+
+const char *zone_name(int z)
+{
+    static const char *n[Z_N] = {"otro", "push buffer", "métodos", "preparar dibujo", "armar vértices",
+                                 "estado GL", "subir vértices", "dibujar (GL)", "texturas", "visibilidad",
+                                 "vértices CPU", "píxeles CPU", "leer cuadro"};
+    return z >= 0 && z < Z_N ? n[z] : "?";
+}

@@ -33,4 +33,15 @@ uint64_t prof_now_ns(void);
 int prof_depth(void);
 void prof_reset(int depth);
 
+/* Etapa 5: dentro del GPU, en qué paso está (para el muestreo de sampler.c).
+ * ZONE_SET guarda la anterior; ZONE_END la vuelve a poner. */
+enum {
+    Z_NONE, Z_PB, Z_METH, Z_SETUP, Z_PACK, Z_GL_STATE, Z_GL_VERT, Z_GL_CALL, Z_TEX, Z_QUERY, Z_XFORM, Z_RASTER,
+    Z_READ, Z_N
+};
+extern volatile int g_zone;
+const char *zone_name(int z);
+#define ZONE_SET(z) int zone_prev_ = g_zone; g_zone = (z)
+#define ZONE_END() (g_zone = zone_prev_)
+
 #endif

@@ -644,7 +644,9 @@ static void pb_run_(Kernel *k);
 static void pb_run(Kernel *k)
 {
     prof_push(PROF_GPU);
+    ZONE_SET(Z_PB);
     pb_run_(k);
+    ZONE_END();
     prof_pop();
 }
 

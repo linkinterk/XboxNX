@@ -15,6 +15,7 @@
 #include <EGL/eglext.h>
 
 #include "gl_min.h"
+#include "prof.h"
 
 #ifdef __SWITCH__
 #include <switch.h>
@@ -908,7 +909,9 @@ static void rb_finish(bool wait)
         return;
     }
     uint64_t t0 = now_ns();
+    ZONE_SET(Z_READ);
     rb_finish_(wait);
+    ZONE_END();
     G.st.ns_read += now_ns() - t0;
 }
 
@@ -1329,6 +1332,8 @@ static GLuint tex_get(const GpuTex *t, float scale[2])
         e->checked = G.frame;
         if (!e->valid || h != e->hash) {
             uint64_t tt = now_ns();
+            int zt = g_zone;
+            g_zone = Z_TEX;
             size_t need = (size_t)t->w * t->h;
             if (need > G.scratch_n) {
                 free(G.scratch);
@@ -1350,6 +1355,7 @@ static GLuint tex_get(const GpuTex *t, float scale[2])
             e->valid = true;
             G.st.uploads++;
             G.st.ns_tex += now_ns() - tt;
+            g_zone = zt;
         }
     }
     uint8_t key = (uint8_t)(1 + ((t->bilinear ? 1 : 0) | wkey(t->au) << 1 | wkey(t->av) << 3 | (t->cube ? 32 : 0)));
@@ -1405,6 +1411,7 @@ static unsigned g_qn;
 
 bool gpu_draw(const GpuDraw *d)
 {
+    ZONE_SET(Z_GL_STATE);
     uint64_t t0 = now_ns();
     bool q = d->query && G.on && g_qn < MAX_Q;
     if (q) {
@@ -1421,6 +1428,7 @@ bool gpu_draw(const GpuDraw *d)
         }
     }
     G.st.ns_draw += now_ns() - t0;
+    ZONE_END();
     return ok;
 }
 
@@ -1429,6 +1437,7 @@ uint32_t gpu_query_collect(void)
     if (!G.ready) {
         return 0;
     }
+    ZONE_SET(Z_QUERY);
     uint64_t sum = 0, t0 = now_ns();
     for (unsigned i = 0; i < g_qn; i++) {
         GLuint n = 0;
@@ -1438,6 +1447,7 @@ uint32_t gpu_query_collect(void)
     g_qn = 0;
     G.st.queries++;
     G.st.ns_query += now_ns() - t0;
+    ZONE_END();
     return sum > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)sum;
 }
 
@@ -1630,7 +1640,9 @@ static bool gpu_draw_(const GpuDraw *d)
             }
         }
         uint64_t tv = now_ns();
+        g_zone = Z_GL_VERT;
         bool up = vs_upload(d);
+        g_zone = Z_GL_STATE;
         G.st.ns_vbuf += now_ns() - tv;
         if (!up) {
             return false;
@@ -1647,6 +1659,8 @@ static bool gpu_draw_(const GpuDraw *d)
     }
     unsigned n = d->nverts;
     GLint f0 = G.draw_first;
+    g_zone = Z_GL_CALL;
+    uint64_t tcall = now_ns();
     if (d->vs_idx && d->vs_nidx) {
         /* etapa 5: con índices (cada vértice una vez): al anillo de índices */
         size_t ib = (size_t)d->vs_nidx * 4;
@@ -1671,6 +1685,7 @@ static bool gpu_draw_(const GpuDraw *d)
                 s->dirty = true;
                 G.st.draws++;
                 G.st.indexed++;
+                G.st.ns_call += now_ns() - tcall;
                 return true;
             }
             G.iring_pos = 0;
@@ -1683,6 +1698,7 @@ static bool gpu_draw_(const GpuDraw *d)
         s->dirty = true;
         G.st.draws++;
         G.st.indexed++;
+        G.st.ns_call += now_ns() - tcall;
         return true;
     }
     switch (d->prim) {
@@ -1729,6 +1745,7 @@ static bool gpu_draw_(const GpuDraw *d)
     }
     s->dirty = true; /* el VAO queda puesto para el dibujo siguiente */
     G.st.draws++;
+    G.st.ns_call += now_ns() - tcall;
     return true;
 }
 
