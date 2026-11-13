@@ -190,8 +190,29 @@ static void route(uint32_t *off, ApuRead *rd, ApuWrite *wr)
     }
 }
 
+/* Etapa 5: los registros y el VP se leen sin candado (una lectura de 32 bits
+ * que el hilo de los cuadros puede estar cambiando: la de antes o la de
+ * después). El juego (DirectSound) los lee sin parar y con candado esperaba
+ * a que terminara el cuadro de audio en el otro núcleo. */
+static volatile bool g_dsp_busy; /* el hilo de los cuadros corre el DSP sin g_mx */
+static pthread_cond_t g_cv_dsp = PTHREAD_COND_INITIALIZER;
+static volatile bool g_sleeping; /* el hilo de los cuadros espera (hay que avisarle) */
+
 uint32_t apu_read(Kernel *k, uint32_t off, int size)
 {
+    {
+        MCPXAPUState *d0 = __atomic_load_n(&g_state, __ATOMIC_ACQUIRE);
+        uint32_t o = off & ~3u;
+        ApuRead rd0;
+        ApuWrite wr0;
+        route(&o, &rd0, &wr0);
+        if (d0 && (rd0 == regs_read || rd0 == mcpx_apu_vp_read)) {
+            g_k = k;
+            uint32_t v = (uint32_t)rd0(d0, o, 4);
+            uint32_t sub = off & 3;
+            return size == 4 ? v : (v >> (8 * sub)) & (size == 1 ? 0xFFu : 0xFFFFu);
+        }
+    }
     pthread_mutex_lock(&g_mx);
     MCPXAPUState *d = g_state;
     if (!d) {
@@ -232,7 +253,9 @@ void apu_write(Kernel *k, uint32_t off, int size, uint32_t v)
     wr(d, off, v, 4);
     g_stats.writes++;
     pthread_mutex_unlock(&g_mx);
-    pthread_cond_signal(&g_cv); /* quizá los cuadros siguen ahora */
+    if (g_sleeping) {
+        pthread_cond_signal(&g_cv); /* quizá los cuadros siguen ahora */
+    }
 }
 
 /* ---- cuadros ---- */
@@ -251,7 +274,20 @@ static void se_frame(MCPXAPUState *d)
     float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME];
     memset(mixbins, 0, sizeof(mixbins));
     mcpx_apu_vp_frame(d, mixbins);
-    mcpx_apu_dsp_frame(d, mixbins);
+    if (g_thread_on) {
+        /* el DSP (lo más pesado del cuadro) sin g_mx: el juego puede tocar
+         * los registros mientras; sus ventanas del GP/EP toman d->lock */
+        g_dsp_busy = true;
+        pthread_mutex_unlock(&g_mx);
+        pthread_mutex_lock(&d->lock);
+        mcpx_apu_dsp_frame(d, mixbins);
+        pthread_mutex_unlock(&d->lock);
+        pthread_mutex_lock(&g_mx);
+        g_dsp_busy = false;
+        pthread_cond_broadcast(&g_cv_dsp);
+    } else {
+        mcpx_apu_dsp_frame(d, mixbins);
+    }
     if ((d->ep_frame_div + 1) % 8 == 0) {
         if (g_out) {
             g_out(g_out_ctx, &d->monitor.frame_buf[0][0], 256);
@@ -324,7 +360,9 @@ static void *frame_thread(void *arg)
                 ts.tv_nsec -= 1000000000L;
                 ts.tv_sec++;
             }
+            g_sleeping = true;
             pthread_cond_timedwait(&g_cv, &g_mx, &ts);
+            g_sleeping = false;
             continue;
         }
         run_frames(d, target);
@@ -366,7 +404,9 @@ void apu_tick(Kernel *k)
     }
     if (g_thread_on) {
         __atomic_store_n(&g_target_ns, k->now_ns, __ATOMIC_RELAXED);
-        pthread_cond_signal(&g_cv);
+        if (g_sleeping) {
+            pthread_cond_signal(&g_cv);
+        }
         return;
     }
     pthread_mutex_lock(&g_mx);
@@ -423,6 +463,9 @@ bool apu_init(Kernel *k)
 
 static bool apu_init_locked(Kernel *k)
 {
+    while (g_dsp_busy) { /* que el hilo de los cuadros suelte el DSP */
+        pthread_cond_wait(&g_cv_dsp, &g_mx);
+    }
     if (g_state) { /* una ejecución nueva: todo desde cero */
         MCPXAPUState *old = g_state;
         g_state = NULL;

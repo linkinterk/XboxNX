@@ -105,6 +105,7 @@ typedef struct GpuStats {
     unsigned draws, fallbacks, uploads, flushes, surfaces, textures;
     unsigned vs_draws, vs_progs, vs_bad, vs_cached, vs_saved, vs_const_vec; /* 4c: dibujos con el vertex shader en el GPU, programas, los que no compilaron */
     uint64_t upload_bytes;
+    uint64_t ns_draw, ns_tex, ns_read; /* etapa 5: tiempo en gpu_draw (todo), en decodificar+subir texturas y en leer cuadros a la RAM */
 } GpuStats;
 const GpuStats *gpu_stats(void);
 

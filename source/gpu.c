@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -39,6 +40,13 @@ int gl_load(void *(*getproc)(const char *), const char **missing)
 }
 
 static void *egl_proc(const char *n) { return (void *)eglGetProcAddress(n); }
+
+static uint64_t now_ns(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
 
 /* Opcionales: los binarios de los programas (la caché de shaders en la SD). */
 static void (*p_glGetProgramBinary)(GLuint, GLsizei, GLsizei *, GLenum *, void *);
@@ -75,6 +83,7 @@ typedef struct Surf {
     GLuint tex, fbo;   /* fbo: solo color (para leerla) */
     bool dirty;        /* la GPU tiene datos que la RAM no */
     unsigned used;     /* cuadro en que se usó */
+    uint8_t params;    /* filtro y repetición puestos al usarla de textura (1 + clave) */
 } Surf;
 
 typedef struct Zeta {
@@ -99,6 +108,7 @@ typedef struct TexEnt {
     GLuint tex;
     unsigned checked, used;
     bool valid;
+    uint8_t params; /* filtro y repetición puestos (1 + clave; 0: ninguno) */
 } TexEnt;
 
 /* Un programa de GL: el de siempre (vértices ya transformados por la CPU) o
@@ -805,11 +815,20 @@ static struct {
     uint32_t pa, bytes;
 } RB;
 
+static void rb_finish_(bool wait);
+
 static void rb_finish(bool wait)
 {
     if (!RB.on) {
         return;
     }
+    uint64_t t0 = now_ns();
+    rb_finish_(wait);
+    G.st.ns_read += now_ns() - t0;
+}
+
+static void rb_finish_(bool wait)
+{
     GLenum r = glClientWaitSync(RB.fence, GL_SYNC_FLUSH_COMMANDS_BIT, wait ? 2000000000ull : 0);
     if (!wait && r == GL_TIMEOUT_EXPIRED) {
         return;
@@ -1145,6 +1164,9 @@ static uint64_t hash_bytes(const uint8_t *p, uint32_t n)
     return h;
 }
 
+/* el modo de dirección como lo pone wrap_mode: 1 wrap, 2 mirror, 0 clamp */
+static unsigned wkey(unsigned a) { return a == 1 ? 1u : a == 2 ? 2u : 0u; }
+
 static void wrap_mode(GLenum target, unsigned au, unsigned av)
 {
     GLint ws = au == 1 ? GL_REPEAT : au == 2 ? GL_MIRRORED_REPEAT : GL_CLAMP_TO_EDGE;
@@ -1166,9 +1188,13 @@ static GLuint tex_get(const GpuTex *t, float scale[2])
             scale[0] = 1.0f / (float)s->w;
             scale[1] = 1.0f / (float)s->h;
             glBindTexture(GL_TEXTURE_2D, s->tex);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, t->bilinear ? GL_LINEAR : GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, t->bilinear ? GL_LINEAR : GL_NEAREST);
-            wrap_mode(GL_TEXTURE_2D, t->au, t->av);
+            uint8_t key = (uint8_t)(1 + ((t->bilinear ? 1 : 0) | wkey(t->au) << 1 | wkey(t->av) << 3));
+            if (s->params != key) { /* etapa 5: solo si cambió (cada llamada hace revalidar al driver) */
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, t->bilinear ? GL_LINEAR : GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, t->bilinear ? GL_LINEAR : GL_NEAREST);
+                wrap_mode(GL_TEXTURE_2D, t->au, t->av);
+                s->params = key;
+            }
             return s->tex;
         }
         scale[0] = 1.0f / (float)t->w;
@@ -1217,6 +1243,7 @@ static GLuint tex_get(const GpuTex *t, float scale[2])
         uint64_t h = hash_bytes(t->data, t->bytes) ^ (hash_bytes(t->pal, t->pal_bytes) * 31);
         e->checked = G.frame;
         if (!e->valid || h != e->hash) {
+            uint64_t tt = now_ns();
             size_t need = (size_t)t->w * t->h;
             if (need > G.scratch_n) {
                 free(G.scratch);
@@ -1237,16 +1264,21 @@ static GLuint tex_get(const GpuTex *t, float scale[2])
             e->hash = h;
             e->valid = true;
             G.st.uploads++;
+            G.st.ns_tex += now_ns() - tt;
         }
     }
-    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, t->bilinear ? GL_LINEAR : GL_NEAREST);
-    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, t->bilinear ? GL_LINEAR : GL_NEAREST);
-    if (t->cube) {
-        glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexParameteri(target, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-    } else {
-        wrap_mode(target, t->au, t->av);
+    uint8_t key = (uint8_t)(1 + ((t->bilinear ? 1 : 0) | wkey(t->au) << 1 | wkey(t->av) << 3 | (t->cube ? 32 : 0)));
+    if (e->params != key) { /* etapa 5: solo si cambió */
+        glTexParameteri(target, GL_TEXTURE_MIN_FILTER, t->bilinear ? GL_LINEAR : GL_NEAREST);
+        glTexParameteri(target, GL_TEXTURE_MAG_FILTER, t->bilinear ? GL_LINEAR : GL_NEAREST);
+        if (t->cube) {
+            glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexParameteri(target, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+        } else {
+            wrap_mode(target, t->au, t->av);
+        }
+        e->params = key;
     }
     return e->tex;
 }
@@ -1279,7 +1311,17 @@ static void argb_vec(uint32_t v, float o[4])
     o[3] = (v >> 24) / 255.0f;
 }
 
+static bool gpu_draw_(const GpuDraw *d);
+
 bool gpu_draw(const GpuDraw *d)
+{
+    uint64_t t0 = now_ns();
+    bool ok = gpu_draw_(d);
+    G.st.ns_draw += now_ns() - t0;
+    return ok;
+}
+
+static bool gpu_draw_(const GpuDraw *d)
 {
     if (!G.on || !G.ram || d->fmt < 4 || d->fmt > 8 || d->w <= 0 || d->h <= 0) {
         G.st.fallbacks++;
