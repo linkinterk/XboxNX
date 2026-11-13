@@ -1004,19 +1004,7 @@ static void draw_xbox_screen(const UiState *s)
             ovl_text(ly, C_WARN, e);
             ly += 22;
         }
-        /* el perfil del CPU: qué instrucciones se quedan fuera del JIT (cada ~60 dibujos de la pantalla) */
-        {
-            const CpuProfile pf = s->pf;
-            int o3 = snprintf(e, sizeof(e), "Lentas: %.0f%% de %.0fM instr, %.1f por bloque ·",
-                              pf.insns ? 100.0 * (double)pf.slow / (double)pf.insns : 0.0, pf.insns / 1e6,
-                              pf.blocks ? (double)pf.insns / (double)pf.blocks : 0.0);
-            for (unsigned t = 0; t < pf.n && o3 < (int)sizeof(e) - 16; t++) {
-                o3 += snprintf(e + o3, sizeof(e) - (size_t)o3, pf.op[t] > 0xFF ? " 0F%02X %.0f%%" : " %02X %.0f%%",
-                               pf.op[t] & 0xFF, pf.insns ? 100.0 * (double)pf.count[t] / (double)pf.insns : 0.0);
-            }
-            ovl_text(ly, C_WARN, e);
-        }
-        ly += 22;
+        /* el perfil por bloques: sampler.c, en perfil.txt */
         {
             const GpuStats *gs = gpu_stats();
             snprintf(e, sizeof(e), "GPU %s · %u dibujos (vértices en GPU %u · %u shaders%s) · %u por software · %u subidas (%.0f MB) · %u copias · %s",

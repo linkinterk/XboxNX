@@ -22,6 +22,8 @@ void prof_push(ProfPart p);
 void prof_pop(void);
 /* El reparto desde la última llamada, en milésimas del total; y lo reinicia. */
 void prof_take(unsigned permille[PROF_N]);
+/* la parte de ahora (desde otro hilo, sin candado); -1: ninguna */
+int prof_now(void);
 const char *prof_name(ProfPart p);
 /* La parte que corre ahora (para el informe de un cierre). */
 const char *prof_current(void);

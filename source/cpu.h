@@ -103,6 +103,7 @@ typedef struct Cpu {
     uint64_t st_ccall, st_cfb;          /* el JIT llamó a C: lentas / de respaldo */
     uint64_t st_t_all, st_t_jit, st_t_int, st_t_step, st_t_get;
     uint32_t jit_stop_eip;              /* JIT: la instrucción en que paró */
+    volatile uint32_t jit_cur;          /* etapa 5: el bloque del JIT que corre ahora (0: fuera); lo muestrea sampler.c */
 } Cpu;
 
 void cpu_init(Cpu *c, Vm *vm);

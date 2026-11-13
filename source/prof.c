@@ -81,4 +81,12 @@ void prof_reset(int depth)
 
 int prof_depth(void) { return g_depth; }
 
+/* La parte que corre ahora en el hilo principal (para el muestreo desde otro
+ * hilo: una lectura sin candado, puede estar un poco atrasada). */
+int prof_now(void)
+{
+    int d = g_depth;
+    return d > 0 && d <= 16 ? (int)g_stack[d - 1] : -1;
+}
+
 uint64_t prof_now_ns(void) { return now(); }

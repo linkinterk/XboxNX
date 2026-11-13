@@ -25,6 +25,7 @@
 #include "crash.h"
 #include "clocks.h"
 #include "sound.h"
+#include "sampler.h"
 #include "gpu.h"
 #include "hw.h"
 #include "ui.h"
@@ -32,7 +33,7 @@
 #include "prof.h"
 #include "apu/apu.h"
 
-#define APP_VER   "0.18.41"
+#define APP_VER   "0.18.42"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -172,6 +173,7 @@ static void start_run(void)
     }
     g_kernel.ns_per_instr = g_nspi;
     runner_boot(&g_run, &g_vm, &g_kernel, &g_load);
+    sampler_start(&g_run.cpu.jit_cur, &g_vm, APP_VER); /* etapa 5: perfil.txt */
     crash_set_eip(&g_run.cpu.eip);
     g_ui.run = &g_run;
     g_ui.run_scroll = -1;
@@ -293,17 +295,26 @@ static void ui_thread_stop(void)
 
 static void present(void)
 {
-    static unsigned prof_tick;
+    static unsigned last_flips;
+    static u64 last_t;
     bool async = g_ui_thr_ok && g_ui.screen == UI_RUN && g_ui.run_screen;
     if (async && g_ui_busy) {
         return; /* todavía dibuja el anterior: el juego sigue */
     }
+    if (async) {
+        /* sin cuadro nuevo del juego, la pantalla se redibuja solo cada 250 ms
+         * (dibujarla pasa ~9 MB por la caché L2 que comparte con el juego) */
+        u64 now = armGetSystemTick();
+        unsigned fl = hw_stats()->flips;
+        if (fl == last_flips && armTicksToNs(now - last_t) < 250000000ull) {
+            return;
+        }
+        last_flips = fl;
+        last_t = now;
+    }
     ui_wait_idle();
     if (g_ui.screen == UI_RUN) {
         prof_take(g_ui.prof);
-        if (prof_tick++ % 15 == 0) {
-            cpu_profile(&g_run.cpu, &g_ui.pf);
-        }
     }
     g_ui.ui_async = async;
     if (async) {

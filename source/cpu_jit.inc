@@ -1127,6 +1127,7 @@ static bool jit_compile(Cpu *c, Block *b)
         /* la salida: w0 = las de este bloque */
         g_jit.epi_rx = em_rx(&s0);
         regs_spill(&s0);
+        strw(&s0, XZR, XC, OFF(jit_cur)); /* fuera del JIT */
         E(&s0, 0x0B180000u); /* add w0, w0, w24 */
         E(&s0, 0xA94363F7u); /* ldp x23, x24, [sp, #48] */
         E(&s0, 0xA9425BF5u); /* ldp x21, x22, [sp, #32] */
@@ -1182,13 +1183,11 @@ static bool jit_compile(Cpu *c, Block *b)
         movw(&e, W11, b->gen);
         cmpw(&e, W10, W11);
         slow_bcond(&e, &bx, COND_NE);                /* el código cambió */
-        uint32_t cnt = g_jcnt_next < JCNT ? g_jcnt_next++ : 0;
-        if (cnt) {
-            movx(&e, W9, (uint64_t)(uintptr_t)&g_jcnt[cnt]);
-            ldrw(&e, W10, W9, 0);
-            addwi(&e, W10, W10, 1);
-            strw(&e, W10, W9, 0);
-        }
+        /* etapa 5: en vez de contar (leer, sumar, escribir), dice qué bloque
+         * corre; un hilo aparte (sampler.c) lo muestrea */
+        uint32_t cnt = 0;
+        movw(&e, W9, b->eip);
+        strw(&e, W9, XC, OFF(jit_cur));
         bool stale = false;
         /* etapa 5, superbloques: un jcc a mitad del bloque; si salta, sale
          * por aquí con las instrucciones hechas hasta él */
