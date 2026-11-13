@@ -173,6 +173,7 @@ int main(int argc, char **argv)
             }
         }
     }
+    fprintf(stderr, "visibilidad: %u píxeles pasaron Z\n", (unsigned)sw_zpass_result());
     if (getenv("ASYNC")) { /* el camino de la Switch: al PBO y a la RAM después */
         gpu_flush_surface_async(dst);
         gpu_readback_poll();

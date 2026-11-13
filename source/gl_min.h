@@ -26,6 +26,8 @@ typedef uint64_t GLuint64;
 
 #define GL_PIXEL_PACK_BUFFER 0x88EB
 #define GL_MAP_WRITE_BIT 0x0002
+#define GL_SAMPLES_PASSED 0x8914
+#define GL_QUERY_RESULT 0x8866
 #define GL_STATIC_DRAW 0x88E4
 #define GL_MAP_INVALIDATE_RANGE_BIT 0x0004
 #define GL_MAP_UNSYNCHRONIZED_BIT 0x0020
@@ -172,6 +174,10 @@ typedef uint64_t GLuint64;
     X(glFenceSync, GLsync, (GLenum, GLbitfield))                                                            \
     X(glClientWaitSync, GLenum, (GLsync, GLbitfield, GLuint64))                                             \
     X(glDeleteSync, void, (GLsync))                                                                         \
+    X(glGenQueries, void, (GLsizei, GLuint *))                                                              \
+    X(glBeginQuery, void, (GLenum, GLuint))                                                                 \
+    X(glEndQuery, void, (GLenum))                                                                           \
+    X(glGetQueryObjectuiv, void, (GLuint, GLenum, GLuint *))                                                \
     X(glVertexAttribPointer, void, (GLuint, GLint, GLenum, GLboolean, GLsizei, const void *))               \
     X(glEnableVertexAttribArray, void, (GLuint))                                                            \
     X(glDisableVertexAttribArray, void, (GLuint))                                                           \

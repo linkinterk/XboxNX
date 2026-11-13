@@ -54,6 +54,9 @@ void sw_state_get(void *out);
 void sw_state_set(const void *in);
 /* Saltar los dibujos (los cuadros que no se van a ver). */
 void sw_set_skip(bool skip);
+bool sw_skipping(void);
+/* los píxeles que pasaron Z desde el último CLEAR_REPORT_VALUE (GET_REPORT) */
+uint32_t sw_zpass_result(void);
 /* 4c: el vertex program en el GPU (por defecto sí). */
 void sw_set_vs_gpu(bool on);
 

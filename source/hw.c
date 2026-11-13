@@ -605,15 +605,29 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
             }
         }
         break;
-    case NV097_GET_REPORT: /* sin GPU todavía: ningún píxel pasó, informe listo */
+    case NV097_GET_REPORT: /* los píxeles que pasaron Z (pruebas de visibilidad), informe listo */
         if (g_hw.report_inst) {
             uint32_t pa = dma_base(g_hw.report_inst) + (v & 0x00FFFFFFu);
             uint32_t *p = phys32(k, pa);
             if (p && phys32(k, pa + 12)) {
+                /* en los cuadros que no se dibujan (saltar cuadros) no hay
+                 * cuenta: la última de ese mismo informe */
+                static struct {
+                    uint32_t off, n;
+                } last[64];
+                unsigned slot = ((v & 0x00FFFFFFu) >> 4) & 63;
+                uint32_t n;
+                if (sw_skipping()) {
+                    n = last[slot].off == (v & 0x00FFFFFFu) ? last[slot].n : 0;
+                } else {
+                    n = sw_zpass_result();
+                    last[slot].off = v & 0x00FFFFFFu;
+                    last[slot].n = n;
+                }
                 uint64_t ts = k->now_ns;
                 p[0] = (uint32_t)ts;
                 p[1] = (uint32_t)(ts >> 32);
-                p[2] = 0;
+                p[2] = n;
                 p[3] = 0;
             }
         }

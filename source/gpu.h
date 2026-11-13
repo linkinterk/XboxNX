@@ -71,6 +71,7 @@ typedef struct GpuDraw {
     unsigned vs_pk_n;
     const uint32_t *vs_idx;
     unsigned vs_nidx;
+    bool query; /* contar los píxeles que pasan Z (prueba de visibilidad) */
 } GpuDraw;
 
 /* nwin: el NWindow de la Switch (NULL en la PC: sin ventana). */
@@ -98,6 +99,10 @@ void gpu_flush_surface(uint32_t pa);
  * gpu_readback_poll o cuando algo necesite esa RAM). */
 void gpu_flush_surface_async(uint32_t pa);
 void gpu_readback_poll(void);
+/* Las pruebas de visibilidad: la suma de los píxeles que pasaron desde el
+ * último reset (espera a la GPU), y empezar de nuevo. */
+uint32_t gpu_query_collect(void);
+void gpu_query_reset(void);
 /* Copiar a la RAM todas las superficies (antes de que el CPU lea). */
 void gpu_flush_all(void);
 /* La RAM de la superficie cambió por otro lado: volver a subirla. */
@@ -111,9 +116,10 @@ bool gpu_present_ui(const uint32_t *rgba, int w, int h);
 typedef struct GpuStats {
     unsigned draws, fallbacks, uploads, flushes, surfaces, textures;
     unsigned vs_draws, vs_progs, vs_bad, vs_cached, vs_saved, vs_const_vec;
-    unsigned indexed; /* etapa 5: dibujos con índices (cada vértice una vez) */ /* 4c: dibujos con el vertex shader en el GPU, programas, los que no compilaron */
+    unsigned indexed; /* etapa 5: dibujos con índices (cada vértice una vez) */
+    unsigned queries; /* informes de visibilidad leídos */ /* 4c: dibujos con el vertex shader en el GPU, programas, los que no compilaron */
     uint64_t upload_bytes;
-    uint64_t ns_draw, ns_tex, ns_read, ns_vbuf; /* etapa 5: tiempo en gpu_draw (todo), en decodificar+subir texturas y en leer cuadros a la RAM */
+    uint64_t ns_draw, ns_tex, ns_read, ns_vbuf, ns_query; /* etapa 5: tiempo en gpu_draw (todo), en decodificar+subir texturas y en leer cuadros a la RAM */
 } GpuStats;
 const GpuStats *gpu_stats(void);
 

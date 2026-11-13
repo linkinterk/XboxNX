@@ -1398,13 +1398,50 @@ static void argb_vec(uint32_t v, float o[4])
 
 static bool gpu_draw_(const GpuDraw *d);
 
+/* Las pruebas de visibilidad pendientes (una consulta de GL por dibujo). */
+#define MAX_Q 512
+static GLuint g_q[MAX_Q];
+static unsigned g_qn;
+
 bool gpu_draw(const GpuDraw *d)
 {
     uint64_t t0 = now_ns();
+    bool q = d->query && G.on && g_qn < MAX_Q;
+    if (q) {
+        if (!g_q[g_qn]) {
+            glGenQueries(1, &g_q[g_qn]);
+        }
+        glBeginQuery(GL_SAMPLES_PASSED, g_q[g_qn]);
+    }
     bool ok = gpu_draw_(d);
+    if (q) {
+        glEndQuery(GL_SAMPLES_PASSED);
+        if (ok) {
+            g_qn++;
+        }
+    }
     G.st.ns_draw += now_ns() - t0;
     return ok;
 }
+
+uint32_t gpu_query_collect(void)
+{
+    if (!G.ready) {
+        return 0;
+    }
+    uint64_t sum = 0, t0 = now_ns();
+    for (unsigned i = 0; i < g_qn; i++) {
+        GLuint n = 0;
+        glGetQueryObjectuiv(g_q[i], GL_QUERY_RESULT, &n);
+        sum += n;
+    }
+    g_qn = 0;
+    G.st.queries++;
+    G.st.ns_query += now_ns() - t0;
+    return sum > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)sum;
+}
+
+void gpu_query_reset(void) { g_qn = 0; }
 
 static bool gpu_draw_(const GpuDraw *d)
 {
@@ -1878,6 +1915,8 @@ bool gpu_clear_zeta(uint32_t pa, uint32_t zpitch, int h, int x0, int y0, int x1,
     return false;
 }
 void gpu_flush_surface(uint32_t pa) { (void)pa; }
+uint32_t gpu_query_collect(void) { return 0; }
+void gpu_query_reset(void) {}
 void gpu_flush_surface_async(uint32_t pa) { (void)pa; }
 void gpu_readback_poll(void) {}
 void gpu_flush_all(void) {}

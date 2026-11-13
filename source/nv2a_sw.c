@@ -125,6 +125,19 @@ void sw_state_set(const void *in)
 /* Saltar cuadros: sin dibujar (ni transformar vértices) hasta que se diga. */
 static bool g_skip;
 void sw_set_skip(bool skip) { g_skip = skip; }
+bool sw_skipping(void) { return g_skip; }
+
+/* Etapa 5: las pruebas de visibilidad (oclusión): cuántos píxeles pasaron la
+ * prueba de Z desde CLEAR_REPORT_VALUE mientras ZPASS_PIXEL_COUNT_ENABLE está
+ * puesto. Halo 2 las usa para las luces y sus destellos (con 0, nunca se ven). */
+static bool g_zpass_on;
+static uint64_t g_zpass_sw;
+
+uint32_t sw_zpass_result(void)
+{
+    uint64_t n = g_zpass_sw + gpu_query_collect();
+    return n > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)n;
+}
 
 static uint8_t *mem(uint32_t pa, uint32_t len)
 {
@@ -1704,6 +1717,7 @@ static bool gpu_try(const Target *t, const OutVert *ov)
     d.prim = S.prim;
     d.nverts = S.nin;
     d.verts = (const float *)ov;
+    d.query = g_zpass_on;
     if (g_vs_draw) {
         if (g_nidx) {
             if (!pk_build(&d)) {
@@ -1934,6 +1948,9 @@ static void draw(void)
     free(ov);
     S.st.last.pixels = S.st.pixels - px0;
     S.st.last.tris = S.st.triangles - tr0;
+    if (g_zpass_on) {
+        g_zpass_sw += S.st.last.pixels;
+    }
 }
 
 static void zclear(uint32_t flags)
@@ -2030,6 +2047,13 @@ void sw_method(uint32_t m, uint32_t v)
     case 0x1E9C: S.pload = v; S.pword = 0; return;
     case 0x1EA0: S.pstart = v; S.pdirty = true; return;
     case 0x1EA4: S.cload = v; S.cword = 0; return;
+    case 0x17C8: /* CLEAR_REPORT_VALUE (1: el de píxeles que pasaron Z) */
+        if (v == 1) {
+            g_zpass_sw = 0;
+            gpu_query_reset();
+        }
+        return;
+    case 0x17CC: g_zpass_on = v & 1; return; /* SET_ZPASS_PIXEL_COUNT_ENABLE */
     case 0x17FC: /* SET_BEGIN_END */
         if (v) {
             S.prim = v;

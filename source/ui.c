@@ -908,7 +908,7 @@ static void draw_xbox_screen(const UiState *s)
         /* el dibujo por software: el último dibujo con lo que dio */
         const SwStats *sw = sw_stats();
         const __typeof__(sw->last) *L = &sw->last;
-        char e[300];
+        char e[420];
         int ly = 40;
         snprintf(e, sizeof(e), "Software: %llu triángulos, %llu píxeles · sin shader %u · sin destino %u (motivo %u: fmt %X pitch %X clip %X %X) · shader con error %u · se muestra %08X",
                  (unsigned long long)sw->triangles, (unsigned long long)sw->pixels, sw->skipped_ff, sw->no_target,
@@ -1007,10 +1007,10 @@ static void draw_xbox_screen(const UiState *s)
         /* el perfil por bloques: sampler.c, en perfil.txt */
         {
             const GpuStats *gs = gpu_stats();
-            snprintf(e, sizeof(e), "GPU %s · %u dibujos (vértices en GPU %u · %u shaders%s) · %u por software · %u subidas (%.0f MB) · %u copias · en gpu_draw %.1f s (vértices %.1f s, texturas %.1f s), leer cuadros %.1f s · %s",
+            snprintf(e, sizeof(e), "GPU %s · %u dibujos (vértices en GPU %u · %u shaders%s) · %u por software · %u subidas (%.0f MB) · %u copias · en gpu_draw %.1f s (vértices %.1f s, texturas %.1f s), leer cuadros %.1f s, visibilidad %u (%.1f s) · %s",
                      gpu_enabled() ? "activa" : gpu_ready() ? "apagada (L3)" : "no", gs->draws, gs->vs_draws, gs->vs_progs,
                      gs->vs_bad ? " · fallos" : "", gs->fallbacks, gs->uploads, gs->upload_bytes / 1048576.0, gs->flushes,
-                     gs->ns_draw / 1e9, gs->ns_vbuf / 1e9, gs->ns_tex / 1e9, gs->ns_read / 1e9, gpu_info());
+                     gs->ns_draw / 1e9, gs->ns_vbuf / 1e9, gs->ns_tex / 1e9, gs->ns_read / 1e9, gs->queries, gs->ns_query / 1e9, gpu_info());
             ovl_text(ly, gpu_enabled() ? C_GREEN : C_WARN, e);
         }
         ly += 22;
