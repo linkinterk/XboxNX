@@ -880,6 +880,281 @@ static bool emit_jcc_more(Em *e, const Insn *in, unsigned prev)
     return true;
 }
 
+/* ---------------------------------------------------------- más enteras (v0.18.37) */
+
+/* lf_* completos: w9 = a, w10 = b, w11 = res; cin en el registro cin (o 0 si -1) */
+static void emit_lf_full(Em *e, unsigned kind, unsigned sz, int cin)
+{
+    movw(e, W12, kind);
+    strb(e, W12, XC, OFF(lf_op));
+    movw(e, W12, sz);
+    strb(e, W12, XC, OFF(lf_sz));
+    strb(e, cin >= 0 ? cin : XZR, XC, OFF(lf_cin));
+    strw(e, W9, XC, OFF(lf_a));
+    strw(e, W10, XC, OFF(lf_b));
+    strw(e, W11, XC, OFF(lf_res));
+    /* los saltos nativos solo saben de 32 bits sin acarreo */
+    e->lf_kind = (sz == 4 && cin < 0 && kind != LF_MUL) ? kind : 0;
+}
+
+/* un operando de sz bytes: de [x13] (mem) o del registro r */
+static void opnd_ld(Em *e, int rt, bool mem, unsigned r, unsigned sz)
+{
+    if (mem) {
+        if (sz == 1) {
+            ldrb_i(e, rt, W13, 0);
+        } else if (sz == 2) {
+            ldrh_i(e, rt, W13, 0);
+        } else {
+            ldrw(e, rt, W13, 0);
+        }
+    } else if (sz == 1) {
+        ldrb_i(e, rt, XC, r8off(r));
+    } else if (sz == 2) {
+        ldrh_i(e, rt, XC, ROFF(r));
+    } else {
+        ldrw(e, rt, XC, ROFF(r));
+    }
+}
+static void opnd_st(Em *e, int rt, bool mem, unsigned r, unsigned sz)
+{
+    if (mem) {
+        if (sz == 1) {
+            strb(e, rt, W13, 0);
+        } else if (sz == 2) {
+            strh_i(e, rt, W13, 0);
+        } else {
+            strw(e, rt, W13, 0);
+        }
+    } else if (sz == 1) {
+        strb(e, rt, XC, r8off(r));
+    } else if (sz == 2) {
+        strh_i(e, rt, XC, ROFF(r));
+    } else {
+        strw(e, rt, XC, ROFF(r));
+    }
+}
+static void zext_sz(Em *e, int rd, unsigned sz)
+{
+    if (sz == 1) {
+        E(e, 0x53001C00u | (uint32_t)rd << 5 | (uint32_t)rd); /* uxtb */
+    } else if (sz == 2) {
+        E(e, 0x53003C00u | (uint32_t)rd << 5 | (uint32_t)rd); /* uxth */
+    }
+}
+/* x13 = la dirección en el host del operando de memoria de n bytes (o al lento) */
+static void mem_x13(Em *e, const Insn *in, unsigned n, bool write, Slow *sl)
+{
+    mem_at(e, in, n, write, sl);
+    E(e, 0x8B0B014Du); /* add x13, x10, x11 */
+}
+
+/* alu de 8/16/32 bits (también adc/sbb y con memoria), test */
+static bool emit_alu_any(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned prev)
+{
+    const Insn *in = &b->in[i];
+    InsnFn f = in->fn;
+    bool alu_f = f == x_alu_eg || f == x_alu_ge || f == x_alu_ei;
+    bool test_f = f == x_test_eg || f == x_test_ei;
+    unsigned sz = in->sz;
+    if (!(alu_f || test_f) || (sz != 1 && sz != 2 && sz != 4)) {
+        return false;
+    }
+    unsigned aop = test_f ? OP_AND : in->aop;
+    bool cin = aop == OP_ADC || aop == OP_SBB;
+    bool wr = !test_f && aop != OP_CMP;
+    bool ge = f == x_alu_ge;
+    bool mem = !in->is_reg;
+    uint32_t m = sz == 1 ? 0xFFu : sz == 2 ? 0xFFFFu : 0xFFFFFFFFu;
+    Slow sl = {{0}, 0};
+    if (cin) {
+        emit_cf(e, prev);
+        movw_r(e, W15, W12);
+    }
+    if (mem) {
+        mem_x13(e, in, sz, wr && !ge, &sl);
+    }
+    if (ge) {
+        opnd_ld(e, W9, false, in->reg, sz);
+        opnd_ld(e, W10, mem, in->rm, sz);
+    } else {
+        opnd_ld(e, W9, mem, in->rm, sz);
+        if (f == x_alu_ei || f == x_test_ei) {
+            movw(e, W10, in->imm & m);
+        } else {
+            opnd_ld(e, W10, false, in->reg, sz);
+        }
+    }
+    unsigned kind;
+    switch (aop) {
+    case OP_ADD: rrr(e, ADDW, W11, W9, W10); kind = LF_ADD; break;
+    case OP_ADC: rrr(e, ADDW, W11, W9, W10); rrr(e, ADDW, W11, W11, W15); kind = LF_ADD; break;
+    case OP_SUB:
+    case OP_CMP: rrr(e, SUBW, W11, W9, W10); kind = LF_SUB; break;
+    case OP_SBB: rrr(e, SUBW, W11, W9, W10); rrr(e, SUBW, W11, W11, W15); kind = LF_SUB; break;
+    case OP_AND: rrr(e, ANDW, W11, W9, W10); kind = LF_LOGIC; break;
+    case OP_OR: rrr(e, ORRW, W11, W9, W10); kind = LF_LOGIC; break;
+    default: rrr(e, EORW, W11, W9, W10); kind = LF_LOGIC; break;
+    }
+    zext_sz(e, W11, sz);
+    if (wr) {
+        if (ge) {
+            opnd_st(e, W11, false, in->reg, sz);
+        } else {
+            opnd_st(e, W11, mem, in->rm, sz);
+        }
+    }
+    emit_lf_full(e, kind, sz, cin ? W15 : -1);
+    unsigned keep = e->lf_kind;
+    slow_tail(e, b, i, vm, &sl);
+    e->lf_kind = keep;
+    return true;
+}
+
+/* imul r32, r/m32 (, imm) */
+static bool emit_imul(Em *e, const Block *b, unsigned i, const Vm *vm)
+{
+    const Insn *in = &b->in[i];
+    if (in->fn != x_imul || in->sz != 4) {
+        return false;
+    }
+    Slow sl = {{0}, 0};
+    if (in->is_reg) {
+        ldrw(e, W9, XC, ROFF(in->rm));
+    } else {
+        mem_x13(e, in, 4, false, &sl);
+        ldrw(e, W9, W13, 0);
+    }
+    if (in->aop) {
+        movw(e, W10, in->imm);
+    } else {
+        ldrw(e, W10, XC, ROFF(in->reg));
+    }
+    E(e, 0x9B207C00u | (uint32_t)W10 << 16 | (uint32_t)W9 << 5 | W11); /* smull x11, w9, w10 */
+    E(e, 0x93407C00u | (uint32_t)W11 << 5 | W12);                     /* sxtw x12, w11 */
+    E(e, 0xEB00001Fu | (uint32_t)W11 << 16 | (uint32_t)W12 << 5);     /* cmp x12, x11 */
+    cset(e, W10, COND_NE);
+    strw(e, W11, XC, ROFF(in->reg));
+    movw_r(e, W9, W11);
+    emit_lf_full(e, LF_MUL, 4, -1);
+    slow_tail(e, b, i, vm, &sl);
+    e->lf_kind = 0;
+    return true;
+}
+
+/* F7 de 32 bits: not, neg, mul, imul, div, idiv */
+static bool emit_grp3(Em *e, const Block *b, unsigned i, const Vm *vm)
+{
+    const Insn *in = &b->in[i];
+    if (in->fn != x_interp || in->aop != 0xF7 || in->sz != 4 || in->reg < 2) {
+        return false;
+    }
+    unsigned op = in->reg;
+    bool mem = !in->is_reg;
+    Slow sl = {{0}, 0};
+    if (mem) {
+        mem_x13(e, in, 4, op <= 3, &sl);
+    }
+    switch (op) {
+    case 2: /* not */
+        opnd_ld(e, W9, mem, in->rm, 4);
+        E(e, 0x2A2003E0u | (uint32_t)W9 << 16 | W11); /* mvn w11, w9 */
+        opnd_st(e, W11, mem, in->rm, 4);
+        break;
+    case 3: /* neg */
+        opnd_ld(e, W10, mem, in->rm, 4);
+        movw(e, W9, 0);
+        rrr(e, SUBW, W11, W9, W10);
+        opnd_st(e, W11, mem, in->rm, 4);
+        emit_lf_full(e, LF_SUB, 4, -1);
+        break;
+    case 4:
+    case 5: /* mul / imul: edx:eax = eax * v */
+        opnd_ld(e, W10, mem, in->rm, 4);
+        ldrw(e, W9, XC, ROFF(R_EAX));
+        E(e, (op == 4 ? 0x9BA07C00u : 0x9B207C00u) | (uint32_t)W10 << 16 | (uint32_t)W9 << 5 | W11);
+        E(e, 0xD360FC00u | (uint32_t)W11 << 5 | W12); /* lsr x12, x11, #32 */
+        strw(e, W11, XC, ROFF(R_EAX));
+        strw(e, W12, XC, ROFF(R_EDX));
+        if (op == 4) {
+            cmpwi(e, W12, 0);
+        } else {
+            E(e, 0x93407C00u | (uint32_t)W11 << 5 | W12);                 /* sxtw x12, w11 */
+            E(e, 0xEB00001Fu | (uint32_t)W11 << 16 | (uint32_t)W12 << 5); /* cmp x12, x11 */
+        }
+        cset(e, W10, COND_NE);
+        movw_r(e, W9, W11);
+        emit_lf_full(e, LF_MUL, 4, -1);
+        break;
+    default: { /* div / idiv: cero o desborde, la función de siempre (excepción) */
+        opnd_ld(e, W14, mem, in->rm, 4);
+        slow_add(e, &sl, fwd_cb(e, J_CBZ, W14));
+        ldrw(e, W9, XC, ROFF(R_EAX));
+        ldrw(e, W10, XC, ROFF(R_EDX));
+        E(e, 0xAA000000u | (uint32_t)W10 << 16 | 32u << 10 | (uint32_t)W9 << 5 | W9); /* orr x9, x9, x10, lsl #32 */
+        if (op == 6) {
+            E(e, 0x9AC00800u | (uint32_t)W14 << 16 | (uint32_t)W9 << 5 | W11); /* udiv x11, x9, x14 */
+            E(e, 0xD360FC00u | (uint32_t)W11 << 5 | W12);                     /* lsr x12, x11, #32 */
+            slow_add(e, &sl, fwd_cb(e, J_CBNZ | 0x80000000u, W12));
+        } else {
+            E(e, 0x93407C00u | (uint32_t)W14 << 5 | W14);                     /* sxtw x14, w14 */
+            E(e, 0x9AC00C00u | (uint32_t)W14 << 16 | (uint32_t)W9 << 5 | W11); /* sdiv x11, x9, x14 */
+            E(e, 0x93407C00u | (uint32_t)W11 << 5 | W12);                     /* sxtw x12, w11 */
+            E(e, 0xEB00001Fu | (uint32_t)W11 << 16 | (uint32_t)W12 << 5);     /* cmp x12, x11 */
+            slow_bcond(e, &sl, COND_NE);
+        }
+        E(e, 0x9B008000u | (uint32_t)W14 << 16 | (uint32_t)W9 << 10 | (uint32_t)W11 << 5 | W12); /* msub x12, x11, x14, x9 */
+        strw(e, W11, XC, ROFF(R_EAX));
+        strw(e, W12, XC, ROFF(R_EDX));
+        break;
+    }
+    }
+    slow_tail(e, b, i, vm, &sl);
+    e->lf_kind = 0;
+    return true;
+}
+
+/* desplazamientos: de 32 bits por CL, de 8 bits con cuenta fija 1..7 */
+static bool emit_shift_more(Em *e, const Insn *in)
+{
+    if (in->fn != x_shift || !in->is_reg || (in->aop != 4 && in->aop != 5 && in->aop != 6 && in->aop != 7)) {
+        return false;
+    }
+    unsigned kind = in->aop == 5 ? LF_SHR : in->aop == 7 ? LF_SAR : LF_SHL;
+    if (in->sz == 4 && in->imm == 0xFF) {
+        ldrw(e, W10, XC, ROFF(R_ECX));
+        E(e, 0x12001000u | (uint32_t)W10 << 5 | W10); /* and w10, w10, #31 */
+        uint32_t *skip = fwd_cb(e, J_CBZ, W10);
+        ldrw(e, W9, XC, ROFF(in->rm));
+        uint32_t opc = kind == LF_SHR ? 0x1AC02400u : kind == LF_SAR ? 0x1AC02800u : 0x1AC02000u;
+        E(e, opc | (uint32_t)W10 << 16 | (uint32_t)W9 << 5 | W11);
+        strw(e, W11, XC, ROFF(in->rm));
+        movw(e, W12, 0);
+        emit_lf_cin(e, kind);
+        patch(e, skip);
+        e->lf_kind = 0;
+        return true;
+    }
+    if (in->sz == 1 && in->imm >= 1 && in->imm <= 7) {
+        unsigned cnt = in->imm;
+        ldrb_i(e, W9, XC, r8off(in->rm));
+        if (kind == LF_SHL) {
+            lslw(e, W11, W9, cnt);
+        } else if (kind == LF_SHR) {
+            E(e, 0x53007C00u | cnt << 16 | (uint32_t)W9 << 5 | W11);
+        } else {
+            E(e, 0x13001C00u | (uint32_t)W9 << 5 | W11);               /* sxtb w11, w9 */
+            E(e, 0x13007C00u | cnt << 16 | (uint32_t)W11 << 5 | W11); /* asr */
+        }
+        zext_sz(e, W11, 1);
+        strb(e, W11, XC, r8off(in->rm));
+        movw(e, W10, cnt);
+        emit_lf_full(e, kind, 1, -1);
+        return true;
+    }
+    return false;
+}
+
 static uint32_t jit_cond(Cpu *c, uint32_t n) { return cond(c, (int)n) ? 1u : 0u; }
 
 /* w0 = la condición n con los flags que haya (función de C, sin más) */
@@ -943,6 +1218,9 @@ static bool emit_int(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned p
         emit_lf_cin(e, in->aop ? LF_DEC : LF_INC);
         uint32_t *done = fwd_b(e);
         fallback_tail(e, b, i, vm, done, s1, s2, s3);
+        return true;
+    }
+    if (emit_alu_any(e, b, i, vm, prev) || emit_imul(e, b, i, vm) || emit_grp3(e, b, i, vm) || emit_shift_more(e, in)) {
         return true;
     }
     /* jcc tras inc/dec/desplazamientos de aquí: con los flags de ARM64 */

@@ -256,7 +256,8 @@ static uint32_t pop(Cpu *c, int sz)
  * siempre calculados. */
 /* LF_SHL/SHR/SAR (solo los pone el JIT, 32 bits, cuenta 1..31): a = valor,
  * b = cuenta, res = resultado; AF a cero como en shift(). */
-enum { LF_NONE, LF_ADD, LF_SUB, LF_LOGIC, LF_INC, LF_DEC, LF_SHL, LF_SHR, LF_SAR };
+/* LF_MUL (mul / imul): b = CF = OF (desbordó), SZP de res, AF a cero. */
+enum { LF_NONE, LF_ADD, LF_SUB, LF_LOGIC, LF_INC, LF_DEC, LF_SHL, LF_SHR, LF_SAR, LF_MUL };
 static inline uint32_t shift_cf(unsigned op, uint32_t a, uint32_t cnt, unsigned bits)
 {
     if (op == LF_SHL) {
@@ -299,6 +300,9 @@ static void flags_sync(Cpu *c)
         break;
     case LF_LOGIC:
         break;
+    case LF_MUL:
+        f |= b ? (F_CF | F_OF) : 0;
+        break;
     case LF_SHL:
     case LF_SHR:
     case LF_SAR: {
@@ -336,6 +340,7 @@ static inline uint32_t lazy_cf(Cpu *c)
     case LF_SHL:
     case LF_SHR:
     case LF_SAR: return shift_cf(c->lf_op, c->lf_a, c->lf_b, c->lf_sz * 8u);
+    case LF_MUL: return c->lf_b ? 1 : 0;
     default: return (c->flags & F_CF) ? 1 : 0;
     }
 }
@@ -367,6 +372,18 @@ static void szp(Cpu *c, uint32_t res, int sz)
 }
 
 enum { OP_ADD, OP_OR, OP_ADC, OP_SBB, OP_AND, OP_SUB, OP_XOR, OP_CMP };
+
+/* mul / imul: CF = OF = desbordó, SZP del resultado, AF a cero (indefinido
+ * en x86; así el intérprete y el JIT dan lo mismo) */
+static void mul_flags(Cpu *c, uint32_t res, bool over, int sz)
+{
+    c->lf_op = LF_MUL;
+    c->lf_sz = (uint8_t)sz;
+    c->lf_a = 0;
+    c->lf_b = over ? 1u : 0u;
+    c->lf_res = res & mask_of(sz);
+    c->lf_cin = 0;
+}
 
 static uint32_t alu(Cpu *c, int op, uint32_t a, uint32_t b, int sz)
 {
@@ -620,24 +637,22 @@ static void group3(Cpu *c, const Dec *d, int sz, uint8_t m)
             uint32_t res = op == 4 ? al * v : (uint32_t)((int32_t)(int8_t)al * (int32_t)(int8_t)v);
             reg_set(c, R_EAX, 2, res);
             over = op == 4 ? (res & 0xFF00) != 0 : (int32_t)(int16_t)res != (int32_t)(int8_t)res;
-            szp(c, res, 1);
+            mul_flags(c, res, over, 1);
         } else if (sz == 2) {
             uint32_t ax = c->r[R_EAX] & 0xFFFF;
             uint32_t res = op == 4 ? ax * v : (uint32_t)((int32_t)(int16_t)ax * (int32_t)(int16_t)v);
             reg_set(c, R_EAX, 2, res);
             reg_set(c, R_EDX, 2, res >> 16);
             over = op == 4 ? (res >> 16) != 0 : (int32_t)res != (int32_t)(int16_t)res;
-            szp(c, res, 2);
+            mul_flags(c, res, over, 2);
         } else {
             uint64_t res = op == 4 ? (uint64_t)c->r[R_EAX] * v
                                    : (uint64_t)((int64_t)(int32_t)c->r[R_EAX] * (int64_t)(int32_t)v);
             c->r[R_EAX] = (uint32_t)res;
             c->r[R_EDX] = (uint32_t)(res >> 32);
             over = op == 4 ? (res >> 32) != 0 : (int64_t)res != (int64_t)(int32_t)res;
-            szp(c, (uint32_t)res, 4);
+            mul_flags(c, (uint32_t)res, over, 4);
         }
-        set_flag(c, F_CF, over);
-        set_flag(c, F_OF, over);
         return;
     }
     default: { /* div / idiv */
@@ -857,9 +872,7 @@ static void two_byte(Cpu *c, const Dec *d, int osz)
         uint32_t res = (uint32_t)full & mask_of(osz);
         bool over = full != (int64_t)sext(res, osz);
         reg_set(c, r, osz, res);
-        set_flag(c, F_CF, over);
-        set_flag(c, F_OF, over);
-        szp(c, res, osz);
+        mul_flags(c, res, over, osz);
         return;
     }
     case 0xB0: case 0xB1: { /* cmpxchg */
@@ -1108,9 +1121,7 @@ static CpuStop step(Cpu *c)
         uint32_t res = (uint32_t)full & mask_of(osz);
         bool over = full != (int64_t)sext(res, osz);
         reg_set(c, (m >> 3) & 7, osz, res);
-        set_flag(c, F_CF, over);
-        set_flag(c, F_OF, over);
-        szp(c, res, osz);
+        mul_flags(c, res, over, osz);
         break;
     }
     case 0x80:
@@ -1696,9 +1707,7 @@ static void x_imul(Cpu *c, const Insn *in)
     uint32_t res = (uint32_t)full & mask_of(in->sz);
     bool over = full != (int64_t)sext(res, in->sz);
     reg_set(c, in->reg, in->sz, res);
-    set_flag(c, F_CF, over);
-    set_flag(c, F_OF, over);
-    szp(c, res, in->sz);
+    mul_flags(c, res, over, in->sz);
 }
 
 static void x_cdq(Cpu *c, const Insn *in)
@@ -2269,6 +2278,7 @@ static bool decode(Rd *r, uint32_t page_va, Insn *in)
         dec_modrm(r, in, rd8(r));
         if (in->reg >= 2) {
             in->fn = x_interp; /* not, neg, mul, imul, div, idiv */
+            in->aop = op;     /* para el JIT */
         } else {
             in->imm = rdn(r, in->sz);
             in->fn = x_test_ei;
