@@ -64,6 +64,13 @@ typedef struct GpuDraw {
     const float *vs_consts;
     uint64_t vs_key;
     const char *vs_src;
+    /* etapa 5: o en vez de vs_in, los vértices ya empaquetados (solo los
+     * atributos de vs_mask, vs_pk_n vértices) y, si vs_idx, los índices
+     * (vs_nidx, ya en triángulos para los quads) */
+    const float *vs_pk;
+    unsigned vs_pk_n;
+    const uint32_t *vs_idx;
+    unsigned vs_nidx;
 } GpuDraw;
 
 /* nwin: el NWindow de la Switch (NULL en la PC: sin ventana). */
@@ -103,7 +110,8 @@ bool gpu_present_ui(const uint32_t *rgba, int w, int h);
 
 typedef struct GpuStats {
     unsigned draws, fallbacks, uploads, flushes, surfaces, textures;
-    unsigned vs_draws, vs_progs, vs_bad, vs_cached, vs_saved, vs_const_vec; /* 4c: dibujos con el vertex shader en el GPU, programas, los que no compilaron */
+    unsigned vs_draws, vs_progs, vs_bad, vs_cached, vs_saved, vs_const_vec;
+    unsigned indexed; /* etapa 5: dibujos con índices (cada vértice una vez) */ /* 4c: dibujos con el vertex shader en el GPU, programas, los que no compilaron */
     uint64_t upload_bytes;
     uint64_t ns_draw, ns_tex, ns_read, ns_vbuf; /* etapa 5: tiempo en gpu_draw (todo), en decodificar+subir texturas y en leer cuadros a la RAM */
 } GpuStats;

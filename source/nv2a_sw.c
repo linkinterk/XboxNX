@@ -208,10 +208,17 @@ static unsigned attr_bytes(uint32_t fmt)
     return size * (type == 2 ? 4u : (type == 1 || type == 5) ? 2u : 1u);
 }
 
+static uint32_t *g_idx;
+static unsigned g_nidx, g_idx_cap;
+static void idx_materialize(void);
+
 /* El lugar del siguiente vértice (ya con los valores actuales); NULL: no cabe.
  * Etapa 5: se llena ahí mismo, sin copias de paso. */
 static float (*next_vertex(void))[4]
 {
+    if (g_nidx) {
+        idx_materialize(); /* los índices pendientes van antes */
+    }
     if (S.nin >= S.cap) {
         if (S.cap >= MAX_VERTS) {
             return NULL;
@@ -241,12 +248,41 @@ static bool push_vertex(const float v[16][4])
     return true;
 }
 
+/* Etapa 5: los índices de ARRAY_ELEMENT / DRAW_ARRAYS se guardan y los
+ * vértices se arman al dibujar: solo los atributos que el vertex shader usa,
+ * cada vértice una vez (con índices para la GPU). Si hay que hacerlo como
+ * antes (la CPU), se arman todos (idx_materialize). */
+
+static void array_vertex_fetch(uint32_t i);
+
 /* El vértice i de los arreglos (los atributos sin arreglo: su valor actual). */
 static void array_vertex(uint32_t i)
 {
     if (g_skip) {
         return;
     }
+    if (S.nin) { /* ya hay vértices armados (mezcla): como antes */
+        array_vertex_fetch(i);
+        return;
+    }
+    if (g_nidx >= g_idx_cap) {
+        if (g_idx_cap >= MAX_VERTS) {
+            return;
+        }
+        unsigned nc = g_idx_cap ? g_idx_cap * 2 : 4096;
+        void *n = realloc(g_idx, (size_t)nc * 4);
+        if (!n) {
+            array_vertex_fetch(i);
+            return;
+        }
+        g_idx = n;
+        g_idx_cap = nc;
+    }
+    g_idx[g_nidx++] = i;
+}
+
+static void array_vertex_fetch(uint32_t i)
+{
     float(*v)[4] = next_vertex();
     if (!v) {
         return;
@@ -263,6 +299,15 @@ static void array_vertex(uint32_t i)
         if (p) {
             attr_conv(fmt, p, v[a]);
         }
+    }
+}
+
+static void idx_materialize(void)
+{
+    unsigned n = g_nidx;
+    g_nidx = 0;
+    for (unsigned k = 0; k < n; k++) {
+        array_vertex_fetch(g_idx[k]);
     }
 }
 
@@ -1515,6 +1560,142 @@ static bool g_vs_ok;
 static uint16_t g_vs_mask;
 static char g_vs_src[48 * 1024];
 
+/* Etapa 5: los vértices de los índices pendientes, solo con los atributos del
+ * programa (en el orden de sus bits), cada uno una vez, y los índices que ve
+ * la GPU. Falso: hacerlo como antes. */
+static float *g_pk;
+static size_t g_pk_cap;
+static uint32_t *g_tidx;
+static size_t g_tidx_cap;
+
+static bool grow(void **p, size_t *cap, size_t need, size_t elem)
+{
+    if (need <= *cap) {
+        return true;
+    }
+    size_t nc = *cap ? *cap : 4096;
+    while (nc < need) {
+        nc *= 2;
+    }
+    void *n = realloc(*p, nc * elem);
+    if (!n) {
+        return false;
+    }
+    *p = n;
+    *cap = nc;
+    return true;
+}
+
+static bool pk_build(GpuDraw *d)
+{
+    unsigned prim = S.prim, n = g_nidx;
+    if (prim < 5 || prim > 10 || !n) {
+        return false;
+    }
+    uint32_t mn = 0xFFFFFFFFu, mx = 0;
+    for (unsigned i = 0; i < n; i++) {
+        uint32_t v = g_idx[i];
+        mn = v < mn ? v : mn;
+        mx = v > mx ? v : mx;
+    }
+    uint32_t range = mx - mn + 1;
+    bool indexed = range <= 4u * n + 256u;
+    unsigned nv = indexed ? range : n;
+    unsigned k = (unsigned)__builtin_popcount(g_vs_mask);
+    if (!k) {
+        k = 1;
+    }
+    if (!grow((void **)&g_pk, &g_pk_cap, (size_t)nv * k * 4, sizeof(float))) {
+        return false;
+    }
+    unsigned so = k * 4, j = 0;
+    for (unsigned a = 0; a < 16; a++) {
+        if (!(g_vs_mask & (1u << a))) {
+            continue;
+        }
+        float *dst = g_pk + j * 4;
+        j++;
+        uint32_t fmt = S.va_fmt[a];
+        unsigned nb = attr_bytes(fmt);
+        if (!nb) { /* sin arreglo: su valor actual en todos */
+            for (unsigned v = 0; v < nv; v++) {
+                memcpy(dst + (size_t)v * so, S.cur[a], 16);
+            }
+            continue;
+        }
+        uint32_t base = ((S.va_off[a] & 0x80000000u) ? S.dma_vb : S.dma_va) + (S.va_off[a] & 0x7FFFFFFFu);
+        uint32_t stride = fmt >> 8;
+        if (indexed) {
+            const uint8_t *p0 = mem(base + mn * stride, (range - 1) * stride + nb);
+            if (!p0) {
+                return false;
+            }
+            if ((fmt & 0xF) == 2 && ((fmt >> 4) & 0xF) <= 4) { /* floats: lo más común */
+                unsigned sz = (fmt >> 4) & 0xF;
+                for (unsigned v = 0; v < nv; v++) {
+                    float *o = dst + (size_t)v * so;
+                    o[0] = o[1] = o[2] = 0;
+                    o[3] = 1;
+                    memcpy(o, p0 + (size_t)v * stride, sz * 4);
+                }
+            } else {
+                for (unsigned v = 0; v < nv; v++) {
+                    attr_conv(fmt, p0 + (size_t)v * stride, dst + (size_t)v * so);
+                }
+            }
+        } else {
+            for (unsigned v = 0; v < nv; v++) {
+                const uint8_t *p = mem(base + g_idx[v] * stride, nb);
+                float *o = dst + (size_t)v * so;
+                if (p) {
+                    attr_conv(fmt, p, o);
+                } else {
+                    o[0] = o[1] = o[2] = 0;
+                    o[3] = 1;
+                }
+            }
+        }
+    }
+    d->vs_pk = g_pk;
+    d->vs_pk_n = nv;
+    d->vs_idx = NULL;
+    d->vs_nidx = 0;
+    d->nverts = n;
+    if (indexed) {
+        /* los índices (relativos a mn); quads y tiras de quads a triángulos */
+        size_t cnt = 0;
+        if (!grow((void **)&g_tidx, &g_tidx_cap, (size_t)n * 3 / 2 + 6, sizeof(uint32_t))) {
+            return false;
+        }
+        if (prim == 8) {
+            for (unsigned i = 0; i + 3 < n; i += 4) {
+                uint32_t q0 = g_idx[i] - mn, q1 = g_idx[i + 1] - mn, q2 = g_idx[i + 2] - mn, q3 = g_idx[i + 3] - mn;
+                uint32_t q[6] = {q0, q1, q2, q0, q2, q3};
+                memcpy(g_tidx + cnt, q, sizeof(q));
+                cnt += 6;
+            }
+        } else if (prim == 9) {
+            for (unsigned i = 0; i + 3 < n; i += 2) {
+                uint32_t q0 = g_idx[i] - mn, q1 = g_idx[i + 1] - mn, q2 = g_idx[i + 2] - mn, q3 = g_idx[i + 3] - mn;
+                uint32_t q[6] = {q0, q1, q3, q0, q3, q2};
+                memcpy(g_tidx + cnt, q, sizeof(q));
+                cnt += 6;
+            }
+        } else {
+            for (unsigned i = 0; i < n; i++) {
+                g_tidx[i] = g_idx[i] - mn;
+            }
+            cnt = n;
+            if (prim == 5) {
+                cnt -= cnt % 3;
+            }
+        }
+        d->vs_idx = g_tidx;
+        d->vs_nidx = (unsigned)cnt;
+    }
+    return true;
+}
+
 static bool gpu_try(const Target *t, const OutVert *ov)
 {
     _Static_assert(sizeof(OutVert) == GPU_VERT_FLOATS * sizeof(float), "OutVert para la GPU");
@@ -1524,7 +1705,13 @@ static bool gpu_try(const Target *t, const OutVert *ov)
     d.nverts = S.nin;
     d.verts = (const float *)ov;
     if (g_vs_draw) {
-        d.vs_in = &S.in[0][0][0];
+        if (g_nidx) {
+            if (!pk_build(&d)) {
+                return false;
+            }
+        } else {
+            d.vs_in = &S.in[0][0][0];
+        }
         d.vs_mask = g_vs_mask;
         d.vs_consts = S.consts;
         d.vs_key = g_vs_key;
@@ -1627,7 +1814,7 @@ static void draw(void)
         S.st.skipped_frames_draws++;
         return;
     }
-    if (!S.nin) {
+    if (!S.nin && !g_nidx) {
         return;
     }
     S.st.draws++;
@@ -1652,6 +1839,12 @@ static void draw(void)
     }
     if (gpu_enabled() && gpu_try_vs(&t)) {
         return; /* los vértices los transformó el GPU */
+    }
+    if (g_nidx) {
+        idx_materialize(); /* la CPU: todos los vértices armados, como antes */
+    }
+    if (!S.nin) {
+        return;
     }
     OutVert *ov = malloc((size_t)S.nin * sizeof(OutVert));
     if (!ov) {
@@ -1842,6 +2035,7 @@ void sw_method(uint32_t m, uint32_t v)
             S.prim = v;
             S.nin = 0;
             S.ninl = 0;
+            g_nidx = 0;
             S.begun = true;
         } else if (S.begun) {
             if (S.ninl) {
@@ -1850,6 +2044,7 @@ void sw_method(uint32_t m, uint32_t v)
             draw();
             S.begun = false;
             S.nin = 0;
+            g_nidx = 0;
         }
         return;
     case 0x1800: /* ARRAY_ELEMENT16 */

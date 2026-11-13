@@ -76,6 +76,7 @@ static uint64_t fnv(uint64_t h, const void *p, size_t n)
 #define MAX_FBO 32
 #define MAX_TEX 384
 #define RING_SIZE (16u << 20) /* el anillo de los vértices (vbo2) */
+#define IRING_SIZE (4u << 20) /* el de los índices */
 
 typedef struct Surf {
     uint32_t pa, pitch;
@@ -148,6 +149,8 @@ static struct {
     GLuint vao2, vbo2;
     uint16_t vao2_mask;
     size_t ring_pos;      /* etapa 5: vbo2 es un anillo; se escribe sin sincronizar */
+    GLuint iring;         /* y otro para los índices */
+    size_t iring_pos;
     GLint draw_first;     /* el primer vértice de este dibujo en el anillo */
     GLuint qibo[2];       /* índices fijos de quads y de tiras de quads */
     uint32_t qibo_n[2];   /* para cuántos vértices alcanzan */
@@ -758,7 +761,8 @@ static bool vs_upload(const GpuDraw *d)
     if (!k) {
         k = 1;
     }
-    size_t need = (size_t)d->nverts * k * 4;
+    size_t nv = d->vs_pk ? d->vs_pk_n : d->nverts;
+    size_t need = nv * k * 4;
     size_t stride = (size_t)k * 16, bytes = need * sizeof(float);
     if (SC.vao != G.vao2) {
         glBindVertexArray(G.vao2);
@@ -799,7 +803,10 @@ static bool vs_upload(const GpuDraw *d)
         o = G.vsbuf;
     }
     float *o0 = o;
-    for (unsigned v = 0; v < d->nverts; v++) {
+    if (d->vs_pk) { /* ya empaquetados (nv2a_sw) */
+        memcpy(o, d->vs_pk, bytes);
+    }
+    for (unsigned v = 0; !d->vs_pk && v < d->nverts; v++) {
         const float *in = d->vs_in + (size_t)v * 64;
         for (unsigned a = 0; a < 16; a++) {
             if (d->vs_mask & (1u << a)) {
@@ -1409,7 +1416,7 @@ static bool gpu_draw_(const GpuDraw *d)
         return true; /* puntos y líneas: todavía no (el software tampoco) */
     }
     Prog *P = &G.progs[0];
-    if (d->vs_in) {
+    if (d->vs_in || d->vs_pk) {
         P = vs_prog(d);
         if (!P) {
             return false; /* lo hace la CPU (y luego este mismo camino con los vértices listos) */
@@ -1562,7 +1569,7 @@ static bool gpu_draw_(const GpuDraw *d)
     if (sc_u(P, 15, &d->afunc, 4)) glUniform1ui(P->u_afunc, d->afunc);
     if (sc_u(P, 16, &d->aref, 4)) glUniform1f(P->u_aref, (float)(d->aref & 0xFF));
     /* vértices */
-    if (d->vs_in) {
+    if (d->vs_in || d->vs_pk) {
         if (!P->c_ok) {
             glUniform4fv(P->u_c, 192, d->vs_consts);
             memcpy(P->c, d->vs_consts, sizeof(P->c));
@@ -1603,6 +1610,44 @@ static bool gpu_draw_(const GpuDraw *d)
     }
     unsigned n = d->nverts;
     GLint f0 = G.draw_first;
+    if (d->vs_idx && d->vs_nidx) {
+        /* etapa 5: con índices (cada vértice una vez): al anillo de índices */
+        size_t ib = (size_t)d->vs_nidx * 4;
+        if (ib <= IRING_SIZE) {
+            if (!G.iring) {
+                glGenBuffers(1, &G.iring);
+            }
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, G.iring);
+            size_t pos = (G.iring_pos + 3) & ~(size_t)3;
+            if (!G.iring_pos || pos + ib > IRING_SIZE) {
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER, IRING_SIZE, NULL, GL_STREAM_DRAW);
+                pos = 0;
+            }
+            void *ip = glMapBufferRange(GL_ELEMENT_ARRAY_BUFFER, (GLintptr)pos, (GLsizeiptr)ib,
+                                        GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT | GL_MAP_INVALIDATE_RANGE_BIT);
+            if (ip) {
+                memcpy(ip, d->vs_idx, ib);
+                glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
+                G.iring_pos = pos + ib;
+                GLenum mode = d->prim == 6 ? GL_TRIANGLE_STRIP : (d->prim == 7 || d->prim == 10) ? GL_TRIANGLE_FAN : GL_TRIANGLES;
+                glDrawElementsBaseVertex(mode, (GLsizei)d->vs_nidx, GL_UNSIGNED_INT, (const void *)(uintptr_t)pos, f0);
+                s->dirty = true;
+                G.st.draws++;
+                G.st.indexed++;
+                return true;
+            }
+            G.iring_pos = 0;
+        }
+        /* sin anillo: como antes con glBufferData */
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, G.ibo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)ib, d->vs_idx, GL_STREAM_DRAW);
+        GLenum mode = d->prim == 6 ? GL_TRIANGLE_STRIP : (d->prim == 7 || d->prim == 10) ? GL_TRIANGLE_FAN : GL_TRIANGLES;
+        glDrawElementsBaseVertex(mode, (GLsizei)d->vs_nidx, GL_UNSIGNED_INT, 0, f0);
+        s->dirty = true;
+        G.st.draws++;
+        G.st.indexed++;
+        return true;
+    }
     switch (d->prim) {
     case 5: glDrawArrays(GL_TRIANGLES, f0, (GLsizei)(n - n % 3)); break;
     case 6: glDrawArrays(GL_TRIANGLE_STRIP, f0, (GLsizei)n); break;

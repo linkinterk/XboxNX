@@ -186,7 +186,7 @@ int main(int argc, char **argv)
         const GpuStats *g = gpu_stats();
         fprintf(stderr, "GPU: %u dibujos, %u a la CPU; vs en el GPU %u (%u programas, %u sin compilar, %u sin traducir)\n",
                 g->draws, g->fallbacks, g->vs_draws, g->vs_progs, g->vs_bad, st->vs_untranslated);
-        fprintf(stderr, "caché de shaders: %u leídos, %u guardados · constantes subidas %u vec4\n", g->vs_cached, g->vs_saved, g->vs_const_vec);
+        fprintf(stderr, "caché de shaders: %u leídos, %u guardados · constantes subidas %u vec4 · con índices %u\n", g->vs_cached, g->vs_saved, g->vs_const_vec, g->indexed);
     }
     FILE *o = fopen(argv[3], "wb");
     fprintf(o, "P6\n%d %d\n255\n", w, h);
