@@ -1007,9 +1007,9 @@ static void draw_xbox_screen(const UiState *s)
         /* el perfil por bloques: sampler.c, en perfil.txt */
         {
             const GpuStats *gs = gpu_stats();
-            snprintf(e, sizeof(e), "GPU %s · %u dibujos (vértices en GPU %u · %u shaders%s) · %u por software · %u subidas (%.0f MB) · %u copias · en gpu_draw %.1f s (vértices %.1f s, texturas %.1f s, llamada %.1f s), leer cuadros %.1f s, visibilidad %u (%.1f s; pruebas %u, informes %u, sin DMA %u) · %s",
+            snprintf(e, sizeof(e), "GPU %s · %u dibujos (vértices en GPU %u · %u shaders%s · caché %u leídos %u guardados%s) · %u por software · %u subidas (%.0f MB) · %u copias · en gpu_draw %.1f s (vértices %.1f s, texturas %.1f s, llamada %.1f s), leer cuadros %.1f s, visibilidad %u (%.1f s; pruebas %u, informes %u, sin DMA %u) · %s",
                      gpu_enabled() ? "activa" : gpu_ready() ? "apagada (L3)" : "no", gs->draws, gs->vs_draws, gs->vs_progs,
-                     gs->vs_bad ? " · fallos" : "", gs->fallbacks, gs->uploads, gs->upload_bytes / 1048576.0, gs->flushes,
+                     gs->vs_bad ? " · fallos" : "", gs->vs_cached, gs->vs_saved, gs->bin_ok ? "" : ", sin binarios", gs->fallbacks, gs->uploads, gs->upload_bytes / 1048576.0, gs->flushes,
                      gs->ns_draw / 1e9, gs->ns_vbuf / 1e9, gs->ns_tex / 1e9, gs->ns_call / 1e9, gs->ns_read / 1e9, gs->queries, gs->ns_query / 1e9, hw_stats()->zpass_tests, hw_stats()->reports, hw_stats()->reports_noinst, gpu_info());
             ovl_text(ly, gpu_enabled() ? C_GREEN : C_WARN, e);
         }

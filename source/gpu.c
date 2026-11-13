@@ -521,6 +521,7 @@ static bool init_inner(void *nwin)
             p_glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &nf);
         }
         G.bin_ok = nf > 0 && p_glGetProgramBinary && p_glProgramBinary && p_glProgramParameteri;
+        G.st.bin_ok = G.bin_ok;
         const char *r = (const char *)glGetString(GL_RENDERER), *v = (const char *)glGetString(GL_VERSION);
         uint64_t h = 1469598103934665603ull;
         h = fnv(h, r ? r : "", r ? strlen(r) : 0);

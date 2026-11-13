@@ -117,7 +117,8 @@ typedef struct GpuStats {
     unsigned draws, fallbacks, uploads, flushes, surfaces, textures;
     unsigned vs_draws, vs_progs, vs_bad, vs_cached, vs_saved, vs_const_vec;
     unsigned indexed; /* etapa 5: dibujos con índices (cada vértice una vez) */
-    unsigned queries; /* informes de visibilidad leídos */ /* 4c: dibujos con el vertex shader en el GPU, programas, los que no compilaron */
+    unsigned queries; /* informes de visibilidad leídos */
+    bool bin_ok;      /* el driver da binarios de programas (la caché de shaders en la SD funciona) */ /* 4c: dibujos con el vertex shader en el GPU, programas, los que no compilaron */
     uint64_t upload_bytes;
     uint64_t ns_draw, ns_tex, ns_read, ns_vbuf, ns_query, ns_call; /* etapa 5: tiempo en gpu_draw (todo), en decodificar+subir texturas y en leer cuadros a la RAM */
 } GpuStats;
