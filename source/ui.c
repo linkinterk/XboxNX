@@ -768,8 +768,97 @@ static void game_rate(const Runner *r, double *fps, double *speed)
 }
 
 /* La pantalla del Xbox: lo que hay en la memoria de video que muestra. */
+/* ---- el registro de rendimiento: cada ~5 s, lo mismo que se ve en la
+ * pantalla del juego va a sdmc:/switch/XboxNX/rendimiento.txt (se empieza de
+ * nuevo en cada arranque). Así se puede ver qué falla sin fotos. */
+#ifdef __SWITCH__
+#define DIAG_FILE "sdmc:/switch/XboxNX/rendimiento.txt"
+#else
+#define DIAG_FILE "rendimiento.txt"
+#endif
+static char g_diag[12000];
+static size_t g_diag_n;
+static bool g_diag_go; /* este dibujo se guarda */
+
+static void diag_add(const char *t)
+{
+    if (!g_diag_go) {
+        return;
+    }
+    size_t l = strlen(t);
+    if (g_diag_n + l + 2 < sizeof(g_diag)) {
+        memcpy(g_diag + g_diag_n, t, l);
+        g_diag_n += l;
+        g_diag[g_diag_n++] = '\n';
+        g_diag[g_diag_n] = 0;
+    }
+}
+
+static void ovl_text(int y, uint32_t col, const char *t)
+{
+    gfx_text_fit(24, y, 16, UI_W - 48, col, t);
+    diag_add(t);
+}
+
+static void diag_prof(const UiState *s)
+{
+    if (!g_diag_go) {
+        return;
+    }
+    char t[200];
+    int o = snprintf(t, sizeof(t), "Tiempo (%s):", clocks_info());
+    for (int i = 0; i < PROF_N && o < (int)sizeof(t) - 20; i++) {
+        o += snprintf(t + o, sizeof(t) - (size_t)o, "%s %s %u%%", i ? " ·" : "", prof_name((ProfPart)i),
+                      (s->prof[i] + 5) / 10);
+    }
+    diag_add(t);
+}
+
+/* Al empezar el dibujo: ¿toca guardar? */
+static void diag_begin(void)
+{
+    static time_t last;
+    time_t now = time(NULL);
+    g_diag_go = now - last >= 5;
+    if (g_diag_go) {
+        last = now;
+        g_diag_n = 0;
+        g_diag[0] = 0;
+    }
+}
+
+/* Al terminar: lo de este dibujo al archivo. */
+static void diag_end(const UiState *s)
+{
+    if (!g_diag_go || !g_diag_n) {
+        g_diag_go = false;
+        return;
+    }
+    g_diag_go = false;
+    static bool started;
+    static long total;
+    FILE *f = fopen(DIAG_FILE, started && total < (2l << 20) ? "a" : "w");
+    if (!f) {
+        return;
+    }
+    if (!started || total >= (2l << 20)) {
+        total = 0;
+        total += fprintf(f, "XboxNX v%s · registro de rendimiento (cada ~5 s)\n", s->version ? s->version : "?");
+    }
+    started = true;
+    time_t now = time(NULL);
+    struct tm *tm = localtime(&now);
+    char ts[32] = "?";
+    if (tm) {
+        strftime(ts, sizeof(ts), "%H:%M:%S", tm);
+    }
+    total += fprintf(f, "\n=== %s ===\n%s", ts, g_diag);
+    fclose(f);
+}
+
 static void draw_xbox_screen(const UiState *s)
 {
+    diag_begin();
     const Runner *r = s->run;
     const Kernel *kn = r->k;
     static XImage img;
@@ -810,6 +899,9 @@ static void draw_xbox_screen(const UiState *s)
             }
         }
         gfx_text_fit(20, BOTBAR_Y + 22, 15, 880, C_ON_VAR, d2);
+        diag_add(b);
+        diag_add(d2);
+        diag_prof(s);
         /* el dibujo por software: el último dibujo con lo que dio */
         const SwStats *sw = sw_stats();
         const __typeof__(sw->last) *L = &sw->last;
@@ -820,23 +912,23 @@ static void draw_xbox_screen(const UiState *s)
                  sw->no_target_why, (unsigned)sw->surf_format, (unsigned)sw->surf_pitch, (unsigned)sw->clip_h,
                  (unsigned)sw->clip_v, sw->vs_errors, (unsigned)hw_scanout());
         gfx_rrect(14, ly - 4, UI_W - 28, 298, 10, WITH_ALPHA(HEX(0x000000), 200));
-        gfx_text_fit(24, ly, 16, UI_W - 48, C_ON, e);
+        ovl_text(ly, C_ON, e);
         ly += 22;
         snprintf(e, sizeof(e), "Último: prim %u, %u vértices, %llu tri, %llu px, %u ocultos, %u tras Z · destino %08X pitch %u fmt %X · Z %08X",
                  (unsigned)L->prim, (unsigned)L->nverts, (unsigned long long)L->tris, (unsigned long long)L->pixels,
                  L->culled, L->depth_fail, (unsigned)L->target_pa, (unsigned)L->target_pitch, (unsigned)L->target_fmt,
                  (unsigned)L->zeta_pa);
-        gfx_text_fit(24, ly, 16, UI_W - 48, C_ON, e);
+        ovl_text(ly, C_ON, e);
         ly += 22;
         snprintf(e, sizeof(e), "Textura 0: %s modo %u fmt %02X %ux%u en %08X · combiners %X final %08X %08X · 1er píxel %08X",
                  L->tex_on ? "sí" : "no", L->tex_mode, (unsigned)L->tex_fmt, (unsigned)L->tex_w, (unsigned)L->tex_h,
                  (unsigned)L->tex_pa, (unsigned)L->cctl, (unsigned)L->fcw0, (unsigned)L->fcw1, (unsigned)L->first_px);
-        gfx_text_fit(24, ly, 16, UI_W - 48, C_ON, e);
+        ovl_text(ly, C_ON, e);
         ly += 22;
         snprintf(e, sizeof(e), "Vértice 0: pos %.1f %.1f %.1f %.2f · oD0 %.2f %.2f %.2f %.2f · oT0 %.2f %.2f %.2f %.2f",
                  L->pos[0], L->pos[1], L->pos[2], L->pos[3], L->d0[0], L->d0[1], L->d0[2], L->d0[3], L->t0[0], L->t0[1],
                  L->t0[2], L->t0[3]);
-        gfx_text_fit(24, ly, 16, UI_W - 48, C_ON, e);
+        ovl_text(ly, C_ON, e);
         ly += 22;
         /* las interrupciones: si el GPU queda en una trampa, por qué no se atiende */
         char irq[200];
@@ -845,13 +937,13 @@ static void draw_xbox_screen(const UiState *s)
         snprintf(e, sizeof(e), "IRQL %u · DPC en cola %u · %s%s · %u ISR, %u DPC · esperas saltadas %llu (%.1f s) · %s",
                  pirql ? *pirql : 0, kn->ndpc, kn->in_isr ? "en ISR" : "sin ISR", kn->in_dpc ? ", en DPC" : "",
                  kn->isrs_run, kn->dpcs_run, (unsigned long long)r->idle_skips, kn->idle_ns_skipped / 1e9, irq);
-        gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
+        ovl_text(ly, C_WARN, e);
         ly += 22;
         CpuJitStats js;
         cpu_jit_stats(&js);
         snprintf(e, sizeof(e), "Archivos: %u lecturas (%.1f MB), %u escrituras, %u abiertos · último: %s", kn->reads,
                  kn->bytes_read / 1048576.0, kn->writes, kn->files_open, kn->last_io[0] ? kn->last_io : "-");
-        gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
+        ovl_text(ly, C_WARN, e);
         ly += 22;
         /* las 5 funciones del kernel más llamadas y la última apertura fallida */
         {
@@ -875,19 +967,19 @@ static void draw_xbox_screen(const UiState *s)
                     break;
                 }
             }
-            gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
+            ovl_text(ly, C_WARN, e);
             ly += 22;
             snprintf(e, sizeof(e), "Aperturas fallidas: %u · última: %s · APC: %u encolados, %u corridos%s",
                      kn->open_fails, kn->last_fail[0] ? kn->last_fail : "-", kn->apcs_queued, kn->apcs_run,
                      kn->apc_lost ? " (con pérdidas)" : "");
-            gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
+            ovl_text(ly, C_WARN, e);
             ly += 22;
         }
         snprintf(e, sizeof(e), "JIT %s: %llu traducidos, búfer %.1f de %.0f MB, vaciado %u veces · %llu decodificados · código reescrito %llu veces",
                  js.on ? "activo" : "apagado", (unsigned long long)js.compiled, js.used / 1048576.0,
                  js.size / 1048576.0, js.flushes, (unsigned long long)js.decodes,
                  (unsigned long long)r->cpu.vm->rewrites);
-        gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
+        ovl_text(ly, C_WARN, e);
         ly += 22;
         /* dónde se va el tiempo del CPU (muestreado en run_blocks) */
         {
@@ -906,7 +998,7 @@ static void draw_xbox_screen(const UiState *s)
                      cc->st_jit ? (double)cc->st_ccall / (double)cc->st_jit : 0.0,
                      cc->st_jit ? (double)cc->st_cfb / (double)cc->st_jit : 0.0, cc->st_runs / 1e6,
                      js.ticks_per_s ? (double)js.compile_ticks / (double)js.ticks_per_s : 0.0);
-            gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
+            ovl_text(ly, C_WARN, e);
             ly += 22;
         }
         /* el perfil del CPU: qué instrucciones se quedan fuera del JIT (cada ~60 dibujos de la pantalla) */
@@ -923,18 +1015,19 @@ static void draw_xbox_screen(const UiState *s)
                 o3 += snprintf(e + o3, sizeof(e) - (size_t)o3, pf.op[t] > 0xFF ? " 0F%02X %.0f%%" : " %02X %.0f%%",
                                pf.op[t] & 0xFF, pf.insns ? 100.0 * (double)pf.count[t] / (double)pf.insns : 0.0);
             }
-            gfx_text_fit(24, ly, 16, UI_W - 48, C_WARN, e);
+            ovl_text(ly, C_WARN, e);
         }
         ly += 22;
         {
             const GpuStats *gs = gpu_stats();
-            snprintf(e, sizeof(e), "GPU %s: %s · %u dibujos, %u por software · %u subidas (%.0f MB) · %u copias a RAM",
-                     gpu_enabled() ? "activa" : gpu_ready() ? "apagada (L3)" : "no", gpu_info(), gs->draws,
-                     gs->fallbacks, gs->uploads, gs->upload_bytes / 1048576.0, gs->flushes);
-            gfx_text_fit(24, ly, 16, UI_W - 48, gpu_enabled() ? C_GREEN : C_WARN, e);
+            snprintf(e, sizeof(e), "GPU %s · %u dibujos (vértices en GPU %u · %u shaders%s) · %u por software · %u subidas (%.0f MB) · %u copias · %s",
+                     gpu_enabled() ? "activa" : gpu_ready() ? "apagada (L3)" : "no", gs->draws, gs->vs_draws, gs->vs_progs,
+                     gs->vs_bad ? " · fallos" : "", gs->fallbacks, gs->uploads, gs->upload_bytes / 1048576.0, gs->flushes,
+                     gpu_info());
+            ovl_text(ly, gpu_enabled() ? C_GREEN : C_WARN, e);
         }
         ly += 22;
-        gfx_text_fit(24, ly, 16, UI_W - 48, sound_on() ? C_GREEN : C_WARN, sound_info());
+        ovl_text(ly, sound_on() ? C_GREEN : C_WARN, sound_info());
     } else {
         snprintf(b, sizeof(b), "Pantalla del Xbox: el juego todavía no eligió un modo de video");
         gfx_text_center(0, UI_W, 330, 22, C_ON_VAR, "Todavía no hay imagen");
@@ -949,6 +1042,7 @@ static void draw_xbox_screen(const UiState *s)
     snprintf(b, sizeof(b), "Control: %s · el juego lo leyó %u veces", us->operational ? "USB activo" : "USB sin iniciar",
              us->polls);
     gfx_text_fit(UI_W - 520, 6, 18, 500, us->polls ? C_GREEN : C_ON_VAR, b);
+    diag_end(s);
 }
 
 static void draw_run(const UiState *s)

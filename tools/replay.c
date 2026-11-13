@@ -90,6 +90,7 @@ int main(int argc, char **argv)
         }
         gpu_set_ram(g_ram, RAM);
         gpu_enable(true);
+        sw_set_vs_gpu(!getenv("VS_CPU")); /* VS_CPU=1: los vértices en la CPU, como antes */
         fprintf(stderr, "GPU: %s\n", gpu_info());
     }
     /* lo que suele venir de antes del cuadro: el modo del vertex shader y los
@@ -177,6 +178,12 @@ int main(int argc, char **argv)
     fprintf(stderr, "%zu métodos, %u dibujos, %llu triángulos, %llu píxeles, sin destino %u, vs con error %u, ff %u\n", n,
             st->draws, (unsigned long long)st->triangles, (unsigned long long)st->pixels, st->no_target, st->vs_errors,
             st->skipped_ff);
+    if (getenv("GPU")) {
+        const GpuStats *g = gpu_stats();
+        fprintf(stderr, "GPU: %u dibujos, %u a la CPU; vs en el GPU %u (%u programas, %u sin compilar, %u sin traducir)\n",
+                g->draws, g->fallbacks, g->vs_draws, g->vs_progs, g->vs_bad, st->vs_untranslated);
+        fprintf(stderr, "caché de shaders: %u leídos, %u guardados\n", g->vs_cached, g->vs_saved);
+    }
     FILE *o = fopen(argv[3], "wb");
     fprintf(o, "P6\n%d %d\n255\n", w, h);
     for (int y = 0; y < h; y++) {

@@ -55,6 +55,15 @@ typedef struct GpuDraw {
     uint32_t sfac, dfac, beq, bcolor, dfunc, cull_face, front_face, cmask, afunc, aref;
     uint32_t cctl, c_icw[8], a_icw[8], c_ocw[8], a_ocw[8], factor0[8], factor1[8], fcw0, fcw1, fog_color;
     GpuTex tex[4];
+    /* 4c: el vertex shader en el GPU. Si vs_in no es NULL, verts no se usa:
+     * vs_in son las entradas de cada vértice (nverts x 16 x 4 floats), vs_mask
+     * las que usa el programa, vs_consts las 192 constantes, vs_key el hash
+     * del programa y vs_src su GLSL (vsh_glsl). */
+    const float *vs_in;
+    uint16_t vs_mask;
+    const float *vs_consts;
+    uint64_t vs_key;
+    const char *vs_src;
 } GpuDraw;
 
 /* nwin: el NWindow de la Switch (NULL en la PC: sin ventana). */
@@ -90,6 +99,7 @@ bool gpu_present_ui(const uint32_t *rgba, int w, int h);
 
 typedef struct GpuStats {
     unsigned draws, fallbacks, uploads, flushes, surfaces, textures;
+    unsigned vs_draws, vs_progs, vs_bad, vs_cached, vs_saved; /* 4c: dibujos con el vertex shader en el GPU, programas, los que no compilaron */
     uint64_t upload_bytes;
 } GpuStats;
 const GpuStats *gpu_stats(void);

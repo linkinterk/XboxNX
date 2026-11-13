@@ -133,6 +133,7 @@ typedef ptrdiff_t GLintptr;
     X(glGetShaderiv, void, (GLuint, GLenum, GLint *))                                                       \
     X(glGetShaderInfoLog, void, (GLuint, GLsizei, GLsizei *, GLchar *))                                     \
     X(glCreateProgram, GLuint, (void))                                                                      \
+    X(glDeleteProgram, void, (GLuint))                                                                      \
     X(glAttachShader, void, (GLuint, GLuint))                                                               \
     X(glBindAttribLocation, void, (GLuint, GLuint, const GLchar *))                                         \
     X(glLinkProgram, void, (GLuint))                                                                        \
@@ -154,6 +155,7 @@ typedef ptrdiff_t GLintptr;
     X(glBufferData, void, (GLenum, GLsizeiptr, const void *, GLenum))                                       \
     X(glVertexAttribPointer, void, (GLuint, GLint, GLenum, GLboolean, GLsizei, const void *))               \
     X(glEnableVertexAttribArray, void, (GLuint))                                                            \
+    X(glDisableVertexAttribArray, void, (GLuint))                                                           \
     X(glDrawArrays, void, (GLenum, GLint, GLsizei))                                                         \
     X(glDrawElements, void, (GLenum, GLsizei, GLenum, const void *))                                        \
     X(glFinish, void, (void))                                                                               \

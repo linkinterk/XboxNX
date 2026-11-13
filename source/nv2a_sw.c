@@ -8,6 +8,7 @@
  * espacio de recorte, para interpolar con perspectiva.
  */
 #include "nv2a_sw.h"
+#include "vsh_glsl.h"
 
 /* lo que más tiempo gasta del emulador: con -O3 ~30% más rápido */
 #pragma GCC optimize("O3")
@@ -46,6 +47,7 @@ static struct {
     unsigned pload, pword, pstart;
     bool pdirty, pok;
     Nv2aVshProgram prog;
+    uint64_t pkey; /* el hash del programa (para su vertex shader en el GPU) */
     float consts[192 * 4];
     unsigned cload, cword;
     uint32_t xform_mode;
@@ -1263,6 +1265,19 @@ static bool run_program(void)
         S.pok = nv2a_vsh_parse_program(&S.prog, S.pmem + start * 4, PROG_SLOTS - start) == NV2AVPR_SUCCESS;
         if (!S.pok) {
             S.st.vs_errors++;
+        } else {
+            /* el hash de las palabras del programa (hasta la marca de fin) */
+            unsigned n = 0;
+            while (n < PROG_SLOTS - start && !S.prog.steps[n].is_final) {
+                n++;
+            }
+            n++;
+            uint64_t h = 1469598103934665603ull;
+            const uint32_t *w = S.pmem + start * 4;
+            for (unsigned i = 0; i < n * 4; i++) {
+                h = (h ^ w[i]) * 1099511628211ull;
+            }
+            S.pkey = h | 1;
         }
         S.pdirty = false;
     }
@@ -1477,6 +1492,13 @@ static void gpu_decode(int stage, int face, uint32_t *out)
     }
 }
 
+static bool g_vs_draw;
+static bool g_vs_gpu = true;
+static uint64_t g_vs_key;
+static bool g_vs_ok;
+static uint16_t g_vs_mask;
+static char g_vs_src[48 * 1024];
+
 static bool gpu_try(const Target *t, const OutVert *ov)
 {
     _Static_assert(sizeof(OutVert) == GPU_VERT_FLOATS * sizeof(float), "OutVert para la GPU");
@@ -1485,6 +1507,13 @@ static bool gpu_try(const Target *t, const OutVert *ov)
     d.prim = S.prim;
     d.nverts = S.nin;
     d.verts = (const float *)ov;
+    if (g_vs_draw) {
+        d.vs_in = &S.in[0][0][0];
+        d.vs_mask = g_vs_mask;
+        d.vs_consts = S.consts;
+        d.vs_key = g_vs_key;
+        d.vs_src = g_vs_src;
+    }
     d.color_pa = (uint32_t)(t->color - S.ram);
     d.pitch = t->pitch;
     d.fmt = t->bpp == 4 ? t->fmt : 0;
@@ -1547,6 +1576,35 @@ static void transform_part(void *arg, int part, int n)
     }
 }
 
+/* 4c: el vertex program como vertex shader en el GPU. El GLSL se hace una vez
+ * por programa (y si no se puede traducir, la CPU lo hace como siempre). */
+
+void sw_set_vs_gpu(bool on) { g_vs_gpu = on; }
+
+static bool gpu_try_vs(const Target *t)
+{
+    if (!g_vs_gpu) {
+        return false;
+    }
+    if (g_vs_key != S.pkey) {
+        g_vs_key = S.pkey;
+        g_vs_ok = vsh_glsl(&S.prog, g_vs_src, sizeof(g_vs_src), &g_vs_mask);
+        if (!g_vs_ok) {
+            S.st.vs_untranslated++;
+        }
+    }
+    if (!g_vs_ok) {
+        return false;
+    }
+    g_vs_draw = true;
+    bool ok = gpu_try(t, NULL);
+    g_vs_draw = false;
+    if (ok) {
+        S.st.vs_gpu_draws++;
+    }
+    return ok;
+}
+
 static void draw(void)
 {
     if (g_skip) {
@@ -1575,6 +1633,9 @@ static void draw(void)
         if (g_tex_on[s] && g_tex_mode[s] != 4) {
             g_tex_on[s] = tex_setup(s, &g_tex[s]);
         }
+    }
+    if (gpu_enabled() && gpu_try_vs(&t)) {
+        return; /* los vértices los transformó el GPU */
     }
     OutVert *ov = malloc((size_t)S.nin * sizeof(OutVert));
     if (!ov) {

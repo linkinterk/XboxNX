@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -38,6 +39,25 @@ int gl_load(void *(*getproc)(const char *), const char **missing)
 }
 
 static void *egl_proc(const char *n) { return (void *)eglGetProcAddress(n); }
+
+/* Opcionales: los binarios de los programas (la caché de shaders en la SD). */
+static void (*p_glGetProgramBinary)(GLuint, GLsizei, GLsizei *, GLenum *, void *);
+static void (*p_glProgramBinary)(GLuint, GLenum, const void *, GLsizei);
+static void (*p_glProgramParameteri)(GLuint, GLenum, GLint);
+static void (*p_glGetIntegerv)(GLenum, GLint *);
+#define GL_PROGRAM_BINARY_RETRIEVABLE_HINT 0x8257
+#define GL_PROGRAM_BINARY_LENGTH 0x8741
+#define GL_NUM_PROGRAM_BINARY_FORMATS 0x87FE
+
+static uint64_t fnv(uint64_t h, const void *p, size_t n)
+{
+    const uint8_t *b = p;
+    for (size_t i = 0; i < n; i++) {
+        h = (h ^ b[i]) * 1099511628211ull;
+    }
+    return h;
+}
+
 
 #define GL_RGB8 0x8051
 
@@ -81,6 +101,24 @@ typedef struct TexEnt {
     bool valid;
 } TexEnt;
 
+/* Un programa de GL: el de siempre (vértices ya transformados por la CPU) o
+ * uno por cada vertex program del juego (4c, el vertex shader en el GPU).
+ * Cada uno guarda sus uniforms (los valores son de cada programa). */
+#define U_SLOTS 20
+#define MAX_PROG 128
+typedef struct Prog {
+    GLuint prog;
+    uint64_t key;   /* el hash del vertex program (0: el de siempre) */
+    bool bad;       /* no compiló: lo hace la CPU */
+    unsigned used;
+    GLint u_vp, u_tmode, u_tcube, u_tscale, u_cctl, u_fcw0, u_fcw1, u_icw, u_ocw, u_aicw, u_aocw, u_f0, u_f1, u_fog,
+        u_atest, u_afunc, u_aref, u_s2d[4], u_scb[4], u_c;
+    uint8_t ulen[U_SLOTS];
+    uint8_t u[U_SLOTS][128];
+    float c[192 * 4];
+    bool c_ok;
+} Prog;
+
 static struct {
     bool ready, on;
     EGLDisplay dpy;
@@ -89,12 +127,17 @@ static struct {
     char info[160];
     uint8_t *ram;
     uint32_t ram_size;
-    GLuint prog, vao, vbo, ibo;
+    GLuint vao, vbo, ibo;
     GLuint ui_prog, ui_tex, ui_vao;
     int ui_w, ui_h;
-    /* uniforms */
-    GLint u_vp, u_tmode, u_tcube, u_tscale, u_cctl, u_fcw0, u_fcw1, u_icw, u_ocw, u_aicw, u_aocw, u_f0, u_f1, u_fog,
-        u_atest, u_afunc, u_aref, u_s2d[4], u_scb[4];
+    Prog progs[MAX_PROG]; /* [0]: el de siempre */
+    bool bin_ok;          /* el driver da binarios de programas (caché en la SD) */
+    uint64_t drv_hash;    /* el hash del driver y del fragment shader (parte de la clave) */
+    /* el vertex shader en el GPU: sus entradas empaquetadas */
+    GLuint vao2, vbo2;
+    uint16_t vao2_mask;
+    float *vsbuf;
+    size_t vsbuf_n;
     Surf surf[MAX_SURF];
     Zeta zeta[MAX_ZETA];
     Fbo fbo[MAX_FBO];
@@ -280,7 +323,7 @@ static GLuint compile(GLenum type, const char *src)
     return s;
 }
 
-static GLuint link(const char *vs, const char *fs)
+static GLuint link2(const char *vs, const char *fs, bool keep_bin)
 {
     GLuint v = compile(GL_VERTEX_SHADER, vs), f = compile(GL_FRAGMENT_SHADER, fs);
     if (!v || !f) {
@@ -289,6 +332,9 @@ static GLuint link(const char *vs, const char *fs)
     GLuint p = glCreateProgram();
     glAttachShader(p, v);
     glAttachShader(p, f);
+    if (keep_bin && G.bin_ok) {
+        p_glProgramParameteri(p, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
+    }
     glLinkProgram(p);
     GLint ok = 0;
     glGetProgramiv(p, GL_LINK_STATUS, &ok);
@@ -302,6 +348,29 @@ static GLuint link(const char *vs, const char *fs)
         return 0;
     }
     return p;
+}
+
+static GLuint link(const char *vs, const char *fs) { return link2(vs, fs, false); }
+static GLuint link_vs(const char *vs) { return link2(vs, k_fs, true); }
+
+/* Las posiciones de los uniforms de un programa y sus samplers fijos. */
+static void prog_locs(Prog *P)
+{
+#define U(f) P->f = glGetUniformLocation(P->prog, #f)
+    U(u_vp); U(u_tmode); U(u_tcube); U(u_tscale); U(u_cctl); U(u_fcw0); U(u_fcw1); U(u_icw); U(u_ocw);
+    U(u_aicw); U(u_aocw); U(u_f0); U(u_f1); U(u_fog); U(u_atest); U(u_afunc); U(u_aref);
+#undef U
+    P->u_c = glGetUniformLocation(P->prog, "c");
+    glUseProgram(P->prog);
+    static const char *s2[4] = {"s2d0", "s2d1", "s2d2", "s2d3"}, *sc[4] = {"scb0", "scb1", "scb2", "scb3"};
+    for (int i = 0; i < 4; i++) {
+        P->u_s2d[i] = glGetUniformLocation(P->prog, s2[i]);
+        P->u_scb[i] = glGetUniformLocation(P->prog, sc[i]);
+        glUniform1i(P->u_s2d[i], i);
+        glUniform1i(P->u_scb[i], 4 + i);
+    }
+    memset(P->ulen, 0, sizeof(P->ulen));
+    P->c_ok = false;
 }
 
 /* ------------------------------------------------------------ EGL */
@@ -423,24 +492,31 @@ static bool init_inner(void *nwin)
     if (nwin) {
         eglSwapInterval(G.dpy, 0);
     }
+    *(void **)&p_glGetProgramBinary = egl_proc("glGetProgramBinary");
+    *(void **)&p_glProgramBinary = egl_proc("glProgramBinary");
+    *(void **)&p_glProgramParameteri = egl_proc("glProgramParameteri");
+    *(void **)&p_glGetIntegerv = egl_proc("glGetIntegerv");
+    {
+        GLint nf = 0;
+        if (p_glGetIntegerv) {
+            p_glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &nf);
+        }
+        G.bin_ok = nf > 0 && p_glGetProgramBinary && p_glProgramBinary && p_glProgramParameteri;
+        const char *r = (const char *)glGetString(GL_RENDERER), *v = (const char *)glGetString(GL_VERSION);
+        uint64_t h = 1469598103934665603ull;
+        h = fnv(h, r ? r : "", r ? strlen(r) : 0);
+        h = fnv(h, v ? v : "", v ? strlen(v) : 0);
+        h = fnv(h, k_fs, strlen(k_fs));
+        h = fnv(h, "vsh1", 4); /* subir si cambia vsh_glsl */
+        G.drv_hash = h;
+    }
     PASO("shaders");
-    G.prog = link(k_vs, k_fs);
+    G.progs[0].prog = link(k_vs, k_fs);
     G.ui_prog = link(k_ui_vs, k_ui_fs);
-    if (!G.prog || !G.ui_prog) {
+    if (!G.progs[0].prog || !G.ui_prog) {
         return false;
     }
-#define U(f) G.f = glGetUniformLocation(G.prog, #f)
-    U(u_vp); U(u_tmode); U(u_tcube); U(u_tscale); U(u_cctl); U(u_fcw0); U(u_fcw1); U(u_icw); U(u_ocw);
-    U(u_aicw); U(u_aocw); U(u_f0); U(u_f1); U(u_fog); U(u_atest); U(u_afunc); U(u_aref);
-#undef U
-    glUseProgram(G.prog);
-    static const char *s2[4] = {"s2d0", "s2d1", "s2d2", "s2d3"}, *sc[4] = {"scb0", "scb1", "scb2", "scb3"};
-    for (int i = 0; i < 4; i++) {
-        G.u_s2d[i] = glGetUniformLocation(G.prog, s2[i]);
-        G.u_scb[i] = glGetUniformLocation(G.prog, sc[i]);
-        glUniform1i(G.u_s2d[i], i);
-        glUniform1i(G.u_scb[i], 4 + i);
-    }
+    prog_locs(&G.progs[0]);
     glUseProgram(G.ui_prog);
     glUniform1i(glGetUniformLocation(G.ui_prog, "t"), 0);
     PASO("buffers");
@@ -458,6 +534,9 @@ static bool init_inner(void *nwin)
         glVertexAttribPointer((GLuint)i, 4, GL_FLOAT, GL_FALSE, stride, (const void *)(uintptr_t)(off[i] * 4));
     }
     glBindVertexArray(0);
+    glGenVertexArrays(1, &G.vao2);
+    glGenBuffers(1, &G.vbo2);
+    G.vao2_mask = 0;
     snprintf(G.info, sizeof(G.info), "%s · %s", (const char *)glGetString(GL_RENDERER),
              (const char *)glGetString(GL_VERSION));
     G.ready = true;
@@ -470,10 +549,9 @@ static bool init_inner(void *nwin)
 /* ---- caché de estado de gpu_draw: en la Switch cada llamada a mesa cuesta,
  * así que solo se manda lo que cambió desde el dibujo anterior. Cualquier
  * otra función que toque el estado pone SC.valid = false. ---- */
-#define U_SLOTS 20
 static struct {
     bool valid;
-    GLuint fbo, prog;
+    GLuint fbo, prog, vao;
     int vp[4], sc[4];
     int caps; /* bits: 1 scissor, 2 depth clamp, 4 depth test, 8 cull, 16 blend */
     int known_caps;
@@ -481,15 +559,13 @@ static struct {
     int dmask;
     unsigned cmask;
     float bcol[4];
-    uint8_t ulen[U_SLOTS];
-    uint8_t u[U_SLOTS][128];
 } SC;
 
 static void sc_check(void)
 {
     if (!SC.valid) {
         memset(&SC, 0, sizeof(SC));
-        SC.fbo = SC.prog = 0xFFFFFFFFu;
+        SC.fbo = SC.prog = SC.vao = 0xFFFFFFFFu;
         SC.dfunc = SC.cullf = SC.frontf = SC.bsrc = SC.bdst = SC.beq = 0xFFFFFFFFu;
         SC.dmask = -1;
         SC.cmask = 0xFFFFFFFFu;
@@ -513,13 +589,198 @@ static void sc_cap(GLenum cap, int bit, bool on)
     SC.known_caps |= bit;
 }
 /* true: hay que mandar el uniform (y se guarda) */
-static bool sc_u(int slot, const void *v, size_t n)
+static bool sc_u(Prog *P, int slot, const void *v, size_t n)
 {
-    if (SC.ulen[slot] == n && !memcmp(SC.u[slot], v, n)) {
+    if (P->ulen[slot] == n && !memcmp(P->u[slot], v, n)) {
         return false;
     }
-    memcpy(SC.u[slot], v, n);
-    SC.ulen[slot] = (uint8_t)n;
+    memcpy(P->u[slot], v, n);
+    P->ulen[slot] = (uint8_t)n;
+    return true;
+}
+
+/* ---- la caché de shaders en la SD: un archivo por programa, con el binario
+ * que da el driver. La clave incluye el driver y el fragment shader, así que
+ * si cambian (otra versión) los archivos viejos simplemente no se usan. */
+#ifdef __SWITCH__
+#define SHADER_DIR "sdmc:/switch/XboxNX/shaders"
+#endif
+
+static const char *shader_dir(void)
+{
+#ifdef SHADER_DIR
+    return SHADER_DIR;
+#else
+    return getenv("XBOXNX_SHADERS"); /* en la PC (replay): opcional */
+#endif
+}
+
+static void cache_path(char *o, size_t n, uint64_t key)
+{
+    snprintf(o, n, "%s/%016llx.bin", shader_dir(), (unsigned long long)(key ^ G.drv_hash));
+}
+
+static GLuint cache_load(uint64_t key)
+{
+    if (!G.bin_ok || !shader_dir()) {
+        return 0;
+    }
+    char path[300];
+    cache_path(path, sizeof(path), key);
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return 0;
+    }
+    uint32_t hdr[2]; /* formato, tamaño */
+    GLuint p = 0;
+    if (fread(hdr, 4, 2, f) == 2 && hdr[1] > 0 && hdr[1] < (8u << 20)) {
+        void *buf = malloc(hdr[1]);
+        if (buf && fread(buf, 1, hdr[1], f) == hdr[1]) {
+            p = glCreateProgram();
+            p_glProgramBinary(p, hdr[0], buf, (GLsizei)hdr[1]);
+            GLint ok = 0;
+            glGetProgramiv(p, GL_LINK_STATUS, &ok);
+            if (!ok) {
+                glDeleteProgram(p);
+                p = 0;
+            }
+        }
+        free(buf);
+    }
+    fclose(f);
+    return p;
+}
+
+static void cache_save(uint64_t key, GLuint p)
+{
+    if (!G.bin_ok || !shader_dir()) {
+        return;
+    }
+    GLint len = 0;
+    glGetProgramiv(p, GL_PROGRAM_BINARY_LENGTH, &len);
+    if (len <= 0 || len >= (8 << 20)) {
+        return;
+    }
+    void *buf = malloc((size_t)len);
+    if (!buf) {
+        return;
+    }
+    GLenum fmt = 0;
+    GLsizei got = 0;
+    p_glGetProgramBinary(p, len, &got, &fmt, buf);
+    if (got > 0) {
+        mkdir(shader_dir(), 0777);
+        char path[300];
+        cache_path(path, sizeof(path), key);
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            uint32_t hdr[2] = {fmt, (uint32_t)got};
+            fwrite(hdr, 4, 2, f);
+            fwrite(buf, 1, (size_t)got, f);
+            fclose(f);
+            G.st.vs_saved++;
+        }
+    }
+    free(buf);
+}
+
+/* El programa del vertex program de este dibujo (compilado una vez). NULL: no se pudo. */
+static Prog *vs_prog(const GpuDraw *d)
+{
+    int free_i = -1, old = -1;
+    for (int i = 1; i < MAX_PROG; i++) {
+        Prog *P = &G.progs[i];
+        if (P->key == d->vs_key && (P->prog || P->bad)) {
+            P->used = G.frame;
+            return P->bad ? NULL : P;
+        }
+        if (!P->prog && !P->bad) {
+            if (free_i < 0) {
+                free_i = i;
+            }
+        } else if (old < 0 || P->used < G.progs[old].used) {
+            old = i;
+        }
+    }
+    if (!d->vs_src) {
+        return NULL;
+    }
+    int i = free_i >= 0 ? free_i : old;
+    Prog *P = &G.progs[i];
+    if (P->prog) {
+        glDeleteProgram(P->prog);
+    }
+    memset(P, 0, sizeof(*P));
+    P->key = d->vs_key;
+    P->used = G.frame;
+    P->prog = cache_load(d->vs_key);
+    if (P->prog) {
+        G.st.vs_cached++;
+    } else {
+        char keep[sizeof(G.info)];
+        memcpy(keep, G.info, sizeof(keep));
+        P->prog = link_vs(d->vs_src);
+        memcpy(G.info, keep, sizeof(keep));
+        if (P->prog) {
+            cache_save(d->vs_key, P->prog);
+        }
+    }
+    SC.valid = false; /* link / prog_locs cambian el programa puesto */
+    if (!P->prog) {
+        P->bad = true;
+        G.st.vs_bad++;
+        return NULL;
+    }
+    prog_locs(P);
+    G.st.vs_progs++;
+    return P;
+}
+
+/* Las entradas que usa el programa, juntas, al buffer del VAO 2. */
+static bool vs_upload(const GpuDraw *d)
+{
+    unsigned k = (unsigned)__builtin_popcount(d->vs_mask);
+    if (!k) {
+        k = 1;
+    }
+    size_t need = (size_t)d->nverts * k * 4;
+    if (need > G.vsbuf_n) {
+        free(G.vsbuf);
+        G.vsbuf = malloc(need * sizeof(float));
+        G.vsbuf_n = G.vsbuf ? need : 0;
+        if (!G.vsbuf) {
+            return false;
+        }
+    }
+    float *o = G.vsbuf;
+    for (unsigned v = 0; v < d->nverts; v++) {
+        const float *in = d->vs_in + (size_t)v * 64;
+        for (unsigned a = 0; a < 16; a++) {
+            if (d->vs_mask & (1u << a)) {
+                memcpy(o, in + a * 4, 16);
+                o += 4;
+            }
+        }
+    }
+    if (SC.vao != G.vao2) {
+        glBindVertexArray(G.vao2);
+        SC.vao = G.vao2;
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, G.vbo2);
+    if (G.vao2_mask != d->vs_mask) {
+        unsigned at = 0;
+        for (unsigned a = 0; a < 16; a++) {
+            if (d->vs_mask & (1u << a)) {
+                glEnableVertexAttribArray(a);
+                glVertexAttribPointer(a, 4, GL_FLOAT, GL_FALSE, (GLsizei)(k * 16), (const void *)(uintptr_t)(at * 16));
+                at++;
+            } else {
+                glDisableVertexAttribArray(a);
+            }
+        }
+        G.vao2_mask = d->vs_mask;
+    }
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(need * sizeof(float)), G.vsbuf, GL_STREAM_DRAW);
     return true;
 }
 
@@ -931,6 +1192,13 @@ bool gpu_draw(const GpuDraw *d)
     if (d->prim < 5 || d->prim > 10 || d->nverts < 3) {
         return true; /* puntos y líneas: todavía no (el software tampoco) */
     }
+    Prog *P = &G.progs[0];
+    if (d->vs_in) {
+        P = vs_prog(d);
+        if (!P) {
+            return false; /* lo hace la CPU (y luego este mismo camino con los vértices listos) */
+        }
+    }
     int si = surf_get(d->color_pa, d->pitch, d->h, d->fmt);
     int zi = -1;
     if (d->zfmt && d->zeta_pa) {
@@ -1015,9 +1283,9 @@ bool gpu_draw(const GpuDraw *d)
         SC.cmask = d->cmask;
     }
     /* texturas */
-    if (SC.prog != G.prog) {
-        glUseProgram(G.prog);
-        SC.prog = G.prog;
+    if (SC.prog != P->prog) {
+        glUseProgram(P->prog);
+        SC.prog = P->prog;
     }
     GLint tmode[4] = {0}, tcube[4] = {0};
     float tscale[8];
@@ -1043,47 +1311,59 @@ bool gpu_draw(const GpuDraw *d)
         sc_check();
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         SC.fbo = fbo;
-        glUseProgram(G.prog);
-        SC.prog = G.prog;
+        glUseProgram(P->prog);
+        SC.prog = P->prog;
     }
     /* uniforms (solo los que cambiaron) */
     float vp[4] = {2.0f / (float)s->w, 2.0f / (float)s->h, d->zmax > 0 ? 2.0f / d->zmax : 1.0f, 0};
-    if (sc_u(0, vp, sizeof(vp))) glUniform4fv(G.u_vp, 1, vp);
-    if (sc_u(1, tmode, sizeof(tmode))) glUniform1iv(G.u_tmode, 4, tmode);
-    if (sc_u(2, tcube, sizeof(tcube))) glUniform1iv(G.u_tcube, 4, tcube);
-    if (sc_u(3, tscale, sizeof(tscale))) glUniform2fv(G.u_tscale, 4, tscale);
-    if (sc_u(4, &d->cctl, 4)) glUniform1ui(G.u_cctl, d->cctl);
-    if (sc_u(5, &d->fcw0, 4)) glUniform1ui(G.u_fcw0, d->fcw0);
-    if (sc_u(6, &d->fcw1, 4)) glUniform1ui(G.u_fcw1, d->fcw1);
-    if (sc_u(7, d->c_icw, 32)) glUniform1uiv(G.u_icw, 8, d->c_icw);
-    if (sc_u(8, d->c_ocw, 32)) glUniform1uiv(G.u_ocw, 8, d->c_ocw);
-    if (sc_u(9, d->a_icw, 32)) glUniform1uiv(G.u_aicw, 8, d->a_icw);
-    if (sc_u(10, d->a_ocw, 32)) glUniform1uiv(G.u_aocw, 8, d->a_ocw);
-    if (sc_u(11, d->factor0, 32) | sc_u(12, d->factor1, 32)) {
+    if (sc_u(P, 0, vp, sizeof(vp))) glUniform4fv(P->u_vp, 1, vp);
+    if (sc_u(P, 1, tmode, sizeof(tmode))) glUniform1iv(P->u_tmode, 4, tmode);
+    if (sc_u(P, 2, tcube, sizeof(tcube))) glUniform1iv(P->u_tcube, 4, tcube);
+    if (sc_u(P, 3, tscale, sizeof(tscale))) glUniform2fv(P->u_tscale, 4, tscale);
+    if (sc_u(P, 4, &d->cctl, 4)) glUniform1ui(P->u_cctl, d->cctl);
+    if (sc_u(P, 5, &d->fcw0, 4)) glUniform1ui(P->u_fcw0, d->fcw0);
+    if (sc_u(P, 6, &d->fcw1, 4)) glUniform1ui(P->u_fcw1, d->fcw1);
+    if (sc_u(P, 7, d->c_icw, 32)) glUniform1uiv(P->u_icw, 8, d->c_icw);
+    if (sc_u(P, 8, d->c_ocw, 32)) glUniform1uiv(P->u_ocw, 8, d->c_ocw);
+    if (sc_u(P, 9, d->a_icw, 32)) glUniform1uiv(P->u_aicw, 8, d->a_icw);
+    if (sc_u(P, 10, d->a_ocw, 32)) glUniform1uiv(P->u_aocw, 8, d->a_ocw);
+    if (sc_u(P, 11, d->factor0, 32) | sc_u(P, 12, d->factor1, 32)) {
         float f0[32], f1[32];
         for (int i = 0; i < 8; i++) {
             argb_vec(d->factor0[i], &f0[4 * i]);
             argb_vec(d->factor1[i], &f1[4 * i]);
         }
-        glUniform4fv(G.u_f0, 8, f0);
-        glUniform4fv(G.u_f1, 8, f1);
+        glUniform4fv(P->u_f0, 8, f0);
+        glUniform4fv(P->u_f1, 8, f1);
     }
-    if (sc_u(13, &d->fog_color, 4)) {
+    if (sc_u(P, 13, &d->fog_color, 4)) {
         float fog[4];
         argb_vec(d->fog_color, fog);
-        glUniform4fv(G.u_fog, 1, fog);
+        glUniform4fv(P->u_fog, 1, fog);
     }
     int at = d->atest;
-    if (sc_u(14, &at, 4)) glUniform1i(G.u_atest, d->atest);
-    if (sc_u(15, &d->afunc, 4)) glUniform1ui(G.u_afunc, d->afunc);
-    if (sc_u(16, &d->aref, 4)) glUniform1f(G.u_aref, (float)(d->aref & 0xFF));
+    if (sc_u(P, 14, &at, 4)) glUniform1i(P->u_atest, d->atest);
+    if (sc_u(P, 15, &d->afunc, 4)) glUniform1ui(P->u_afunc, d->afunc);
+    if (sc_u(P, 16, &d->aref, 4)) glUniform1f(P->u_aref, (float)(d->aref & 0xFF));
     /* vértices */
-    if (!(SC.known_caps & 32)) {
-        glBindVertexArray(G.vao);
+    if (d->vs_in) {
+        if (!P->c_ok || memcmp(P->c, d->vs_consts, sizeof(P->c))) {
+            glUniform4fv(P->u_c, 192, d->vs_consts);
+            memcpy(P->c, d->vs_consts, sizeof(P->c));
+            P->c_ok = true;
+        }
+        if (!vs_upload(d)) {
+            return false;
+        }
+        G.st.vs_draws++;
+    } else {
+        if (SC.vao != G.vao) {
+            glBindVertexArray(G.vao);
+            SC.vao = G.vao;
+        }
         glBindBuffer(GL_ARRAY_BUFFER, G.vbo);
-        SC.known_caps |= 32;
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)d->nverts * GPU_VERT_FLOATS * 4, d->verts, GL_STREAM_DRAW);
     }
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)d->nverts * GPU_VERT_FLOATS * 4, d->verts, GL_STREAM_DRAW);
     unsigned n = d->nverts;
     switch (d->prim) {
     case 5: glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(n - n % 3)); break;

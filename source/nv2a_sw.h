@@ -24,6 +24,8 @@ typedef struct SwStats {
     unsigned draws;        /* dibujos hechos */
     unsigned skipped_ff;   /* dibujos con función fija (todavía no) */
     unsigned vs_errors;    /* programas que no se pudieron leer */
+    unsigned vs_gpu_draws; /* 4c: dibujos con el vertex shader en el GPU */
+    unsigned vs_untranslated; /* programas que no se pudieron pasar a GLSL */
     unsigned no_target;    /* sin superficie donde dibujar */
     unsigned skipped_frames_draws; /* dibujos no hechos por saltar cuadros */
     unsigned no_target_why; /* 1 formato, 2 pitch, 3 swizzle, 4 sin DMA, 5 recorte, 6 memoria */
@@ -52,5 +54,7 @@ void sw_state_get(void *out);
 void sw_state_set(const void *in);
 /* Saltar los dibujos (los cuadros que no se van a ver). */
 void sw_set_skip(bool skip);
+/* 4c: el vertex program en el GPU (por defecto sí). */
+void sw_set_vs_gpu(bool on);
 
 #endif
