@@ -88,12 +88,16 @@ int main(int argc, char **argv)
             fprintf(stderr, "sin GPU: %s\n", gpu_info());
             return 1;
         }
+        if (getenv("GPU_MT") && !gpu_thread_start()) { /* etapa 5: la GPU en su hilo */
+            fprintf(stderr, "no se pudo poner la GPU en su hilo\n");
+        }
         gpu_set_ram(g_ram, RAM);
         gpu_enable(true);
         if (getenv("PRE")) { /* cuadros previos: los shaders guardados se compilan de a uno */
             for (int i = atoi(getenv("PRE")); i > 0; i--) {
                 gpu_end_frame();
             }
+            gpu_flush_all(); /* con el hilo: esperar a que los compile */
         }
         if (!getenv("PRESUPUESTO")) { /* un solo cuadro: todos los programas ya, para comparar la imagen */
             gpu_set_link_budget(~0ull);
@@ -196,6 +200,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "GPU: %u dibujos, %u a la CPU; vs en el GPU %u (%u programas, %u sin compilar, %u sin traducir)\n",
                 g->draws, g->fallbacks, g->vs_draws, g->vs_progs, g->vs_bad, st->vs_untranslated);
         fprintf(stderr, "caché de shaders: %u leídos, %u guardados · constantes subidas %u vec4 · con índices %u\n", g->vs_cached, g->vs_saved, g->vs_const_vec, g->indexed);
+        if (g->mt) {
+            fprintf(stderr, "hilo GPU: %u dibujos por la cola, %u perdidos, %.1f ms ocupado, juego: %.1f ms copiando, %.1f ms esperando lugar, %u esperas (%.1f ms), cola máx %.1f MB\n",
+                    g->mt_draws, g->mt_lost, g->ns_busy / 1e6, g->ns_enq / 1e6, g->ns_qwait / 1e6, g->syncs, g->ns_sync / 1e6,
+                    g->q_max / 1048576.0);
+        }
         fprintf(stderr, "compilar programas: %.1f ms (%s) · %u dibujos esperaron · %u guardados de antes, %u por adelantado\n",
                 (double)g->ns_link / 1e6, g->sso ? "por etapas" : "enteros", g->vs_deferred, g->vs_known, g->vs_pre);
     }

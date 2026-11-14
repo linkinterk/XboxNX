@@ -14,6 +14,7 @@
 #include <time.h>
 
 #include "prof.h"
+#include "gpu.h"
 
 #ifdef __SWITCH__
 #include <switch.h>
@@ -28,6 +29,7 @@ typedef struct {
 
 static Slot g_h[HSIZE];
 static uint32_t g_total, g_out[PROF_N + 1], g_zh[Z_N];
+static uint32_t g_gz[Z_N + 1], g_gn; /* el hilo de la GPU: por zona, [Z_N] sin trabajo */
 static const volatile uint32_t *g_cur;
 static Vm *g_vm;
 static const char *g_version;
@@ -138,6 +140,15 @@ static void report(FILE *f, unsigned secs)
         }
     }
     fprintf(f, "\n");
+    if (g_gn) {
+        fprintf(f, "Hilo de la GPU (núcleo 2): ocupado %.1f%%; por pasos:", 100.0 * (g_gn - g_gz[Z_N]) / g_gn);
+        for (int z = 0; z < Z_N; z++) {
+            if (g_gz[z]) {
+                fprintf(f, " %s %.1f%%", zone_name(z), 100.0 * g_gz[z] / g_gn);
+            }
+        }
+        fprintf(f, "\n");
+    }
     if (g_out[PROF_GPU]) {
         fprintf(f, "GPU por pasos:");
         for (int z = 0; z < Z_N; z++) {
@@ -199,6 +210,11 @@ static void thr(void *arg)
             }
         }
         g_total++;
+        int gz = gpu_thread_zone();
+        if (gz >= -1) {
+            g_gz[gz >= 0 && gz < Z_N ? gz : Z_N]++;
+            g_gn++;
+        }
         uint64_t now = armGetSystemTick();
         if (armTicksToNs(now - t_cn) >= 1000000000ull) {
             t_cn = now;
@@ -215,6 +231,8 @@ static void thr(void *arg)
             memset(g_h, 0, sizeof(g_h));
             memset(g_out, 0, sizeof(g_out));
             memset(g_zh, 0, sizeof(g_zh));
+            memset(g_gz, 0, sizeof(g_gz));
+            g_gn = 0;
             g_total = 0;
         }
     }
@@ -256,6 +274,8 @@ void sampler_start(const volatile uint32_t *cur, Vm *vm, const char *version)
     (void)g_total;
     (void)g_out;
     (void)g_zh;
+    (void)g_gz;
+    (void)g_gn;
     (void)g_cur;
     (void)g_vm;
     (void)g_version;

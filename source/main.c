@@ -35,7 +35,7 @@
 #include "apu/apu.h"
 #include <time.h>
 
-#define APP_VER   "0.18.56"
+#define APP_VER   "0.18.57"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -618,6 +618,14 @@ int main(int argc, char **argv)
     if (probar) {
         if (gpu_init(NULL)) {
             gpu_log_line("activa");
+            /* etapa 5: el dibujo en su propio hilo (núcleo 2); para probar sin
+             * él: crear sdmc:/switch/XboxNX/gpu_un_hilo.txt */
+            struct stat sb;
+            if (stat("sdmc:/switch/XboxNX/gpu_un_hilo.txt", &sb) == 0) {
+                gpu_log_line("hilo propio: no (gpu_un_hilo.txt)");
+            } else {
+                gpu_log_line(gpu_thread_start() ? "hilo propio: sí" : "hilo propio: no se pudo");
+            }
         }
         gpu_log_line(gpu_info());
     }

@@ -123,7 +123,15 @@ typedef struct GpuStats {
     bool sso;             /* programas por etapa: el fragment shader se compila una sola vez */
     uint64_t ns_link;     /* tiempo compilando programas */
     uint64_t ns_rp;       /* tiempo dentro de glReadPixels al terminar cada cuadro */
-    unsigned clears_c, clears_z, clear_bind, clear_new; /* borrados de color / Z, cuántos cambiaron de FBO, cuántos crearon superficie */
+    unsigned clears_c, clears_z, clear_bind, clear_new;
+    /* etapa 5: la GPU en su hilo */
+    bool mt;
+    unsigned mt_draws, mt_lost, syncs;
+    uint64_t ns_busy;  /* el hilo de la GPU ejecutando órdenes */
+    uint64_t ns_enq;   /* el juego copiando dibujos a la cola */
+    uint64_t ns_qwait; /* el juego esperando lugar en la cola (la GPU no da abasto) */
+    uint64_t ns_sync;  /* el juego esperando una respuesta del hilo */
+    uint64_t q_max;    /* lo más lleno que estuvo la cola (bytes) */ /* borrados de color / Z, cuántos cambiaron de FBO, cuántos crearon superficie */
     int rp_mode;          /* 0 probando, 1 BGRA, 2 RGBA (cambiando R y B en la CPU) */
     unsigned rp_us[2];    /* µs por lectura con cada forma, en la prueba */
     unsigned indexed; /* etapa 5: dibujos con índices (cada vértice una vez) */
@@ -143,6 +151,10 @@ int gpu_vs_state(uint64_t key);
 bool gpu_vs_prepare(uint64_t key, const char *src);
 /* Al salir de la app. */
 void gpu_exit(void);
+/* Etapa 5: pasar el dibujo a un hilo propio (con gpu_init hecho). false: sigue en este. */
+bool gpu_thread_start(void);
+/* Para el muestreo: qué hace el hilo de la GPU (-2 no hay hilo, -1 espera órdenes, si no la zona de prof.h). */
+int gpu_thread_zone(void);
 
 /* Olvidar todas las superficies y texturas (otra ejecución, o la RAM cambió por otro lado). */
 void gpu_reset(void);

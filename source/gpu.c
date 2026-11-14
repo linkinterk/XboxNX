@@ -20,7 +20,60 @@
 
 #ifdef __SWITCH__
 #include <switch.h>
+#else
+#include <pthread.h>
 #endif
+
+/* Etapa 5: con la GPU en su propio hilo, las zonas de ese hilo van a otra
+ * variable (g_zone es la del hilo principal: la que mira el muestreo). */
+static volatile int g_zone_gpu;
+static __thread bool t_gpu_thread;
+static inline volatile int *zone_ptr(void) { return t_gpu_thread ? &g_zone_gpu : &g_zone; }
+#define g_zone (*zone_ptr())
+
+/* Qué vertex shaders tiene listos el hilo de la GPU, para que el hilo
+ * principal decida sin preguntarle (0 no, 1 pedido, 2 listo, 3 no compila).
+ * La escribe el hilo de la GPU (y el principal al pedir); se lee sin candado. */
+#define VT_N 8192
+static struct {
+    uint64_t key;
+    int st;
+} VT[VT_N];
+static int g_vt_lock;
+
+static int vt_get(uint64_t key)
+{
+    for (unsigned i = (unsigned)(key >> 1) & (VT_N - 1), n = 0; n < 64; n++, i = (i + 1) & (VT_N - 1)) {
+        uint64_t k = __atomic_load_n(&VT[i].key, __ATOMIC_ACQUIRE);
+        if (k == key) {
+            return __atomic_load_n(&VT[i].st, __ATOMIC_ACQUIRE);
+        }
+        if (!k) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+static void vt_set(uint64_t key, int st)
+{
+    if (!key) {
+        return;
+    }
+    while (__atomic_exchange_n(&g_vt_lock, 1, __ATOMIC_ACQUIRE)) {
+    }
+    for (unsigned i = (unsigned)(key >> 1) & (VT_N - 1), n = 0; n < 64; n++, i = (i + 1) & (VT_N - 1)) {
+        uint64_t k = VT[i].key;
+        if (k == key || !k) {
+            __atomic_store_n(&VT[i].st, st, __ATOMIC_RELEASE);
+            if (!k) {
+                __atomic_store_n(&VT[i].key, key, __ATOMIC_RELEASE);
+            }
+            break;
+        }
+    }
+    __atomic_store_n(&g_vt_lock, 0, __ATOMIC_RELEASE);
+}
 
 /* ------------------------------------------------------------ cargador */
 
@@ -199,12 +252,12 @@ static struct {
 
 const GpuStats *gpu_stats(void) { return &G.st; }
 bool gpu_ready(void) { return G.ready; }
-void gpu_enable(bool on) { G.on = on && G.ready; }
+static void impl_enable(bool on) { G.on = on && G.ready; }
 bool gpu_enabled(void) { return G.on; }
 const char *gpu_info(void) { return G.info; }
 void gpu_set_info(const char *t) { snprintf(G.info, sizeof(G.info), "%s", t); }
 
-void gpu_set_ram(uint8_t *ram, uint32_t size)
+static void impl_set_ram(uint8_t *ram, uint32_t size)
 {
     G.ram = ram;
     G.ram_size = size;
@@ -560,7 +613,7 @@ static void teardown(void)
 }
 
 /* Al salir de la app: soltar el contexto y la memoria del driver. */
-void gpu_exit(void)
+static void impl_exit(void)
 {
     if (G.dpy == EGL_NO_DISPLAY) {
         return;
@@ -769,7 +822,7 @@ static bool init_inner(void *nwin)
 
 /* ------------------------------------------------------------ superficies */
 
-/* ---- caché de estado de gpu_draw: en la Switch cada llamada a mesa cuesta,
+/* ---- caché de estado de impl_draw: en la Switch cada llamada a mesa cuesta,
  * así que solo se manda lo que cambió desde el dibujo anterior. Cualquier
  * otra función que toque el estado pone SC.valid = false. ---- */
 static struct {
@@ -963,6 +1016,9 @@ static Prog *prog_slot(bool evict)
     if (P->prog && SC.prog == P->prog) {
         SC.prog = 0; /* el nombre GL se puede repetir en el siguiente: que se vuelva a poner */
     }
+    if (P->key) {
+        vt_set(P->key, 0); /* el hilo principal tendrá que pedirlo otra vez */
+    }
     prog_free(P);
     memset(P, 0, sizeof(*P));
     return P;
@@ -994,6 +1050,7 @@ static bool prog_build(Prog *P, uint64_t key, const char *src)
     if (P->prog) {
         prog_locs(P);
         G.st.vs_progs++;
+        vt_set(key, 2);
     }
     uint64_t dt = now_ns() - t0;
     if (G.link_frame != G.frame) {
@@ -1123,7 +1180,7 @@ static void pre_step(void)
     }
 }
 
-int gpu_vs_state(uint64_t key)
+static int impl_vs_state(uint64_t key)
 {
     if (!G.on) {
         return 2;
@@ -1132,7 +1189,7 @@ int gpu_vs_state(uint64_t key)
     return !P ? 0 : P->bad ? 2 : 1;
 }
 
-bool gpu_vs_prepare(uint64_t key, const char *src)
+static bool impl_vs_prepare(uint64_t key, const char *src)
 {
     if (!G.on) {
         return false;
@@ -1163,6 +1220,7 @@ bool gpu_vs_prepare(uint64_t key, const char *src)
         P->key = key;
         P->bad = true;
         G.st.vs_bad++;
+        vt_set(key, 3);
     }
     g_zone = zone;
     return ok;
@@ -1172,7 +1230,7 @@ bool gpu_vs_prepare(uint64_t key, const char *src)
  * (o todavía no: ver g_link_budget). */
 static Prog *vs_prog(const GpuDraw *d)
 {
-    if (!gpu_vs_prepare(d->vs_key, d->vs_src)) {
+    if (!impl_vs_prepare(d->vs_key, d->vs_src)) {
         return NULL;
     }
     Prog *P = prog_find(d->vs_key);
@@ -1412,7 +1470,7 @@ static void rb_finish_(bool wait)
 }
 
 /* Lo que la GPU ya terminó, a la RAM, sin esperar (antes de mostrar la pantalla). */
-void gpu_readback_poll(void)
+static void impl_readback_poll(void)
 {
     if (G.ready) {
         rb_finish(false);
@@ -1491,7 +1549,7 @@ static void surf_flush(int i)
         return;
     }
     glBindFramebuffer(GL_READ_FRAMEBUFFER, s->fbo);
-    SC.valid = false; /* la caché de estado de gpu_draw ya no vale */
+    SC.valid = false; /* la caché de estado de impl_draw ya no vale */
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glPixelStorei(GL_PACK_ROW_LENGTH, (GLint)(s->pitch / 4));
     glReadPixels(0, 0, s->w, s->h, GL_BGRA, GL_UNSIGNED_BYTE, G.ram + s->pa);
@@ -1567,7 +1625,7 @@ static int surf_get(uint32_t pa, uint32_t pitch, int h, unsigned fmt)
     surf_upload(s);
     glGenFramebuffers(1, &s->fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, s->fbo);
-    SC.valid = false; /* la caché de estado de gpu_draw ya no vale */
+    SC.valid = false; /* la caché de estado de impl_draw ya no vale */
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->tex, 0);
     G.st.surfaces++;
     return best;
@@ -1648,7 +1706,7 @@ static GLuint fbo_get(int si, int zi)
     o->zeta = zi;
     glGenFramebuffers(1, &o->fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, o->fbo);
-    SC.valid = false; /* la caché de estado de gpu_draw ya no vale */
+    SC.valid = false; /* la caché de estado de impl_draw ya no vale */
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, G.surf[si].tex, 0);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, G.zeta[zi].rb);
     Zeta *z = &G.zeta[zi];
@@ -1677,7 +1735,7 @@ static void flush_range(uint32_t pa, uint32_t len)
     }
 }
 
-void gpu_flush_surface(uint32_t pa)
+static void impl_flush_surface(uint32_t pa)
 {
     if (!G.ready) {
         return;
@@ -1688,7 +1746,7 @@ void gpu_flush_surface(uint32_t pa)
     }
 }
 
-void gpu_flush_surface_async(uint32_t pa)
+static void impl_flush_surface_async(uint32_t pa)
 {
     if (!G.ready) {
         return;
@@ -1699,7 +1757,7 @@ void gpu_flush_surface_async(uint32_t pa)
     }
 }
 
-void gpu_flush_all(void)
+static void impl_flush_all(void)
 {
     if (!G.ready) {
         return;
@@ -1712,7 +1770,7 @@ void gpu_flush_all(void)
     }
 }
 
-void gpu_invalidate(uint32_t pa, uint32_t len)
+static void impl_invalidate(uint32_t pa, uint32_t len)
 {
     if (!G.ready) {
         return;
@@ -1906,7 +1964,7 @@ static bool gpu_draw_(const GpuDraw *d);
 static GLuint g_q[MAX_Q];
 static unsigned g_qn;
 
-bool gpu_draw(const GpuDraw *d)
+static bool impl_draw(const GpuDraw *d)
 {
     ZONE_SET(Z_GL_STATE);
     uint64_t t0 = now_ns();
@@ -1929,7 +1987,7 @@ bool gpu_draw(const GpuDraw *d)
     return ok;
 }
 
-uint32_t gpu_query_collect(void)
+static uint32_t impl_query_collect(void)
 {
     if (!G.ready) {
         return 0;
@@ -1948,7 +2006,7 @@ uint32_t gpu_query_collect(void)
     return sum > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)sum;
 }
 
-void gpu_query_reset(void) { g_qn = 0; }
+static void impl_query_reset(void) { g_qn = 0; }
 
 static bool gpu_draw_(const GpuDraw *d)
 {
@@ -2289,7 +2347,7 @@ static void clear_rect(int x0, int y0, int x1, int y1)
     }
 }
 
-bool gpu_clear_color(uint32_t pa, uint32_t pitch, int h, int x0, int y0, int x1, int y1, uint32_t argb, unsigned mask)
+static bool impl_clear_color(uint32_t pa, uint32_t pitch, int h, int x0, int y0, int x1, int y1, uint32_t argb, unsigned mask)
 {
     if (!G.on || !G.ram || pitch < 4 || h <= 0) {
         return false;
@@ -2327,7 +2385,7 @@ bool gpu_clear_color(uint32_t pa, uint32_t pitch, int h, int x0, int y0, int x1,
     return true;
 }
 
-bool gpu_clear_zeta(uint32_t pa, uint32_t zpitch, int h, int x0, int y0, int x1, int y1, uint32_t value, unsigned zfmt,
+static bool impl_clear_zeta(uint32_t pa, uint32_t zpitch, int h, int x0, int y0, int x1, int y1, uint32_t value, unsigned zfmt,
                     unsigned flags)
 {
     if (!G.on || !(flags & 3)) {
@@ -2392,7 +2450,7 @@ bool gpu_clear_zeta(uint32_t pa, uint32_t zpitch, int h, int x0, int y0, int x1,
     return true;
 }
 
-void gpu_end_frame(void)
+static void impl_end_frame(void)
 {
     if (G.on) {
         int zone = g_zone;
@@ -2403,7 +2461,7 @@ void gpu_end_frame(void)
     G.frame++;
 }
 
-void gpu_reset(void)
+static void impl_reset(void)
 {
     if (!G.ready) {
         return;
@@ -2441,7 +2499,7 @@ void gpu_reset(void)
 
 /* ------------------------------------------------------------ pantalla */
 
-bool gpu_present_ui(const uint32_t *rgba, int w, int h)
+static bool impl_present_ui(const uint32_t *rgba, int w, int h)
 {
     if (!G.ready || G.win == EGL_NO_SURFACE) {
         return false;
@@ -2463,7 +2521,7 @@ bool gpu_present_ui(const uint32_t *rgba, int w, int h)
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    SC.valid = false; /* la caché de estado de gpu_draw ya no vale */
+    SC.valid = false; /* la caché de estado de impl_draw ya no vale */
     EGLint sw = w, sh = h;
     eglQuerySurface(G.dpy, G.win, EGL_WIDTH, &sw);
     eglQuerySurface(G.dpy, G.win, EGL_HEIGHT, &sh);
@@ -2479,6 +2537,720 @@ bool gpu_present_ui(const uint32_t *rgba, int w, int h)
     glBindVertexArray(0);
     eglSwapBuffers(G.dpy, G.win);
     return true;
+}
+
+
+/* ============================================================ etapa 5: la GPU en su propio hilo
+ *
+ * El hilo principal (el juego) ya no llama a OpenGL: deja cada orden en una
+ * cola (un anillo de bytes, con copia de todo lo que el dibujo necesita) y un
+ * hilo en el núcleo 2 las ejecuta con el contexto GL. Así el juego sigue
+ * mientras la GPU (y el driver) trabajan. Lo que necesita una respuesta
+ * (copiar superficies a la RAM, las pruebas de visibilidad...) espera a que
+ * el hilo llegue a esa orden. Sin el hilo (o en la PC, sin GPU_MT=1), todo
+ * se llama directo como antes. */
+
+#ifdef __SWITCH__
+typedef Mutex QMutex;
+typedef CondVar QCond;
+#define qm_init(m) mutexInit(m)
+#define qm_lock(m) mutexLock(m)
+#define qm_unlock(m) mutexUnlock(m)
+#define qc_init(c) condvarInit(c)
+#define qc_wait(c, m, ns) condvarWaitTimeout(c, m, ns)
+#define qc_signal(c) condvarWakeOne(c)
+#define qc_all(c) condvarWakeAll(c)
+#else
+typedef pthread_mutex_t QMutex;
+typedef pthread_cond_t QCond;
+#define qm_init(m) pthread_mutex_init(m, NULL)
+#define qm_lock(m) pthread_mutex_lock(m)
+#define qm_unlock(m) pthread_mutex_unlock(m)
+#define qc_init(c) pthread_cond_init(c, NULL)
+static void qc_wait(QCond *c, QMutex *m, uint64_t ns)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    t.tv_nsec += (long)ns;
+    t.tv_sec += t.tv_nsec / 1000000000L;
+    t.tv_nsec %= 1000000000L;
+    pthread_cond_timedwait(c, m, &t);
+}
+#define qc_signal(c) pthread_cond_signal(c)
+#define qc_all(c) pthread_cond_broadcast(c)
+#endif
+
+#ifndef Q_SIZE
+#define Q_SIZE (32u << 20)
+#endif
+enum { C_PAD, C_DRAW, C_CLEAR_C, C_CLEAR_Z, C_FLIP, C_END_FRAME, C_INVAL, C_QRESET, C_COMPILE, C_CALL };
+
+typedef struct QHdr {
+    uint32_t type, len; /* len: todo, múltiplo de 16 */
+    uint64_t pad_;
+} QHdr;
+
+typedef struct CDraw {
+    GpuDraw d;
+    uint32_t o_verts, o_in, o_pk, o_idx, o_src; /* desde el principio de la orden (0: no hay) */
+    bool consts_new;                           /* las constantes vienen (si no: las de la orden anterior) */
+} CDraw;
+
+typedef struct CClear {
+    uint32_t pa, pitch, argb, value, zfmt, mask;
+    int h, x0, y0, x1, y1;
+} CClear;
+
+typedef struct CCall {
+    void (*fn)(void *);
+    void *arg;
+    uint64_t id;
+} CCall;
+
+static struct {
+    bool on;          /* el hilo corre */
+    bool quit;
+    uint8_t *buf;
+    uint64_t head;    /* lo que ya ejecutó el hilo (bytes, crece siempre) */
+    uint64_t tail;    /* lo que dejó el principal */
+    uint64_t wpos;    /* el principal: dónde va la orden que está escribiendo */
+    uint64_t done;    /* la última orden C_CALL terminada */
+    uint64_t next_id;
+    int cons_wait, prod_wait;
+    QMutex m;
+    QCond more, space, synced;
+    /* el principal: las constantes de la última orden (para no copiarlas si no cambiaron) */
+    float last_c[192 * 4];
+    bool last_c_ok;
+    /* el hilo: las constantes vigentes */
+    float cur_c[192 * 4];
+    /* vertex shaders pedidos (se compilan cuando el hilo no tiene otra cosa) */
+    struct {
+        uint64_t key;
+        char *src;
+    } pend[64];
+    int npend;
+    bool ready, failed; /* el hilo tomó el contexto GL */
+#ifdef __SWITCH__
+    Thread thr;
+#else
+    pthread_t thr;
+#endif
+} Q;
+
+static void q_wake_consumer(void)
+{
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&Q.cons_wait, __ATOMIC_SEQ_CST)) {
+        qm_lock(&Q.m);
+        qc_signal(&Q.more);
+        qm_unlock(&Q.m);
+    }
+}
+
+/* Espacio para una orden de len bytes (contiguos). */
+static uint8_t *q_reserve(uint32_t len)
+{
+    uint64_t t = Q.tail;
+    uint32_t off = (uint32_t)(t & (Q_SIZE - 1)), room = Q_SIZE - off;
+    uint64_t need = len + (room < len ? room : 0);
+    if (t + need - __atomic_load_n(&Q.head, __ATOMIC_ACQUIRE) > Q_SIZE) {
+        uint64_t t0 = now_ns();
+        qm_lock(&Q.m);
+        __atomic_store_n(&Q.prod_wait, 1, __ATOMIC_SEQ_CST);
+        while (t + need - __atomic_load_n(&Q.head, __ATOMIC_SEQ_CST) > Q_SIZE) {
+            qc_wait(&Q.space, &Q.m, 2000000);
+        }
+        __atomic_store_n(&Q.prod_wait, 0, __ATOMIC_SEQ_CST);
+        qm_unlock(&Q.m);
+        G.st.ns_qwait += now_ns() - t0;
+    }
+    if (room < len) { /* no cabe hasta el final: relleno y desde el principio */
+        QHdr *p = (QHdr *)(void *)(Q.buf + off);
+        p->type = C_PAD;
+        p->len = room;
+        t += room;
+        off = 0;
+    }
+    Q.wpos = t;
+    return Q.buf + off;
+}
+
+static void q_commit(uint32_t len)
+{
+    Q.tail = Q.wpos + len;
+    __atomic_store_n(&Q.tail, Q.tail, __ATOMIC_RELEASE);
+    uint64_t used = Q.tail - __atomic_load_n(&Q.head, __ATOMIC_RELAXED);
+    if (used > G.st.q_max) {
+        G.st.q_max = used;
+    }
+    q_wake_consumer();
+}
+
+static inline uint32_t q_al(size_t n) { return (uint32_t)((n + 15) & ~(size_t)15); }
+
+/* Una orden sin más datos que su estructura. */
+static void q_simple(uint32_t type, const void *body, uint32_t n)
+{
+    uint32_t len = q_al(sizeof(QHdr) + n);
+    uint8_t *p = q_reserve(len);
+    QHdr *h = (QHdr *)(void *)p;
+    h->type = type;
+    h->len = len;
+    if (n) {
+        memcpy(p + sizeof(QHdr), body, n);
+    }
+    q_commit(len);
+}
+
+/* Ejecutar fn(arg) en el hilo de la GPU y esperar a que termine. */
+static void q_call(void (*fn)(void *), void *arg)
+{
+    CCall c = {fn, arg, ++Q.next_id};
+    q_simple(C_CALL, &c, sizeof(c));
+    if (__atomic_load_n(&Q.done, __ATOMIC_ACQUIRE) >= c.id) {
+        return;
+    }
+    uint64_t t0 = now_ns();
+    qm_lock(&Q.m);
+    while (__atomic_load_n(&Q.done, __ATOMIC_ACQUIRE) < c.id) {
+        qc_wait(&Q.synced, &Q.m, 2000000);
+    }
+    qm_unlock(&Q.m);
+    G.st.ns_sync += now_ns() - t0;
+    G.st.syncs++;
+}
+
+/* ---- el hilo de la GPU ---- */
+
+static void q_compile_one(void)
+{
+    if (!Q.npend) {
+        return;
+    }
+    uint64_t key = Q.pend[0].key;
+    char *src = Q.pend[0].src;
+    memmove(&Q.pend[0], &Q.pend[1], (size_t)(Q.npend - 1) * sizeof(Q.pend[0]));
+    Q.npend--;
+    uint64_t keep = g_link_budget;
+    g_link_budget = ~0ull; /* aquí no estorba al juego */
+    if (!impl_vs_prepare(key, src) && vt_get(key) == 1) {
+        vt_set(key, 0);
+    }
+    g_link_budget = keep;
+    free(src);
+}
+
+static void q_exec(const QHdr *h)
+{
+    const uint8_t *body = (const uint8_t *)h + sizeof(QHdr);
+    switch (h->type) {
+    case C_DRAW: {
+        CDraw c;
+        memcpy(&c, body, sizeof(c));
+        const uint8_t *b = (const uint8_t *)h;
+        GpuDraw *d = &c.d;
+        d->verts = c.o_verts ? (const float *)(const void *)(b + c.o_verts) : NULL;
+        d->vs_in = c.o_in ? (const float *)(const void *)(b + c.o_in) : NULL;
+        d->vs_pk = c.o_pk ? (const float *)(const void *)(b + c.o_pk) : NULL;
+        d->vs_idx = c.o_idx ? (const uint32_t *)(const void *)(b + c.o_idx) : NULL;
+        d->vs_src = c.o_src ? (const char *)(b + c.o_src) : NULL;
+        if (d->vs_consts) {
+            if (c.consts_new) {
+                memcpy(Q.cur_c, body + q_al(sizeof(CDraw)), sizeof(Q.cur_c));
+            }
+            d->vs_consts = Q.cur_c;
+        }
+        if (!impl_draw(d)) {
+            G.st.mt_lost++;
+        }
+        break;
+    }
+    case C_CLEAR_C: {
+        CClear c;
+        memcpy(&c, body, sizeof(c));
+        impl_clear_color(c.pa, c.pitch, c.h, c.x0, c.y0, c.x1, c.y1, c.argb, c.mask);
+        break;
+    }
+    case C_CLEAR_Z: {
+        CClear c;
+        memcpy(&c, body, sizeof(c));
+        impl_clear_zeta(c.pa, c.pitch, c.h, c.x0, c.y0, c.x1, c.y1, c.value, c.zfmt, c.mask);
+        break;
+    }
+    case C_FLIP: {
+        uint32_t pa;
+        memcpy(&pa, body, 4);
+        impl_flush_surface_async(pa);
+        break;
+    }
+    case C_END_FRAME:
+        impl_end_frame();
+        q_compile_one(); /* a lo sumo uno por cuadro aunque la cola no se vacíe */
+        break;
+    case C_INVAL: {
+        uint32_t v[2];
+        memcpy(v, body, 8);
+        impl_invalidate(v[0], v[1]);
+        break;
+    }
+    case C_QRESET:
+        impl_query_reset();
+        break;
+    case C_COMPILE: {
+        uint64_t key;
+        memcpy(&key, body, 8);
+        const char *src = (const char *)body + 8;
+        if (Q.npend < (int)(sizeof(Q.pend) / sizeof(Q.pend[0]))) {
+            size_t l = strlen(src) + 1;
+            char *cp = malloc(l);
+            if (cp) {
+                memcpy(cp, src, l);
+                Q.pend[Q.npend].key = key;
+                Q.pend[Q.npend].src = cp;
+                Q.npend++;
+                break;
+            }
+        }
+        vt_set(key, 0); /* no hay lugar: que lo pida otra vez */
+        break;
+    }
+    case C_CALL: {
+        CCall c;
+        memcpy(&c, body, sizeof(c));
+        c.fn(c.arg);
+        __atomic_store_n(&Q.done, c.id, __ATOMIC_RELEASE);
+        qm_lock(&Q.m);
+        qc_all(&Q.synced);
+        qm_unlock(&Q.m);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+static void q_loop(void)
+{
+    t_gpu_thread = true;
+    if (!eglMakeCurrent(G.dpy, G.win, G.win, G.ctx)) {
+        Q.failed = true;
+        __atomic_store_n(&Q.ready, true, __ATOMIC_RELEASE);
+        return;
+    }
+    __atomic_store_n(&Q.ready, true, __ATOMIC_RELEASE);
+    uint64_t t_busy = 0;
+    for (;;) {
+        uint64_t h = Q.head;
+        uint64_t t = __atomic_load_n(&Q.tail, __ATOMIC_ACQUIRE);
+        if (h == t) {
+            if (__atomic_load_n(&Q.quit, __ATOMIC_ACQUIRE)) {
+                break;
+            }
+            if (Q.npend) { /* sin órdenes: un vertex shader pedido */
+                uint64_t t0 = now_ns();
+                q_compile_one();
+                G.st.ns_busy += now_ns() - t0;
+                continue;
+            }
+            impl_readback_poll(); /* el cuadro que la GPU terminó, a la RAM (para la pantalla) */
+            g_zone_gpu = -1; /* sin trabajo (para el muestreo) */
+            qm_lock(&Q.m);
+            __atomic_store_n(&Q.cons_wait, 1, __ATOMIC_SEQ_CST);
+            if (__atomic_load_n(&Q.tail, __ATOMIC_SEQ_CST) == h && !__atomic_load_n(&Q.quit, __ATOMIC_SEQ_CST)) {
+                qc_wait(&Q.more, &Q.m, 2000000);
+            }
+            __atomic_store_n(&Q.cons_wait, 0, __ATOMIC_SEQ_CST);
+            qm_unlock(&Q.m);
+            continue;
+        }
+        const QHdr *hd = (const QHdr *)(const void *)(Q.buf + (h & (Q_SIZE - 1)));
+        t_busy = now_ns();
+        g_zone_gpu = Z_NONE;
+        q_exec(hd);
+        G.st.ns_busy += now_ns() - t_busy;
+        __atomic_store_n(&Q.head, h + hd->len, __ATOMIC_SEQ_CST);
+        if (__atomic_load_n(&Q.prod_wait, __ATOMIC_SEQ_CST)) {
+            qm_lock(&Q.m);
+            qc_signal(&Q.space);
+            qm_unlock(&Q.m);
+        }
+    }
+    eglMakeCurrent(G.dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+}
+
+#ifdef __SWITCH__
+static void q_entry(void *p) { (void)p; q_loop(); }
+#else
+static void *q_entry(void *p) { (void)p; q_loop(); return NULL; }
+#endif
+
+int gpu_thread_zone(void) { return Q.on ? g_zone_gpu : -2; }
+
+bool gpu_thread_start(void)
+{
+    if (Q.on || !G.ready) {
+        return Q.on;
+    }
+    if (!Q.buf) {
+        Q.buf = aligned_alloc(64, Q_SIZE);
+        if (!Q.buf) {
+            return false;
+        }
+    }
+    qm_init(&Q.m);
+    qc_init(&Q.more);
+    qc_init(&Q.space);
+    qc_init(&Q.synced);
+    Q.head = Q.tail = Q.wpos = 0;
+    Q.quit = Q.ready = Q.failed = false;
+    Q.last_c_ok = false;
+    eglMakeCurrent(G.dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT); /* el contexto, al otro hilo */
+#ifdef __SWITCH__
+    /* núcleo 2 (el 0 es el juego; en el 1, el audio), con 1 MB de pila (el compilador de shaders de mesa) */
+    bool ok = R_SUCCEEDED(threadCreate(&Q.thr, q_entry, NULL, NULL, 0x100000, 0x2C, 2)) &&
+              R_SUCCEEDED(threadStart(&Q.thr));
+#else
+    bool ok = pthread_create(&Q.thr, NULL, q_entry, NULL) == 0;
+#endif
+    if (ok) {
+        while (!__atomic_load_n(&Q.ready, __ATOMIC_ACQUIRE)) {
+#ifdef __SWITCH__
+            svcSleepThread(100000);
+#else
+            struct timespec ts = {0, 100000};
+            nanosleep(&ts, NULL);
+#endif
+        }
+        if (Q.failed) {
+#ifdef __SWITCH__
+            threadWaitForExit(&Q.thr);
+            threadClose(&Q.thr);
+#else
+            pthread_join(Q.thr, NULL);
+#endif
+            ok = false;
+        }
+    }
+    if (!ok) {
+        eglMakeCurrent(G.dpy, G.win, G.win, G.ctx); /* sigue en este hilo, como antes */
+        return false;
+    }
+    Q.on = true;
+    G.st.mt = true;
+    g_link_budget = ~0ull; /* compilar ya no frena al juego: lo hace el hilo */
+    return true;
+}
+
+static void q_stop(void)
+{
+    if (!Q.on) {
+        return;
+    }
+    __atomic_store_n(&Q.quit, true, __ATOMIC_SEQ_CST);
+    qm_lock(&Q.m);
+    qc_all(&Q.more);
+    qm_unlock(&Q.m);
+#ifdef __SWITCH__
+    threadWaitForExit(&Q.thr);
+    threadClose(&Q.thr);
+#else
+    pthread_join(Q.thr, NULL);
+#endif
+    Q.on = false;
+    G.st.mt = false;
+    for (int i = 0; i < Q.npend; i++) {
+        free(Q.pend[i].src);
+    }
+    Q.npend = 0;
+    if (G.dpy != EGL_NO_DISPLAY) {
+        eglMakeCurrent(G.dpy, G.win, G.win, G.ctx); /* de vuelta a este hilo */
+    }
+}
+
+/* ---- lo que llama el resto del emulador ---- */
+
+typedef struct {
+    const GpuDraw *d;
+    bool ok;
+} ADraw;
+static void c_draw(void *a)
+{
+    ADraw *x = a;
+    x->ok = impl_draw(x->d);
+}
+
+bool gpu_draw(const GpuDraw *d)
+{
+    if (!Q.on) {
+        return impl_draw(d);
+    }
+    if (!G.on || !G.ram || d->fmt < 4 || d->fmt > 8 || d->w <= 0 || d->h <= 0) {
+        G.st.fallbacks++;
+        return false;
+    }
+    uint64_t t0 = now_ns();
+    unsigned k = (unsigned)__builtin_popcount(d->vs_mask);
+    if (!k) {
+        k = 1;
+    }
+    size_t n_verts = d->verts ? (size_t)d->nverts * GPU_VERT_FLOATS * 4 : 0;
+    size_t n_in = d->vs_in ? (size_t)d->nverts * 64 * 4 : 0;
+    size_t n_pk = d->vs_pk ? (size_t)d->vs_pk_n * k * 16 : 0;
+    size_t n_idx = d->vs_idx ? (size_t)d->vs_nidx * 4 : 0;
+    size_t n_src = 0; /* el texto del programa no hace falta: el hilo ya lo tiene compilado (vt_get) */
+    bool cnew = d->vs_consts && (!Q.last_c_ok || memcmp(Q.last_c, d->vs_consts, sizeof(Q.last_c)));
+    size_t n_c = cnew ? sizeof(Q.last_c) : 0;
+    size_t off = sizeof(QHdr) + q_al(sizeof(CDraw)) + n_c;
+    size_t o_verts = n_verts ? off : 0;
+    off += q_al(n_verts);
+    size_t o_in = n_in ? off : 0;
+    off += q_al(n_in);
+    size_t o_pk = n_pk ? off : 0;
+    off += q_al(n_pk);
+    size_t o_idx = n_idx ? off : 0;
+    off += q_al(n_idx);
+    size_t o_src = n_src ? off : 0;
+    off += q_al(n_src);
+    if (off > Q_SIZE / 4) { /* enorme: directo, esperando al hilo */
+        ADraw a = {d, false};
+        q_call(c_draw, &a);
+        Q.last_c_ok = false;
+        G.st.ns_enq += now_ns() - t0;
+        return a.ok;
+    }
+    uint32_t len = q_al(off);
+    uint8_t *p = q_reserve(len);
+    QHdr *h = (QHdr *)(void *)p;
+    h->type = C_DRAW;
+    h->len = len;
+    CDraw c;
+    c.d = *d;
+    c.o_verts = (uint32_t)o_verts, c.o_in = (uint32_t)o_in, c.o_pk = (uint32_t)o_pk;
+    c.o_idx = (uint32_t)o_idx, c.o_src = (uint32_t)o_src;
+    c.consts_new = cnew;
+    memcpy(p + sizeof(QHdr), &c, sizeof(c));
+    uint8_t *q = p + sizeof(QHdr) + q_al(sizeof(CDraw));
+    if (cnew) {
+        memcpy(q, d->vs_consts, sizeof(Q.last_c));
+        memcpy(Q.last_c, d->vs_consts, sizeof(Q.last_c));
+        Q.last_c_ok = true;
+    }
+    if (n_verts) memcpy(p + o_verts, d->verts, n_verts);
+    if (n_in) memcpy(p + o_in, d->vs_in, n_in);
+    if (n_pk) memcpy(p + o_pk, d->vs_pk, n_pk);
+    if (n_idx) memcpy(p + o_idx, d->vs_idx, n_idx);
+    if (n_src) memcpy(p + o_src, d->vs_src, n_src);
+    q_commit(len);
+    G.st.ns_enq += now_ns() - t0;
+    G.st.mt_draws++;
+    return true;
+}
+
+bool gpu_clear_color(uint32_t pa, uint32_t pitch, int h, int x0, int y0, int x1, int y1, uint32_t argb, unsigned mask)
+{
+    if (!Q.on) {
+        return impl_clear_color(pa, pitch, h, x0, y0, x1, y1, argb, mask);
+    }
+    if (!G.on || !G.ram || pitch < 4 || h <= 0) {
+        return false;
+    }
+    CClear c = {pa, pitch, argb, 0, 0, mask, h, x0, y0, x1, y1};
+    q_simple(C_CLEAR_C, &c, sizeof(c));
+    return true;
+}
+
+bool gpu_clear_zeta(uint32_t pa, uint32_t zpitch, int h, int x0, int y0, int x1, int y1, uint32_t value, unsigned zfmt,
+                    unsigned flags)
+{
+    if (!Q.on) {
+        return impl_clear_zeta(pa, zpitch, h, x0, y0, x1, y1, value, zfmt, flags);
+    }
+    if (!G.on || !(flags & 3)) {
+        return false;
+    }
+    CClear c = {pa, zpitch, 0, value, zfmt, flags, h, x0, y0, x1, y1};
+    q_simple(C_CLEAR_Z, &c, sizeof(c));
+    return true;
+}
+
+void gpu_flush_surface_async(uint32_t pa)
+{
+    if (!Q.on) {
+        impl_flush_surface_async(pa);
+        return;
+    }
+    q_simple(C_FLIP, &pa, 4);
+}
+
+void gpu_end_frame(void)
+{
+    if (!Q.on) {
+        impl_end_frame();
+        return;
+    }
+    q_simple(C_END_FRAME, NULL, 0);
+}
+
+void gpu_invalidate(uint32_t pa, uint32_t len)
+{
+    if (!Q.on) {
+        impl_invalidate(pa, len);
+        return;
+    }
+    uint32_t v[2] = {pa, len};
+    q_simple(C_INVAL, v, 8);
+}
+
+void gpu_query_reset(void)
+{
+    if (!Q.on) {
+        impl_query_reset();
+        return;
+    }
+    q_simple(C_QRESET, NULL, 0);
+}
+
+void gpu_readback_poll(void)
+{
+    if (!Q.on) {
+        impl_readback_poll(); /* con el hilo, lo hace él cuando no tiene órdenes */
+    }
+}
+
+int gpu_vs_state(uint64_t key)
+{
+    if (!Q.on) {
+        return impl_vs_state(key);
+    }
+    if (!G.on) {
+        return 2;
+    }
+    int st = vt_get(key);
+    return st == 2 ? 1 : st == 3 ? 2 : 0;
+}
+
+bool gpu_vs_prepare(uint64_t key, const char *src)
+{
+    if (!Q.on) {
+        return impl_vs_prepare(key, src);
+    }
+    if (!G.on) {
+        return false;
+    }
+    int st = vt_get(key);
+    if (st == 2) {
+        return true;
+    }
+    if (st == 3) {
+        return false;
+    }
+    G.st.vs_deferred++; /* este dibujo, por la CPU; el hilo lo compila */
+    if (st == 0 && src) {
+        vt_set(key, 1);
+        size_t l = strlen(src) + 1;
+        uint32_t len = q_al(sizeof(QHdr) + 8 + l);
+        uint8_t *p = q_reserve(len);
+        QHdr *h = (QHdr *)(void *)p;
+        h->type = C_COMPILE;
+        h->len = len;
+        memcpy(p + sizeof(QHdr), &key, 8);
+        memcpy(p + sizeof(QHdr) + 8, src, l);
+        q_commit(len);
+    }
+    return false;
+}
+
+/* las que esperan respuesta */
+static void c_flush_surface(void *a) { impl_flush_surface(*(uint32_t *)a); }
+void gpu_flush_surface(uint32_t pa)
+{
+    if (!Q.on) {
+        impl_flush_surface(pa);
+        return;
+    }
+    q_call(c_flush_surface, &pa);
+}
+
+static void c_flush_all(void *a) { (void)a; impl_flush_all(); }
+void gpu_flush_all(void)
+{
+    if (!Q.on) {
+        impl_flush_all();
+        return;
+    }
+    q_call(c_flush_all, NULL);
+}
+
+static void c_query_collect(void *a) { *(uint32_t *)a = impl_query_collect(); }
+uint32_t gpu_query_collect(void)
+{
+    if (!Q.on) {
+        return impl_query_collect();
+    }
+    uint32_t v = 0;
+    q_call(c_query_collect, &v);
+    return v;
+}
+
+static void c_reset(void *a) { (void)a; impl_reset(); }
+void gpu_reset(void)
+{
+    if (!Q.on) {
+        impl_reset();
+        return;
+    }
+    Q.last_c_ok = false;
+    q_call(c_reset, NULL);
+}
+
+typedef struct { uint8_t *ram; uint32_t size; } ASetRam;
+static void c_set_ram(void *a) { impl_set_ram(((ASetRam *)a)->ram, ((ASetRam *)a)->size); }
+void gpu_set_ram(uint8_t *ram, uint32_t size)
+{
+    if (!Q.on) {
+        impl_set_ram(ram, size);
+        return;
+    }
+    ASetRam a = {ram, size};
+    q_call(c_set_ram, &a);
+}
+
+static void c_enable(void *a) { impl_enable(*(bool *)a); }
+void gpu_enable(bool on)
+{
+    if (!Q.on) {
+        impl_enable(on);
+        return;
+    }
+    q_call(c_enable, &on);
+}
+
+typedef struct { const uint32_t *rgba; int w, h; bool ok; } APresent;
+static void c_present(void *a)
+{
+    APresent *p = a;
+    p->ok = impl_present_ui(p->rgba, p->w, p->h);
+}
+bool gpu_present_ui(const uint32_t *rgba, int w, int h)
+{
+    if (!Q.on) {
+        return impl_present_ui(rgba, w, h);
+    }
+    APresent a = {rgba, w, h, false};
+    q_call(c_present, &a);
+    return a.ok;
+}
+
+static void c_exit(void *a) { (void)a; impl_exit(); }
+void gpu_exit(void)
+{
+    if (Q.on) {
+        q_call(c_exit, NULL); /* la GPU se cierra en su hilo (tiene el contexto) */
+        q_stop();
+        return;
+    }
+    impl_exit();
 }
 
 #else /* XBOXNX_NO_GL: sin GPU, todo por software */
@@ -2520,5 +3292,7 @@ void gpu_set_ram(uint8_t *ram, uint32_t size) { (void)ram, (void)size; }
 void gpu_reset(void) {}
 void gpu_set_link_budget(uint64_t ns) { (void)ns; }
 void gpu_exit(void) {}
+bool gpu_thread_start(void) { return false; }
+int gpu_thread_zone(void) { return -2; }
 
 #endif

@@ -1016,6 +1016,13 @@ static void draw_xbox_screen(const UiState *s)
                      gs->vs_pre, gs->vs_deferred, gs->fallbacks, gs->uploads, gs->upload_bytes / 1048576.0, gs->flushes,
                      gs->ns_draw / 1e9, gs->ns_vbuf / 1e9, gs->ns_tex / 1e9, gs->ns_call / 1e9, gs->ns_read / 1e9, gs->ns_rp / 1e9, gs->rp_mode == 2 ? "usa RGBA" : gs->rp_mode == 1 ? "usa BGRA" : "probando", gs->rp_us[0], gs->rp_us[1], gs->surfaces, gs->clears_c, gs->clears_z, gs->clear_bind, gs->clear_new, gs->queries, gs->ns_query / 1e9, hw_stats()->zpass_tests, hw_stats()->reports, hw_stats()->reports_noinst, hw_stats()->reports_other, hw_stats()->other_class, gpu_info());
             ovl_text(ly, gpu_enabled() ? C_GREEN : C_WARN, e);
+            if (gs->mt) {
+                char m[260];
+                snprintf(m, sizeof(m), "Hilo de la GPU: %u dibujos por la cola, %u perdidos, ocupado %.1f s · el juego: copiando %.1f s, esperando lugar %.1f s, %u esperas de respuesta (%.1f s) · cola máx %.1f MB",
+                         gs->mt_draws, gs->mt_lost, gs->ns_busy / 1e9, gs->ns_enq / 1e9, gs->ns_qwait / 1e9, gs->syncs,
+                         gs->ns_sync / 1e9, gs->q_max / 1048576.0);
+                diag_add(m);
+            }
             {
                 /* visibilidad: qué métodos 0x17C0..0x17FC mandó el juego */
                 char v[200];
