@@ -42,8 +42,11 @@ void crash_set_eip(const uint32_t *eip);
 void crash_summary(char *out, size_t n);
 /* Qué está haciendo la app al salir (va en cierre.txt si algo falla ahí). */
 void crash_step(const char *step);
-/* La memoria del proceso (MB usados y total). */
+/* La memoria del proceso (MB usados y total; el montón cuenta entero como usado). */
 void crash_mem(unsigned *used_mb, unsigned *total_mb);
+/* El montón (malloc, y ahí también la memoria de la GPU): MB en uso y total.
+ * No usar dentro del manejador de cierres. Guarda el último valor para cierre.txt. */
+void crash_heap(unsigned *used_mb, unsigned *total_mb);
 /* Las primeras líneas del informe de un cierre anterior; false si no hay. */
 bool crash_last(char *out, size_t n);
 

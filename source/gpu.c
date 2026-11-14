@@ -960,6 +960,9 @@ static Prog *prog_slot(bool evict)
         return NULL;
     }
     Prog *P = &G.progs[free_i >= 0 ? free_i : old];
+    if (P->prog && SC.prog == P->prog) {
+        SC.prog = 0; /* el nombre GL se puede repetir en el siguiente: que se vuelva a poner */
+    }
     prog_free(P);
     memset(P, 0, sizeof(*P));
     return P;
@@ -1357,7 +1360,14 @@ static struct {
     GLsync fence;
     bool on;
     uint32_t pa, bytes;
-} RB;
+    /* etapa 5: glReadPixels tardaba ~14 ms por cuadro en la Switch. Se prueban
+     * dos formas (0: BGRA como la RAM del Xbox; 1: RGBA, el formato de la
+     * textura, y R/B se cambian en la CPU al copiar) y se queda la más rápida. */
+    bool swz;         /* lo que viene en camino está en RGBA */
+    int mode;         /* -1: probando */
+    unsigned tries[2];
+    uint64_t t[2];
+} RB = {.mode = -1};
 
 static void rb_finish_(bool wait);
 
@@ -1384,7 +1394,16 @@ static void rb_finish_(bool wait)
     glBindBuffer(GL_PIXEL_PACK_BUFFER, RB.pbo);
     const void *p = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, (GLsizeiptr)RB.bytes, GL_MAP_READ_BIT);
     if (p && G.ram && (uint64_t)RB.pa + RB.bytes <= G.ram_size) {
-        memcpy(G.ram + RB.pa, p, RB.bytes);
+        if (RB.swz) { /* RGBA -> BGRA (como la RAM del Xbox) */
+            const uint32_t *src = p;
+            uint32_t *dst = (uint32_t *)(void *)(G.ram + RB.pa);
+            for (uint32_t k = 0, n = RB.bytes / 4; k < n; k++) {
+                uint32_t v = src[k];
+                dst[k] = (v & 0xFF00FF00u) | ((v >> 16) & 0xFFu) | ((v & 0xFFu) << 16);
+            }
+        } else {
+            memcpy(G.ram + RB.pa, p, RB.bytes);
+        }
     }
     if (p) {
         glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
@@ -1426,9 +1445,27 @@ static void surf_flush_async(int i)
     SC.valid = false;
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glPixelStorei(GL_PACK_ROW_LENGTH, (GLint)(s->pitch / 4));
+    int m = RB.mode >= 0 ? RB.mode : (int)((RB.tries[0] + RB.tries[1]) & 1);
+#ifndef __SWITCH__
+    if (getenv("XBOXNX_RP")) { /* replay: probar una forma en particular */
+        m = atoi(getenv("XBOXNX_RP")) & 1;
+    }
+#endif
     uint64_t t0 = now_ns();
-    glReadPixels(0, 0, s->w, s->h, GL_BGRA, GL_UNSIGNED_BYTE, (void *)0);
-    G.st.ns_rp += now_ns() - t0; /* si es grande, el driver espera a la GPU aquí (no es asíncrono) */
+    glReadPixels(0, 0, s->w, s->h, m ? GL_RGBA : GL_BGRA, GL_UNSIGNED_BYTE, (void *)0);
+    uint64_t dt = now_ns() - t0;
+    G.st.ns_rp += dt; /* si es grande, el driver espera a la GPU aquí (no es asíncrono) */
+    RB.swz = m == 1;
+    if (RB.mode < 0) {
+        RB.tries[m]++;
+        RB.t[m] += dt;
+        if (RB.tries[0] >= 20 && RB.tries[1] >= 20) {
+            RB.mode = RB.t[1] < RB.t[0] ? 1 : 0;
+            G.st.rp_mode = RB.mode + 1;
+            G.st.rp_us[0] = (unsigned)(RB.t[0] / RB.tries[0] / 1000);
+            G.st.rp_us[1] = (unsigned)(RB.t[1] / RB.tries[1] / 1000);
+        }
+    }
     glPixelStorei(GL_PACK_ROW_LENGTH, 0);
     glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
     RB.fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);

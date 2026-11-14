@@ -53,6 +53,74 @@ static void add(uint32_t eip)
 static Thread g_thr;
 static volatile bool g_on;
 
+/* ---- caja negra ---- */
+#define CN_FILE "sdmc:/switch/XboxNX/caja_negra.txt"
+#define CN_LINES 60
+#define CN_W 240
+static void (*g_status)(char *out, unsigned n);
+static char g_cn[CN_LINES][CN_W];
+static unsigned g_cn_n; /* líneas escritas en total */
+static FILE *g_cnf;
+
+void sampler_set_status(void (*fn)(char *out, unsigned n)) { g_status = fn; }
+
+/* Las últimas líneas, de la más vieja a la más nueva, a la SD. Tamaño fijo:
+ * se escribe encima sin cambiar el largo del archivo. */
+static void cn_write(const char *last)
+{
+    if (!g_cnf) {
+        g_cnf = fopen(CN_FILE, "w");
+        if (!g_cnf) {
+            return;
+        }
+        setvbuf(g_cnf, NULL, _IOFBF, 16384);
+    }
+    static char buf[CN_LINES * CN_W + 800];
+    int o = snprintf(buf, 400, "XboxNX v%s · caja negra: el estado cada segundo (la última línea es lo último antes de cerrar)\n",
+                     g_version ? g_version : "?");
+    unsigned n = g_cn_n < CN_LINES ? g_cn_n : CN_LINES;
+    for (unsigned i = 0; i < n; i++) {
+        const char *l = g_cn[(g_cn_n - n + i) % CN_LINES];
+        size_t len = strnlen(l, CN_W - 1);
+        memcpy(buf + o, l, len);
+        o += (int)len;
+        buf[o++] = '\n';
+    }
+    if (last) {
+        o += snprintf(buf + o, sizeof(buf) - (size_t)o, "%s\n", last);
+    }
+    /* relleno hasta el tamaño máximo: así no quedan restos de una escritura anterior */
+    size_t full = sizeof(buf) - 1;
+    memset(buf + o, ' ', full - (size_t)o);
+    buf[full - 1] = '\n';
+    fseek(g_cnf, 0, SEEK_SET);
+    fwrite(buf, 1, full, g_cnf);
+    fflush(g_cnf);
+}
+
+static void cn_tick(void)
+{
+    char *l = g_cn[g_cn_n % CN_LINES];
+    l[0] = 0;
+    if (g_status) {
+        g_status(l, CN_W);
+    }
+    g_cn_n++;
+    cn_write(NULL);
+}
+
+void sampler_mark_clean(void)
+{
+    if (g_on || !g_cn_n) {
+        return; /* primero sampler_stop; sin juego no hubo caja negra */
+    }
+    cn_write("fin: salida normal");
+    if (g_cnf) {
+        fclose(g_cnf);
+        g_cnf = NULL;
+    }
+}
+
 static void report(FILE *f, unsigned secs)
 {
     fprintf(f, "\n=== %u s · %u muestras ===\n", secs, (unsigned)g_total);
@@ -114,7 +182,7 @@ static void thr(void *arg)
         fclose(f);
     }
     unsigned secs = 0;
-    uint64_t t0 = armGetSystemTick();
+    uint64_t t0 = armGetSystemTick(), t_cn = t0;
     while (g_on) {
         svcSleepThread(250000);
         uint32_t eip = *g_cur;
@@ -132,6 +200,10 @@ static void thr(void *arg)
         }
         g_total++;
         uint64_t now = armGetSystemTick();
+        if (armTicksToNs(now - t_cn) >= 1000000000ull) {
+            t_cn = now;
+            cn_tick();
+        }
         if (armTicksToNs(now - t0) >= 30000000000ull) {
             secs += 30;
             t0 = now;
@@ -172,6 +244,8 @@ void sampler_stop(void)
 }
 #else
 void sampler_stop(void) {}
+void sampler_set_status(void (*fn)(char *out, unsigned n)) { (void)fn; }
+void sampler_mark_clean(void) {}
 
 void sampler_start(const volatile uint32_t *cur, Vm *vm, const char *version)
 {

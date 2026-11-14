@@ -32,8 +32,9 @@
 #include "usb/usb.h"
 #include "prof.h"
 #include "apu/apu.h"
+#include <time.h>
 
-#define APP_VER   "0.18.53"
+#define APP_VER   "0.18.54"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -123,6 +124,7 @@ static Kernel g_kernel;
 static void present(void);
 static LoadReport g_load;
 static Runner g_run;
+static void estado_linea(char *o, unsigned n);
 const char *g_app_version = APP_VER;
 static int g_cap_seen;
 
@@ -203,7 +205,8 @@ static void start_run(void)
     }
     g_kernel.ns_per_instr = g_nspi;
     runner_boot(&g_run, &g_vm, &g_kernel, &g_load);
-    sampler_start(&g_run.cpu.jit_cur, &g_vm, APP_VER); /* etapa 5: perfil.txt */
+    sampler_set_status(estado_linea);
+    sampler_start(&g_run.cpu.jit_cur, &g_vm, APP_VER); /* etapa 5: perfil.txt y caja_negra.txt */
     crash_set_eip(&g_run.cpu.eip);
     g_ui.run = &g_run;
     g_ui.run_scroll = -1;
@@ -235,6 +238,106 @@ static void load_into_memory(void)
     g_ui.load_scroll = 0;
     g_ui.load_name = NULL;
     g_ui.screen = UI_MEMORY;
+}
+
+/* Caja negra (sampler.c, cada segundo, desde otro hilo): una línea con el
+ * estado. Solo lee contadores: no toca nada del emulador. */
+static void estado_linea(char *o, unsigned n)
+{
+    time_t t = time(NULL);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    const HwStats *hs = hw_stats();
+    const GpuStats *gs = gpu_stats();
+    CpuJitStats js;
+    cpu_jit_stats(&js);
+    unsigned hu, ht;
+    crash_heap(&hu, &ht);
+    int z = g_zone;
+    snprintf(o, n,
+             "%02d:%02d:%02d · %s/%s · eip %08X · cuadros %u · dibujos %u (GPU %u, esperaron %u) · shaders %u (listos antes %u, malos %u) · "
+             "subidas %u · montón %u de %u MB · JIT %.0f MB, vaciado %u",
+             tm.tm_hour, tm.tm_min, tm.tm_sec, prof_current() ? prof_current() : "-",
+             z > 0 && z < Z_N ? zone_name(z) : "-", (unsigned)g_run.cpu.eip, hs->frames, gs->draws, gs->vs_draws,
+             gs->vs_deferred, gs->vs_progs, gs->vs_pre, gs->vs_bad, gs->uploads, hu, ht, js.used / 1048576.0,
+             js.flushes);
+}
+
+/* Al abrir: si la vez anterior la app se cerró sin aviso (la caja negra no
+ * termina en "salida normal"), se guarda aparte y, si Atmosphère dejó un
+ * informe del cierre en /atmosphere/crash_reports, se copia junto. */
+#define DIR_APP "sdmc:/switch/XboxNX/"
+static void cierre_anterior(void)
+{
+    char last_atm[96] = "", seen[96] = "";
+    DIR *d = opendir("sdmc:/atmosphere/crash_reports");
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            size_t l = strlen(e->d_name);
+            if (l > 4 && l < sizeof(last_atm) && !strcmp(e->d_name + l - 4, ".log") && strcmp(e->d_name, last_atm) > 0) {
+                strcpy(last_atm, e->d_name);
+            }
+        }
+        closedir(d);
+    }
+    FILE *f = fopen(DIR_APP "atmosphere_visto.txt", "r");
+    if (f) {
+        if (fgets(seen, sizeof(seen), f)) {
+            seen[strcspn(seen, "\r\n")] = 0;
+        }
+        fclose(f);
+    }
+    f = fopen(DIR_APP "atmosphere_visto.txt", "w");
+    if (f) {
+        fprintf(f, "%s\n", last_atm);
+        fclose(f);
+    }
+    /* la última línea con texto de la caja negra */
+    f = fopen(DIR_APP "caja_negra.txt", "r");
+    if (!f) {
+        return;
+    }
+    char line[260], last[260] = "";
+    while (fgets(line, sizeof(line), f)) {
+        size_t l = strcspn(line, "\r\n");
+        line[l] = 0;
+        while (l && line[l - 1] == ' ') {
+            line[--l] = 0;
+        }
+        if (l) {
+            strcpy(last, line);
+        }
+    }
+    fclose(f);
+    if (!strcmp(last, "fin: salida normal") || !strncmp(last, "XboxNX v", 8)) {
+        return; /* salió bien, o no llegó a anotar nada */
+    }
+    remove(DIR_APP "caja_negra_anterior.txt");
+    rename(DIR_APP "caja_negra.txt", DIR_APP "caja_negra_anterior.txt");
+    bool atm = last_atm[0] && strcmp(last_atm, seen) != 0;
+    if (atm) {
+        char src[160];
+        snprintf(src, sizeof(src), "sdmc:/atmosphere/crash_reports/%s", last_atm);
+        FILE *in = fopen(src, "rb"), *out = in ? fopen(DIR_APP "cierre_atmosphere.txt", "wb") : NULL;
+        if (in && out) {
+            static char buf[16384];
+            size_t k;
+            while ((k = fread(buf, 1, sizeof(buf), in)) > 0) {
+                fwrite(buf, 1, k, out);
+            }
+        }
+        if (out) {
+            fclose(out);
+        }
+        if (in) {
+            fclose(in);
+        }
+    }
+    if (!g_ui.last_crash[0]) {
+        snprintf(g_ui.last_crash, sizeof(g_ui.last_crash), "La vez anterior se cerró sin aviso%s · último: %.150s",
+                 atm ? " (informe de Atmosphère en cierre_atmosphere.txt)" : "", last);
+    }
 }
 
 /* Dibujar la pantalla y mandarla a la Switch. */
@@ -546,6 +649,7 @@ int main(int argc, char **argv)
         remove("sdmc:/switch/XboxNX/cierre.txt.ant");
         rename("sdmc:/switch/XboxNX/cierre.txt", "sdmc:/switch/XboxNX/cierre.txt.ant");
     }
+    cierre_anterior(); /* después de cierre.txt: si hubo, ese manda */
     bool dirty = true;
 
     while (appletMainLoop()) {
@@ -852,6 +956,7 @@ int main(int argc, char **argv)
     crash_step("cerrar la pantalla");
     framebufferClose(&g_fb);
     plExit();
+    sampler_mark_clean(); /* la caja negra: esta vez salió bien (la SD sigue montada hasta después de main) */
     crash_step("después de main (libnx/Mesa al terminar)");
     return 0;
 }

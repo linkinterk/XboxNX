@@ -2,6 +2,7 @@
 #include "crash.h"
 #include "clocks.h"
 
+#include <malloc.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -28,6 +29,21 @@ static const char *volatile g_step; /* el paso de la salida, o NULL */
 static char g_why[160];             /* abort / assert / diag: el motivo */
 
 void crash_step(const char *step) { g_step = step; }
+
+static volatile unsigned g_heap_used, g_heap_total; /* la última medida (para cierre.txt) */
+
+void crash_heap(unsigned *used_mb, unsigned *total_mb)
+{
+    extern char *fake_heap_start, *fake_heap_end;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    struct mallinfo mi = mallinfo();
+#pragma GCC diagnostic pop
+    g_heap_used = (unsigned)((size_t)mi.uordblks >> 20);
+    g_heap_total = (unsigned)((size_t)(fake_heap_end - fake_heap_start) >> 20);
+    *used_mb = g_heap_used;
+    *total_mb = g_heap_total;
+}
 
 void crash_mem(unsigned *used_mb, unsigned *total_mb)
 {
@@ -250,7 +266,8 @@ static void report(void)
         unsigned u, t;
         crash_mem(&u, &t);
         char mb[48];
-        snprintf(mb, sizeof(mb), "\nmemoria %u de %u MB", u, t);
+        snprintf(mb, sizeof(mb), "\nmemoria %u de %u MB · montón en uso %u de %u MB (última medida)", u, t,
+                 g_heap_used, g_heap_total);
         put(mb);
     }
     put("\nsp ");
@@ -421,6 +438,7 @@ void crash_guard_pop(void) {}
 void crash_set_eip(const uint32_t *eip) { (void)eip; }
 void crash_step(const char *step) { (void)step; }
 void crash_mem(unsigned *used_mb, unsigned *total_mb) { *used_mb = *total_mb = 0; }
+void crash_heap(unsigned *used_mb, unsigned *total_mb) { *used_mb = *total_mb = 0; }
 bool crash_last(char *out, size_t n)
 {
     if (n) {
