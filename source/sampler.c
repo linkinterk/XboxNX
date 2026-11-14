@@ -34,8 +34,46 @@ static const volatile uint32_t *g_cur;
 static Vm *g_vm;
 static const char *g_version;
 
+/* lo mismo desde el principio (no se borra cada 30 s): para el perfil del
+ * JIT al salir (cpu_profile_w) */
+#define ASIZE 32768u
+static Slot g_all[ASIZE];
+
+static void add_all(uint32_t eip)
+{
+    unsigned h = (eip * 2654435761u) >> 17;
+    for (unsigned i = 0; i < 64; i++) {
+        Slot *s = &g_all[(h + i) & (ASIZE - 1)];
+        if (s->eip == eip) {
+            s->n++;
+            return;
+        }
+        if (!s->eip) {
+            s->eip = eip;
+            s->n = 1;
+            return;
+        }
+    }
+}
+
+uint32_t sampler_hits(uint32_t eip)
+{
+    unsigned h = (eip * 2654435761u) >> 17;
+    for (unsigned i = 0; i < 64; i++) {
+        const Slot *s = &g_all[(h + i) & (ASIZE - 1)];
+        if (s->eip == eip) {
+            return s->n;
+        }
+        if (!s->eip) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
 static void add(uint32_t eip)
 {
+    add_all(eip);
     unsigned h = (eip * 2654435761u) >> 19;
     for (unsigned i = 0; i < HSIZE; i++) {
         Slot *s = &g_h[(h + i) & (HSIZE - 1)];

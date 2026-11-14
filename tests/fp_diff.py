@@ -73,7 +73,8 @@ def gen_sse():
     elif k == 7:  # comiss / ucomiss (flags) y movmskps
         body = bytes([0x0F, rnd.choice([0x2E, 0x2F])]) + src + b"\x0f\x50\xc1"
     elif k == 8:  # conversiones a entero y de entero
-        body = rnd.choice([b"\xf3\x0f\x2d\xc1", b"\xf3\x0f\x2c\xc2", b"\xf3\x0f\x2a\xcf",
+        body = rnd.choice([b"\xf3\x0f\x2d\xc1", b"\xf3\x0f\x2c\xc2", b"\xf3\x0f\x2a\xcf", b"\xf3\x0f\x2a\x46\x08",
+                           b"\xf3\x0f\x53\xca", b"\x0f\x53\x4e\x30", b"\xf3\x0f\x52\xcb", b"\x0f\x52\xca",
                            b"\xf3\x0f\x2d\x46\x08", b"\x0f\x12\xca", b"\x0f\x16\xcb", b"\x0f\x16\x4e\x08",
                            b"\xf3\x0f\x10\x4e\x04", b"\xf3\x0f\x10\xca", b"\x0f\x13\x4b\x30"])
     else:
@@ -94,7 +95,8 @@ def gen_x87():
                            b"\xd9\xe8", b"\xd9\xee", b"\xd9\xc1"])
     elif k == 5:  # comparaciones: estado y flags
         body = rnd.choice([b"\xd8\xd1", b"\xdd\xe1", b"\xd9\xe4", b"\xd8\x56\x04"]) + b"\xdf\xe0\x66\x25\x00\x45"
-        body = body if rnd.random() < 0.6 else rnd.choice([b"\xdb\xf1", b"\xdb\xe9", b"\xdf\xf1"])
+        body = body if rnd.random() < 0.6 else rnd.choice([b"\xdb\xf1", b"\xdb\xe9", b"\xdf\xf1",
+                                                          b"\xd9\xe5\xdf\xe0", b"\xd9\xe5\xdd\x7b\x30"])
     elif k == 6:  # a entero con el redondeo del cw
         body = rnd.choice([b"\xdb\x5b\x10", b"\xdf\x5b\x10", b"\xdf\x7b\x10", b"\xdb\x53\x10"])
     elif k == 7:  # enteros a la pila

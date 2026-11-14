@@ -1690,6 +1690,8 @@ static void surf_flush_async(int i)
     G.st.flushes++;
 }
 
+static int g_sfl_why = 3; /* por qué se lee la superficie (GpuStats.sfl_why) */
+
 static void surf_flush(int i)
 {
     Surf *s = &G.surf[i];
@@ -1707,6 +1709,7 @@ static void surf_flush(int i)
     uint64_t t0 = now_ns();
     size_t bytes = (size_t)s->pitch * (size_t)s->h;
     G.st.sflushes++;
+    G.st.sfl_why[g_sfl_why & 3]++;
     int zprev = g_zone;
     g_zone = Z_READ; /* en el perfil: "leer cuadro", no lo que la pidió */
     /* etapa 5: también aquí por el compute (glReadPixels tardaba ~35 ms en la
@@ -1912,7 +1915,12 @@ static void flush_range(uint32_t pa, uint32_t len)
     for (int i = 0; i < MAX_SURF; i++) {
         Surf *s = &G.surf[i];
         if (s->tex && s->dirty && pa < s->pa + s->pitch * (uint32_t)s->h && s->pa < pa + len) {
+            g_sfl_why = 0;
             surf_flush(i);
+            g_sfl_why = 3;
+            G.st.sfl_surf_pa = s->pa;
+            G.st.sfl_surf_wh = (uint32_t)s->w << 16 | (uint32_t)s->h;
+            G.st.sfl_surf_pitch = s->pitch;
         }
     }
 }
@@ -1924,7 +1932,9 @@ static void impl_flush_surface(uint32_t pa)
     }
     int i = surf_find(pa);
     if (i >= 0) {
+        g_sfl_why = 1;
         surf_flush(i);
+        g_sfl_why = 3;
     }
 }
 
@@ -1945,11 +1955,13 @@ static void impl_flush_all(void)
         return;
     }
     rb_finish(true);
+    g_sfl_why = 2;
     for (int i = 0; i < MAX_SURF; i++) {
         if (G.surf[i].tex) {
             surf_flush(i);
         }
     }
+    g_sfl_why = 3;
 }
 
 static void impl_invalidate(uint32_t pa, uint32_t len)
@@ -2025,7 +2037,14 @@ static GLuint tex_get(const GpuTex *t, float scale[2])
         scale[0] = 1.0f / (float)t->w;
         scale[1] = 1.0f / (float)t->h;
     }
+    uint64_t sf0 = G.st.sfl_why[0];
     flush_range(t->addr, t->bytes);
+    if (G.st.sfl_why[0] != sf0) { /* un ejemplo: qué textura pidió lo dibujado */
+        G.st.sfl_tex_addr = t->addr;
+        G.st.sfl_tex_fmt = t->fmt | (t->cube ? 0x10000u : 0u);
+        G.st.sfl_tex_wh = t->w << 16 | t->h;
+        G.st.sfl_tex_linear = t->linear;
+    }
     GLenum target = t->cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
     int hit = -1, free_i = -1, old = -1;
     for (int i = 0; i < MAX_TEX; i++) {

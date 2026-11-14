@@ -1926,6 +1926,10 @@ static void draw_(void)
     Target t;
     if (!target(&t)) {
         S.st.no_target++;
+        S.st.no_target_n[S.st.no_target_why < 7 ? S.st.no_target_why : 0]++;
+        if (S.st.no_target_why == 3) {
+            S.st.no_target_swz_fmt = S.surf_format;
+        }
         return;
     }
     run_program(); /* la clave del programa puesto */

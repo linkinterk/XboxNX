@@ -20,6 +20,7 @@
 #include "apu/apu.h"
 #include "nv2a_sw.h"
 #include "prof.h"
+#include "sampler.h"
 #include "usb/usb.h"
 
 #define C_BG        HEX(0x121212)
@@ -872,7 +873,7 @@ static void resumen_tick(const UiState *s, double fps, double spd)
 {
     static time_t last;
     static bool started;
-    static uint64_t p_get, p_dec, p_all, p_kfast, p_rd, p_rdns, p_busy, p_sfl, p_sflns;
+    static uint64_t p_get, p_dec, p_all, p_kfast, p_rd, p_rdns, p_busy, p_sfl, p_sflns, p_why[4], p_cc, p_wait;
     static unsigned p_flushes;
     static double fps_sum, spd_sum, fps_min = 1e9;
     static unsigned n;
@@ -901,6 +902,12 @@ static void resumen_tick(const UiState *s, double fps, double spd)
     p_rd = r->counts[219], p_rdns = r->kns[219], p_busy = gs->ns_busy, p_sfl = gs->sflushes, p_sflns = gs->ns_sflush;
     unsigned fl = js.flushes - p_flushes;
     p_flushes = js.flushes;
+    uint64_t why[4], cc = c->st_ccall - p_cc, wait = (gs->ns_qwait + gs->ns_sync) - p_wait;
+    for (int k = 0; k < 4; k++) {
+        why[k] = gs->sfl_why[k] - p_why[k];
+        p_why[k] = gs->sfl_why[k];
+    }
+    p_cc = c->st_ccall, p_wait = gs->ns_qwait + gs->ns_sync;
     FILE *f = fopen(SUM_FILE, started ? "a" : "w");
     if (f) {
         if (!started) {
@@ -914,14 +921,17 @@ static void resumen_tick(const UiState *s, double fps, double spd)
         }
         fprintf(f, "%s · %.1f FPS (mín %.1f) · juego %.0f%% · hilo del juego: CPU %u%% kernel %u%% audio %u%% GPU %u%% · "
                    "buscar bloque %.1f%% (decodificar %.1f%%) · JIT vaciado %u · bloques %llu (%llu compartiendo) · "
-                   "hilo GPU %.0f%% · leídas al momento %llu (%.0f ms) · lecturas %llu (%.1f ms c/u) · hora rápida %.0f/s · "
+                   "hilo GPU %.0f%% · leídas al momento %llu (%.0f ms; textura %llu software %llu todo %llu otro %llu) · "
+                   "esperando a la GPU %.1f%% · lecturas %llu (%.1f ms c/u) · hora rápida %.0f/s · C desde el JIT %.0fk/s · "
                    "pantalla %u ms\n",
                 ts, n ? fps_sum / n : 0.0, fps_min < 1e8 ? fps_min : 0.0, n ? 100.0 * spd_sum / n : 0.0,
                 (s->prof[PROF_CPU] + 5) / 10, (s->prof[PROF_KERNEL] + 5) / 10, (s->prof[PROF_APU] + 5) / 10,
                 (s->prof[PROF_GPU] + 5) / 10, all ? 100.0 * (double)get / (double)all : 0.0,
                 all ? 100.0 * (double)dec / (double)all : 0.0, fl, (unsigned long long)js.blocks,
                 (unsigned long long)js.chained, 100.0 * (double)busy / (dt * 1e9), (unsigned long long)sfl, sflns / 1e6,
-                (unsigned long long)rd, rd ? rdns / 1e6 / (double)rd : 0.0, (double)kf / dt, s->ui_ms);
+                (unsigned long long)why[0], (unsigned long long)why[1], (unsigned long long)why[2],
+                (unsigned long long)why[3], 100.0 * (double)wait / (dt * 1e9), (unsigned long long)rd,
+                rd ? rdns / 1e6 / (double)rd : 0.0, (double)kf / dt, (double)cc / dt / 1000.0, s->ui_ms);
         fclose(f);
     }
     fps_sum = spd_sum = 0, n = 0, fps_min = 1e9;
@@ -935,18 +945,33 @@ void ui_resumen_exit(Runner *r)
         return;
     }
     CpuProfile pf;
-    cpu_profile(&r->cpu, &pf);
+    cpu_profile_w(&r->cpu, &pf, sampler_hits);
     FILE *f = fopen(SUM_FILE, "a");
     if (!f) {
         return;
     }
-    fprintf(f, "Al salir · instrucciones lentas (en C): %.2f%% de %llu", pf.insns ? 100.0 * (double)pf.slow / (double)pf.insns : 0.0,
-            (unsigned long long)pf.insns);
+    /* pesado por el tiempo (muestras del hilo principal en cada bloque) */
+    fprintf(f, "Al salir · bloques del JIT con alguna instrucción en C: %.1f%% del tiempo del JIT",
+            pf.insns ? 100.0 * (double)pf.slow / (double)pf.insns : 0.0);
     for (unsigned t = 0; t < pf.n; t++) {
-        fprintf(f, " · %s%02X %.2f%%", pf.op[t] >= 0x0F00 ? "0F" : "", pf.op[t] & 0xFF,
-                pf.insns ? 100.0 * (double)pf.count[t] / (double)pf.insns : 0.0);
+        char nm[48];
+        cpu_profile_name(pf.op[t], nm, sizeof(nm));
+        fprintf(f, " · %s %.1f%%", nm, pf.insns ? 100.0 * (double)pf.count[t] / (double)pf.insns : 0.0);
     }
     fprintf(f, "\n");
+    /* gráficos: qué pide leer lo dibujado al momento, y los dibujos sin destino */
+    const GpuStats *gs = gpu_stats();
+    const SwStats *sw = sw_stats();
+    fprintf(f, "Al salir · gráficos: leídas al momento %llu (textura %llu, software %llu, todo %llu, otro %llu); "
+               "ejemplo de textura %08X fmt %X %ux%u %s sobre superficie %08X %ux%u pitch %u · "
+               "sin destino %u (formato %u, pitch %u, swizzle %u fmt %X, sin color %u, recorte %u, memoria %u)\n",
+            (unsigned long long)gs->sflushes, (unsigned long long)gs->sfl_why[0], (unsigned long long)gs->sfl_why[1],
+            (unsigned long long)gs->sfl_why[2], (unsigned long long)gs->sfl_why[3], (unsigned)gs->sfl_tex_addr,
+            (unsigned)gs->sfl_tex_fmt, (unsigned)(gs->sfl_tex_wh >> 16), (unsigned)(gs->sfl_tex_wh & 0xFFFF),
+            gs->sfl_tex_linear ? "lineal" : "swizzle", (unsigned)gs->sfl_surf_pa, (unsigned)(gs->sfl_surf_wh >> 16),
+            (unsigned)(gs->sfl_surf_wh & 0xFFFF), (unsigned)gs->sfl_surf_pitch, sw->no_target, sw->no_target_n[1],
+            sw->no_target_n[2], sw->no_target_n[3], (unsigned)sw->no_target_swz_fmt, sw->no_target_n[4],
+            sw->no_target_n[5], sw->no_target_n[6]);
     fclose(f);
 }
 

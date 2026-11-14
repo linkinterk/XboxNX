@@ -98,8 +98,9 @@ static void text(FILE *f, const Runner *r)
         fprintf(f, "\nPERFIL DEL CPU: %llu instrucciones en %llu bloques, %llu lentas (fuera del JIT)\n",
                 (unsigned long long)pf.insns, (unsigned long long)pf.blocks, (unsigned long long)pf.slow);
         for (unsigned t = 0; t < pf.n; t++) {
-            fprintf(f, pf.op[t] > 0xFF ? "  0F %02X  %llu\n" : "  %02X     %llu\n", pf.op[t] & 0xFF,
-                    (unsigned long long)pf.count[t]);
+            char nm[48];
+            cpu_profile_name(pf.op[t], nm, sizeof(nm));
+            fprintf(f, "  %-14s %llu\n", nm, (unsigned long long)pf.count[t]);
         }
     }
     fprintf(f, "\nLLAMADAS AL KERNEL (cuenta)\n");

@@ -410,14 +410,9 @@ static bool fcmov_cond(Cpu *c, int n)
     }
 }
 
-static void fpu(Cpu *c, const Dec *d, uint8_t op)
+/* x87 con memoria en a (reg: el campo del modrm); false: no está */
+static bool fpu_mem(Cpu *c, uint8_t op, int reg, uint32_t a)
 {
-    uint8_t m = fetch8(c);
-    int reg = (m >> 3) & 7, i = m & 7;
-    char b[48];
-    if (m < 0xC0) {
-        Ea e = modrm_ea(c, d, m);
-        uint32_t a = e.addr;
         switch (op) {
         case 0xD8: /* m32fp */
         case 0xDC: /* m64fp */
@@ -433,70 +428,72 @@ static void fpu(Cpu *c, const Dec *d, uint8_t op)
             } else {
                 *st(c, 0) = farith(c, reg, *st(c, 0), v);
             }
-            return;
+            return true;
         }
         case 0xD9:
             switch (reg) {
-            case 0: fpush(c, rdf32(c, a)); return;
-            case 2: wrf32(c, a, to_f32(c, *st(c, 0))); return;
-            case 3: wrf32(c, a, to_f32(c, *st(c, 0))); fpop(c); return;
-            case 4: fldenv(c, a); return;
-            case 5: c->fpu_cw = (uint16_t)mrd(c, a, 2); return;
-            case 6: fstenv(c, a); return;
-            case 7: mwr(c, a, 2, c->fpu_cw); return;
+            case 0: fpush(c, rdf32(c, a)); return true;
+            case 2: wrf32(c, a, to_f32(c, *st(c, 0))); return true;
+            case 3: wrf32(c, a, to_f32(c, *st(c, 0))); fpop(c); return true;
+            case 4: fldenv(c, a); return true;
+            case 5: c->fpu_cw = (uint16_t)mrd(c, a, 2); return true;
+            case 6: fstenv(c, a); return true;
+            case 7: mwr(c, a, 2, c->fpu_cw); return true;
             default: break;
             }
             break;
         case 0xDB:
             switch (reg) {
-            case 0: fpush(c, (double)(int32_t)mrd(c, a, 4)); return;
-            case 2: mwr(c, a, 4, (uint32_t)to_int(*st(c, 0), c->fpu_cw >> 10, 32)); return;
-            case 3: mwr(c, a, 4, (uint32_t)to_int(*st(c, 0), c->fpu_cw >> 10, 32)); fpop(c); return;
-            case 5: fpush(c, rdf80(c, a)); return;
-            case 7: wrf80(c, a, *st(c, 0)); fpop(c); return;
+            case 0: fpush(c, (double)(int32_t)mrd(c, a, 4)); return true;
+            case 2: mwr(c, a, 4, (uint32_t)to_int(*st(c, 0), c->fpu_cw >> 10, 32)); return true;
+            case 3: mwr(c, a, 4, (uint32_t)to_int(*st(c, 0), c->fpu_cw >> 10, 32)); fpop(c); return true;
+            case 5: fpush(c, rdf80(c, a)); return true;
+            case 7: wrf80(c, a, *st(c, 0)); fpop(c); return true;
             default: break;
             }
             break;
         case 0xDD:
             switch (reg) {
-            case 0: fpush(c, rdf64(c, a)); return;
-            case 2: wrf64(c, a, *st(c, 0)); return;
-            case 3: wrf64(c, a, *st(c, 0)); fpop(c); return;
+            case 0: fpush(c, rdf64(c, a)); return true;
+            case 2: wrf64(c, a, *st(c, 0)); return true;
+            case 3: wrf64(c, a, *st(c, 0)); fpop(c); return true;
             case 4: /* frstor */
                 fldenv(c, a);
                 for (int k = 0; k < 8; k++) {
                     *st(c, k) = rdf80(c, a + 28 + 10 * (uint32_t)k);
                 }
-                return;
+                return true;
             case 6: /* fnsave */
                 fstenv(c, a);
                 for (int k = 0; k < 8; k++) {
                     wrf80(c, a + 28 + 10 * (uint32_t)k, *st(c, k));
                 }
                 fpu_reset(c);
-                return;
-            case 7: mwr(c, a, 2, fsw(c)); return;
+                return true;
+            case 7: mwr(c, a, 2, fsw(c)); return true;
             default: break;
             }
             break;
         case 0xDF:
             switch (reg) {
-            case 0: fpush(c, (double)(int16_t)mrd(c, a, 2)); return;
-            case 2: mwr(c, a, 2, (uint32_t)to_int(*st(c, 0), c->fpu_cw >> 10, 16)); return;
-            case 3: mwr(c, a, 2, (uint32_t)to_int(*st(c, 0), c->fpu_cw >> 10, 16)); fpop(c); return;
-            case 5: fpush(c, (double)(int64_t)rd64(c, a)); return;
-            case 7: wr64(c, a, (uint64_t)to_int(*st(c, 0), c->fpu_cw >> 10, 64)); fpop(c); return;
+            case 0: fpush(c, (double)(int16_t)mrd(c, a, 2)); return true;
+            case 2: mwr(c, a, 2, (uint32_t)to_int(*st(c, 0), c->fpu_cw >> 10, 16)); return true;
+            case 3: mwr(c, a, 2, (uint32_t)to_int(*st(c, 0), c->fpu_cw >> 10, 16)); fpop(c); return true;
+            case 5: fpush(c, (double)(int64_t)rd64(c, a)); return true;
+            case 7: wr64(c, a, (uint64_t)to_int(*st(c, 0), c->fpu_cw >> 10, 64)); fpop(c); return true;
             default: break;
             }
             break;
         default:
             break;
         }
-        snprintf(b, sizeof(b), "FPU x87 (%02X /%d)", op, reg);
-        unimpl(c, d, b);
-        return;
-    }
-    /* formas de registro */
+    return false;
+}
+
+/* x87 de registros (modrm m >= 0xC0); false: no está */
+static bool fpu_reg(Cpu *c, uint8_t op, uint8_t m)
+{
+    int reg = (m >> 3) & 7, i = m & 7;
     switch (op) {
     case 0xD8: /* st0 = st0 op st(i) */
         if (reg == 2 || reg == 3) {
@@ -507,14 +504,14 @@ static void fpu(Cpu *c, const Dec *d, uint8_t op)
         } else {
             *st(c, 0) = farith(c, reg, *st(c, 0), *st(c, i));
         }
-        return;
+        return true;
     case 0xDC: /* st(i) = st(i) op st0 (sub/subr y div/divr cambiados) */
     case 0xDE: { /* lo mismo y pop */
         if (op == 0xDE && m == 0xD9) { /* fcompp */
             fcompare(c, *st(c, 0), *st(c, 1));
             fpop(c);
             fpop(c);
-            return;
+            return true;
         }
         if (reg == 2 || reg == 3) {
             if (op == 0xDC) { /* fcom/fcomp st(i) (alias) */
@@ -522,7 +519,7 @@ static void fpu(Cpu *c, const Dec *d, uint8_t op)
                 if (reg == 3) {
                     fpop(c);
                 }
-                return;
+                return true;
             }
             break;
         }
@@ -531,71 +528,71 @@ static void fpu(Cpu *c, const Dec *d, uint8_t op)
         if (op == 0xDE) {
             fpop(c);
         }
-        return;
+        return true;
     }
     case 0xD9:
         if (reg == 0) { /* fld st(i) */
             fpush(c, *st(c, i));
-            return;
+            return true;
         }
         if (reg == 1) { /* fxch */
             double t = *st(c, 0);
             *st(c, 0) = *st(c, i);
             *st(c, i) = t;
-            return;
+            return true;
         }
         switch (m) {
-        case 0xD0: return; /* fnop */
-        case 0xE0: *st(c, 0) = -*st(c, 0); return;
-        case 0xE1: *st(c, 0) = fabs(*st(c, 0)); return;
-        case 0xE4: fcompare(c, *st(c, 0), 0.0); return;
-        case 0xE5: fxam(c); return;
-        case 0xE8: fpush(c, 1.0); return;
-        case 0xE9: fpush(c, 3.321928094887362347870); return; /* log2(10) */
-        case 0xEA: fpush(c, 1.442695040888963407360); return; /* log2(e) */
-        case 0xEB: fpush(c, 3.141592653589793238463); return;
-        case 0xEC: fpush(c, 0.301029995663981195214); return; /* log10(2) */
-        case 0xED: fpush(c, 0.693147180559945309417); return; /* ln(2) */
-        case 0xEE: fpush(c, 0.0); return;
-        case 0xF0: *st(c, 0) = exp2(*st(c, 0)) - 1.0; return;
-        case 0xF1: *st(c, 1) = fp_round(c, *st(c, 1) * log2(*st(c, 0))); fpop(c); return;
-        case 0xF2: *st(c, 0) = tan(*st(c, 0)); fpush(c, 1.0); fcc(c, 0); return;
-        case 0xF3: *st(c, 1) = atan2(*st(c, 1), *st(c, 0)); fpop(c); return;
+        case 0xD0: return true; /* fnop */
+        case 0xE0: *st(c, 0) = -*st(c, 0); return true;
+        case 0xE1: *st(c, 0) = fabs(*st(c, 0)); return true;
+        case 0xE4: fcompare(c, *st(c, 0), 0.0); return true;
+        case 0xE5: fxam(c); return true;
+        case 0xE8: fpush(c, 1.0); return true;
+        case 0xE9: fpush(c, 3.321928094887362347870); return true; /* log2(10) */
+        case 0xEA: fpush(c, 1.442695040888963407360); return true; /* log2(e) */
+        case 0xEB: fpush(c, 3.141592653589793238463); return true;
+        case 0xEC: fpush(c, 0.301029995663981195214); return true; /* log10(2) */
+        case 0xED: fpush(c, 0.693147180559945309417); return true; /* ln(2) */
+        case 0xEE: fpush(c, 0.0); return true;
+        case 0xF0: *st(c, 0) = exp2(*st(c, 0)) - 1.0; return true;
+        case 0xF1: *st(c, 1) = fp_round(c, *st(c, 1) * log2(*st(c, 0))); fpop(c); return true;
+        case 0xF2: *st(c, 0) = tan(*st(c, 0)); fpush(c, 1.0); fcc(c, 0); return true;
+        case 0xF3: *st(c, 1) = atan2(*st(c, 1), *st(c, 0)); fpop(c); return true;
         case 0xF4: { /* fxtract */
             double v = *st(c, 0);
             int ex = 0;
             double mant = frexp(v, &ex);
             *st(c, 0) = (double)(ex - 1);
             fpush(c, mant * 2.0);
-            return;
+            return true;
         }
-        case 0xF5: fprem(c, true); return;
-        case 0xF6: c->fp.top = (c->fp.top - 1) & 7; return;
-        case 0xF7: c->fp.top = (c->fp.top + 1) & 7; return;
-        case 0xF8: fprem(c, false); return;
-        case 0xF9: *st(c, 1) = fp_round(c, *st(c, 1) * log2(*st(c, 0) + 1.0)); fpop(c); return;
-        case 0xFA: *st(c, 0) = fsqrt_rc(c, *st(c, 0)); return;
+        case 0xF5: fprem(c, true); return true;
+        case 0xF6: c->fp.top = (c->fp.top - 1) & 7; return true;
+        case 0xF7: c->fp.top = (c->fp.top + 1) & 7; return true;
+        case 0xF8: fprem(c, false); return true;
+        case 0xF9: *st(c, 1) = fp_round(c, *st(c, 1) * log2(*st(c, 0) + 1.0)); fpop(c); return true;
+        case 0xFA: *st(c, 0) = fsqrt_rc(c, *st(c, 0)); return true;
         case 0xFB: { /* fsincos */
             double v = *st(c, 0);
             *st(c, 0) = sin(v);
             fpush(c, cos(v));
             fcc(c, 0);
-            return;
+            return true;
         }
-        case 0xFC: *st(c, 0) = round_mode(*st(c, 0), c->fpu_cw >> 10); return;
+        case 0xFC: *st(c, 0) = round_mode(*st(c, 0), c->fpu_cw >> 10); return true;
         case 0xFD: { /* fscale */
             double sc = trunc(*st(c, 1));
             if (isnan(sc) || isinf(sc)) {
                 *st(c, 0) = isnan(sc) ? sc : *st(c, 0) * (sc > 0 ? INFINITY : 0.0);
-                return;
+                return true;
             }
             int rc = rc_enter(c->fpu_cw >> 10);
             *st(c, 0) = ldexp(*st(c, 0), sc > 100000 ? 100000 : sc < -100000 ? -100000 : (int)sc);
             rc_leave(rc);
-            return;
+            return true;
         }
-        case 0xFE: *st(c, 0) = sin(*st(c, 0)); fcc(c, 0); return;
-        case 0xFF: *st(c, 0) = cos(*st(c, 0)); fcc(c, 0); return;
+        case 0xFE: *st(c, 0) = sin(*st(c, 0)); fcc(c, 0); return true;
+        case 0xFF: *st(c, 0) = cos(*st(c, 0)); fcc(c, 0); return true;
         default: break;
         }
         break;
@@ -604,13 +601,13 @@ static void fpu(Cpu *c, const Dec *d, uint8_t op)
             if (fcmov_cond(c, reg)) {
                 *st(c, 0) = *st(c, i);
             }
-            return;
+            return true;
         }
         if (m == 0xE9) { /* fucompp */
             fcompare(c, *st(c, 0), *st(c, 1));
             fpop(c);
             fpop(c);
-            return;
+            return true;
         }
         break;
     case 0xDB:
@@ -618,65 +615,82 @@ static void fpu(Cpu *c, const Dec *d, uint8_t op)
             if (!fcmov_cond(c, reg)) {
                 *st(c, 0) = *st(c, i);
             }
-            return;
+            return true;
         }
         if (m == 0xE2) { /* fnclex */
             c->fpu_sw &= 0x7F00;
-            return;
+            return true;
         }
         if (m == 0xE3) { /* fninit */
             fpu_reset(c);
-            return;
+            return true;
         }
         if (reg == 5 || reg == 6) { /* fucomi / fcomi */
             fcomi_flags(c, *st(c, 0), *st(c, i));
-            return;
+            return true;
         }
         if (m == 0xE0 || m == 0xE1 || m == 0xE4) { /* feni fdisi fsetpm: nada */
-            return;
+            return true;
         }
         break;
     case 0xDD:
         if (reg == 0) { /* ffree */
             c->fp.empty |= (uint8_t)(1u << ((c->fp.top + i) & 7));
-            return;
+            return true;
         }
         if (reg == 2 || reg == 3) { /* fst / fstp st(i) */
             *st(c, i) = *st(c, 0);
             if (reg == 3) {
                 fpop(c);
             }
-            return;
+            return true;
         }
         if (reg == 4 || reg == 5) { /* fucom / fucomp */
             fcompare(c, *st(c, 0), *st(c, i));
             if (reg == 5) {
                 fpop(c);
             }
-            return;
+            return true;
         }
         break;
     case 0xDF:
         if (m == 0xE0) { /* fnstsw ax */
             reg_set(c, R_EAX, 2, fsw(c));
-            return;
+            return true;
         }
         if (reg == 5 || reg == 6) { /* fucomip / fcomip */
             fcomi_flags(c, *st(c, 0), *st(c, i));
             fpop(c);
-            return;
+            return true;
         }
         if (reg == 0) { /* ffreep */
             c->fp.empty |= (uint8_t)(1u << ((c->fp.top + i) & 7));
             fpop(c);
-            return;
+            return true;
         }
         break;
     default:
         break;
     }
-    snprintf(b, sizeof(b), "FPU x87 (%02X %02X)", op, m);
-    unimpl(c, d, b);
+    return false;
+}
+
+static void fpu(Cpu *c, const Dec *d, uint8_t op)
+{
+    uint8_t m = fetch8(c);
+    char b[48];
+    if (m < 0xC0) {
+        Ea e = modrm_ea(c, d, m);
+        if (!fpu_mem(c, op, (m >> 3) & 7, e.addr)) {
+            snprintf(b, sizeof(b), "FPU x87 (%02X /%d)", op, (m >> 3) & 7);
+            unimpl(c, d, b);
+        }
+        return;
+    }
+    if (!fpu_reg(c, op, m)) {
+        snprintf(b, sizeof(b), "FPU x87 (%02X %02X)", op, m);
+        unimpl(c, d, b);
+    }
 }
 
 /* fxsave / fxrstor (512 bytes) */

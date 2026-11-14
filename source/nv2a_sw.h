@@ -29,6 +29,8 @@ typedef struct SwStats {
     unsigned no_target;    /* sin superficie donde dibujar */
     unsigned skipped_frames_draws; /* dibujos no hechos por saltar cuadros */
     unsigned no_target_why; /* 1 formato, 2 pitch, 3 swizzle, 4 sin DMA, 5 recorte, 6 memoria */
+    unsigned no_target_n[7]; /* v0.18.61: cuántos por cada motivo */
+    uint32_t no_target_swz_fmt; /* el último formato de superficie con swizzle */
     uint32_t surf_format, surf_pitch, clip_h, clip_v; /* los de ese momento */
     /* el último dibujo, para entender qué hace el juego */
     struct {

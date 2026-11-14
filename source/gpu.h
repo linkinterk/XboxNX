@@ -134,6 +134,11 @@ typedef struct GpuStats {
     uint64_t q_max;    /* lo más lleno que estuvo la cola (bytes) */ /* borrados de color / Z, cuántos cambiaron de FBO, cuántos crearon superficie */
     int rp_mode;          /* 0 probando, 1 BGRA, 2 RGBA (cambiando R y B en la CPU) */
     uint64_t sflushes, ns_sflush; /* lecturas de superficies que no podían esperar */
+    /* v0.18.61: por qué (0 una textura sobre lo dibujado, 1 el dibujo por
+     * software, 2 todo de una vez, 3 otro) y un ejemplo de la de textura */
+    uint64_t sfl_why[4];
+    uint32_t sfl_tex_addr, sfl_tex_fmt, sfl_tex_wh, sfl_surf_pa, sfl_surf_wh, sfl_surf_pitch;
+    bool sfl_tex_linear;
     int rp_cs;            /* el cuadro con compute shader: 0 sin probar, 1 se usa, 2 no dio lo mismo, 3 no hay */
     unsigned rp_us[2];    /* µs por lectura con cada forma, en la prueba */
     unsigned indexed; /* etapa 5: dibujos con índices (cada vértice una vez) */

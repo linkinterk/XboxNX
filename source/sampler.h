@@ -20,5 +20,7 @@ void sampler_stop(void);
 void sampler_set_status(void (*fn)(char *out, unsigned n));
 /* La salida fue normal: lo anota al final de la caja negra. */
 void sampler_mark_clean(void);
+/* Muestras desde el principio en el bloque del JIT que empieza en eip. */
+uint32_t sampler_hits(uint32_t eip);
 
 #endif

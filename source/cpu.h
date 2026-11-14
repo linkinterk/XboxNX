@@ -133,15 +133,19 @@ typedef struct CpuJitStats {
     uint64_t compile_ticks, ticks_per_s; /* tiempo traduciendo */
 } CpuJitStats;
 void cpu_jit_stats(CpuJitStats *s);
-#define CPU_PROF_TOP 10
+#define CPU_PROF_TOP 14
 typedef struct CpuProfile {
     uint64_t insns, blocks, slow;   /* instrucciones, bloques y las lentas (fuera del JIT) */
     unsigned n;
-    uint16_t op[CPU_PROF_TOP];      /* el opcode (0x0Fxx para los de dos bytes) */
+    uint32_t op[CPU_PROF_TOP];      /* la forma (prof_key: prefijos, opcode, modrm) */
     uint64_t count[CPU_PROF_TOP];
 } CpuProfile;
 /* Las instrucciones lentas más usadas (recorre todos los bloques: no en cada cuadro). */
 void cpu_profile(Cpu *c, CpuProfile *p);
+/* Lo mismo pesado por el tiempo de cada bloque (weight: muestras por EIP del
+ * bloque; insns = todas las muestras, slow = las de bloques con alguna lenta). */
+void cpu_profile_w(Cpu *c, CpuProfile *p, uint32_t (*weight)(uint32_t eip));
+void cpu_profile_name(uint32_t key, char *out, size_t n);
 /* Dónde está el código traducido (para el informe de un cierre). */
 void cpu_jit_range(uintptr_t *rx, size_t *size);
 

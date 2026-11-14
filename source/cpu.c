@@ -998,11 +998,15 @@ static void two_byte(Cpu *c, const Dec *d, int osz)
         uint8_t m = fetch8(c);
         Ea e = modrm_ea(c, d, m);
         uint32_t v = ea_get(c, &e, osz);
-        if (!v) {
-            FL(c) |= F_ZF;
+        if (c->stop != CPU_RUNNING) {
             return;
         }
-        FL(c) &= ~F_ZF;
+        /* los flags como un and del valor (ZF; los demás son indefinidos):
+         * igual que en el JIT */
+        alu(c, OP_AND, v, v, osz);
+        if (!v) {
+            return;
+        }
         unsigned idx = op == 0xBC ? (unsigned)__builtin_ctz(v) : 31u - (unsigned)__builtin_clz(v);
         reg_set(c, (m >> 3) & 7, osz, idx);
         return;
@@ -1547,6 +1551,7 @@ typedef struct Block {
     uint32_t hits;        /* veces que corrió sin traducción */
     uint32_t execs;       /* veces que corrió (para el perfil) */
     uint64_t slow;        /* JIT: instrucciones que llaman a su función de C (bit i) */
+    uint64_t helper;      /* JIT: las que llaman a una función de C directa (sin step) */
     Insn in[];
 } Block;
 
@@ -1995,6 +2000,18 @@ static void x_emms(Cpu *c, const Insn *in)
     c->fp.mmx = false;
 }
 
+/* Etapa 5: las de cadena (movs stos lods cmps scas, con o sin rep) sin
+ * pasar por step(): antes cada una se volvía a decodificar entera. */
+static void x_str(Cpu *c, const Insn *in)
+{
+    Dec d;
+    memset(&d, 0, sizeof(d));
+    d.start = in->start;
+    d.fs = in->fs != 0;
+    d.rep = (int)in->imm;
+    string_op(c, &d, in->aop, in->sz);
+}
+
 static void x_pshufw(Cpu *c, const Insn *in)
 {
     uint64_t bv = mm_b(c, in);
@@ -2208,7 +2225,12 @@ static bool decode(Rd *r, uint32_t page_va, Insn *in)
     in->fs = fs;
     in->base = in->index = NOREG;
     unsigned pfx = (o16 ? INTERP_P66 : 0) | (rep_ == 0xF3 ? INTERP_PF3 : 0) | (rep_ == 0xF2 ? INTERP_PF2 : 0);
-    if (rep_) { /* rep, movss...: siempre el intérprete */
+    if ((op >= 0xA4 && op <= 0xA7) || (op >= 0xAA && op <= 0xAF)) { /* cadenas */
+        in->aop = op;
+        in->sz = (uint8_t)((op & 1) ? osz : 1);
+        in->imm = rep_;
+        in->fn = x_str;
+    } else if (rep_) { /* rep, movss...: siempre el intérprete */
         if (op == 0x0F) {
             if (!dec_interp_0f(r, in, rd8(r), pfx)) {
                 return false;
@@ -2609,10 +2631,39 @@ void cpu_jit_stats(CpuJitStats *s)
 /* Qué instrucciones gastan más fuera del código nativo: las que el JIT
  * deja a su función de C (o que corren sin traducir), pesadas por las veces
  * que corrió su bloque. Clave: el byte del opcode (0F xx: 256 + xx). */
-void cpu_profile(Cpu *c, CpuProfile *p)
+/* La forma de una instrucción para el perfil: prefijos (F3 F2 66 en los
+ * bits 31 30 29), 0x0F (bit 16), el opcode (bits 8-15) y el modrm abreviado
+ * (x87 con registro: el modrm entero; si no, 0x80 | reg | 0x40 si es de
+ * registro). */
+static uint32_t prof_key(Cpu *c, uint32_t a)
 {
-    static uint64_t w[512];
-    memset(w, 0, sizeof(w));
+    uint8_t by[4] = {0};
+    uint32_t pfx = 0;
+    vm_read(c->vm, a, by, 1);
+    for (int j = 0; j < 4 && (by[0] == 0x66 || by[0] == 0xF2 || by[0] == 0xF3 || by[0] == 0xF0 || by[0] == 0x2E ||
+                              by[0] == 0x3E || by[0] == 0x26 || by[0] == 0x36 || by[0] == 0x64 || by[0] == 0x65);
+         j++) {
+        pfx |= by[0] == 0xF3 ? 1u << 31 : by[0] == 0xF2 ? 1u << 30 : by[0] == 0x66 ? 1u << 29 : 0;
+        vm_read(c->vm, ++a, by, 1);
+    }
+    uint32_t key = pfx | (uint32_t)by[0] << 8;
+    vm_read(c->vm, a + 1, by + 1, 2);
+    uint8_t m = by[1];
+    if (by[0] == 0x0F) {
+        key = pfx | 1u << 16 | (uint32_t)by[1] << 8;
+        m = by[2];
+    } else if (by[0] >= 0xD8 && by[0] <= 0xDF && m >= 0xC0) {
+        return key | m;
+    }
+    return key | 0x80u | ((m >> 3) & 7) | (m >= 0xC0 ? 0x40u : 0);
+}
+
+void cpu_profile_w(Cpu *c, CpuProfile *p, uint32_t (*weight)(uint32_t eip))
+{
+    enum { NK = 1024 };
+    static uint32_t kk[NK];
+    static uint64_t kw[NK];
+    unsigned nk = 0;
     memset(p, 0, sizeof(*p));
     BlockSlot *tab = c->blocks;
     if (!tab) {
@@ -2620,57 +2671,81 @@ void cpu_profile(Cpu *c, CpuProfile *p)
     }
     for (unsigned i = 0; i < BLK_HASH; i++) {
       for (const Block *b = tab[i].b; b; b = b->next) {
-        uint64_t ex = b->execs;
+        uint64_t ex;
+        if (weight) {
+            ex = b->jit ? weight(b->eip) : 0; /* las muestras del tiempo en este bloque */
+        } else {
+            ex = b->execs;
 #ifdef HAVE_JIT
-        if (b->jit && b->jit_epoch == g_jit.epoch && b->jcnt) {
-            ex += g_jcnt[b->jcnt];
-        }
+            if (b->jit && b->jit_epoch == g_jit.epoch && b->jcnt) {
+                ex += g_jcnt[b->jcnt];
+            }
 #endif
+        }
         if (!ex) {
             continue;
         }
-        p->insns += ex * b->n;
+        p->insns += weight ? ex : ex * b->n;
         p->blocks += ex;
+        bool any = false;
         for (unsigned k = 0; k < b->n; k++) {
-            if (!((b->slow >> (k & 63)) & 1)) {
+            bool hl = (b->helper >> (k & 63)) & 1;
+            if (!((b->slow >> (k & 63)) & 1) && !hl) {
                 continue;
             }
-            p->slow += ex;
-            uint8_t by[4] = {0};
-            uint32_t a = b->in[k].start;
-            vm_read(c->vm, a, by, 1);
-            for (int j = 0; j < 4 && (by[0] == 0x66 || by[0] == 0xF2 || by[0] == 0xF3 || by[0] == 0xF0 ||
-                                       by[0] == 0x2E || by[0] == 0x3E || by[0] == 0x26 || by[0] == 0x36 ||
-                                       by[0] == 0x64 || by[0] == 0x65);
-                 j++) {
-                vm_read(c->vm, ++a, by, 1);
+            if (!weight || !any) {
+                p->slow += ex;
             }
-            unsigned key = by[0];
-            if (by[0] == 0x0F) {
-                vm_read(c->vm, a + 1, by + 1, 1);
-                key = 256 + by[1];
+            any = true;
+            uint32_t key = prof_key(c, b->in[k].start) | (hl ? 1u << 28 : 0u);
+            unsigned j = 0;
+            while (j < nk && kk[j] != key) {
+                j++;
             }
-            w[key] += ex;
+            if (j == nk) {
+                if (nk == NK) {
+                    continue;
+                }
+                kk[nk] = key;
+                kw[nk++] = 0;
+            }
+            kw[j] += ex;
         }
       }
     }
     for (int t = 0; t < CPU_PROF_TOP; t++) {
         unsigned best = 0;
-        for (unsigned k = 1; k < 512; k++) {
-            if (w[k] > w[best]) {
+        for (unsigned k = 1; k < nk; k++) {
+            if (kw[k] > kw[best]) {
                 best = k;
             }
         }
-        if (!w[best]) {
+        if (!nk || !kw[best]) {
             break;
         }
-        p->op[t] = (uint16_t)(best >= 256 ? 0x0F00 | (best - 256) : best);
-        p->count[t] = w[best];
-        w[best] = 0;
+        p->op[t] = kk[best];
+        p->count[t] = kw[best];
+        kw[best] = 0;
         p->n++;
     }
 }
 
+void cpu_profile(Cpu *c, CpuProfile *p) { cpu_profile_w(c, p, NULL); }
+
+/* La forma de la instrucción (prof_key) en texto: "F3 0F2A r", "D9 E5", "DD /7 m". */
+void cpu_profile_name(uint32_t key, char *out, size_t n)
+{
+    int o = snprintf(out, n, "%s%s%s", key >> 31 ? "F3 " : "", (key >> 30) & 1 ? "F2 " : "", (key >> 29) & 1 ? "66 " : "");
+    unsigned op = (key >> 8) & 0xFF, m = key & 0xFF;
+    const char *dir = (key >> 28) & 1 ? " (C directa)" : "";
+    if (key & (1u << 16)) {
+        snprintf(out + o, n - (size_t)o, "0F%02X %s%s", op, (m & 0x40) ? "r" : "m", dir);
+    } else if (op >= 0xD8 && op <= 0xDF && m >= 0xC0) {
+        snprintf(out + o, n - (size_t)o, "%02X %02X%s", op, m, dir);
+    } else {
+        snprintf(out + o, n - (size_t)o, "%02X /%u %s%s", op, m & 7, (m & 0x40) ? "r" : "m", dir);
+    }
+}
 
 #if defined(CPU_TEST_API) && defined(HAVE_JIT)
 /* Pruebas (tests/jit_size.c): traduce el bloque de eip y dice cuánto ocupa. */
@@ -2701,6 +2776,25 @@ uint32_t cpu_test_block_end(Cpu *c, uint32_t eip)
 {
     Block *b = get_block(c, eip);
     return b && b->n ? b->in[b->n - 1].next : 0;
+}
+
+/* Pruebas (tests/slow_scan.c): las instrucciones del bloque de eip que el
+ * JIT deja en su función de C (starts) y cuántas tiene el bloque. */
+unsigned cpu_test_slow(Cpu *c, uint32_t eip, uint32_t *starts, unsigned *ninsn)
+{
+    Block *b = get_block(c, eip);
+    *ninsn = 0;
+    if (!b || !b->n || !jit_compile(c, b)) {
+        return 0;
+    }
+    *ninsn = b->n;
+    unsigned k = 0;
+    for (unsigned i = 0; i < b->n; i++) {
+        if ((b->slow >> i) & 1) {
+            starts[k++] = b->in[i].start;
+        }
+    }
+    return k;
 }
 #endif
 
