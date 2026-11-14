@@ -62,6 +62,7 @@ static struct {
     uintptr_t enter_rx, epi_rx; /* el prólogo y el epílogo comunes */
     uintptr_t resolve_rx; /* v0.18.61: busca el bloque de una salida fija y la une */
     uintptr_t same_rx;    /* v0.18.62: lo mismo dentro de la misma página (a la entrada rápida) */
+    uintptr_t ic_rx;      /* v0.18.63: busca un EIP variable (ret, saltos indirectos) y lo guarda en la caché del bloque */
 #ifdef __SWITCH__
     Jit j;
 #endif
@@ -166,6 +167,7 @@ typedef struct Em {
         uint32_t target;
     } link[80];
     uint32_t page; /* la página virtual del bloque (las salidas dentro de ella van a la entrada rápida) */
+    uint32_t *ic_ldr_eip, *ic_ldr_entry, *ic_adr; /* v0.18.63: la caché del último EIP variable (NULL: no hay) */
     unsigned nlink;
 } Em;
 
@@ -1304,6 +1306,24 @@ static void emit_links(Em *e)
     if (((uintptr_t)e->p & 7u) != 0) {
         E(e, 0xD503201Fu); /* nop: las casillas alineadas a 8 */
     }
+    if (e->ic_ldr_eip && !e->full) { /* la caché: EIP (8 bytes con relleno) y su entrada */
+        uint32_t *ic = e->p;
+        /* al principio: un EIP que no existe y, por si acaso, la entrada es
+         * el camino de la búsqueda */
+        uint64_t miss = (uint64_t)((uintptr_t)g_jit.rx + (uintptr_t)((uint8_t *)e->ic_adr - g_jit.rw));
+        E(e, 0xFFFFFFFFu);
+        E(e, 0);
+        E(e, (uint32_t)miss);
+        E(e, (uint32_t)(miss >> 32));
+        if (!e->full) {
+            int32_t d1 = (int32_t)(ic - e->ic_ldr_eip), d2 = (int32_t)(ic + 2 - e->ic_ldr_entry);
+            *e->ic_ldr_eip |= ((uint32_t)d1 & 0x7FFFFu) << 5;
+            *e->ic_ldr_entry |= ((uint32_t)d2 & 0x7FFFFu) << 5;
+            int32_t da = (int32_t)((uint8_t *)ic - (uint8_t *)e->ic_adr);
+            *e->ic_adr |= ((uint32_t)da & 3u) << 29 | (((uint32_t)da >> 2) & 0x7FFFFu) << 5;
+        }
+        e->ic_ldr_eip = NULL;
+    }
     for (unsigned k = 0; k < e->nlink && !e->full; k++) {
         uint32_t *slot = e->p;
         uint64_t v = (uint64_t)((uintptr_t)g_jit.rx + (uintptr_t)((uint8_t *)stub[k] - g_jit.rw));
@@ -1412,6 +1432,30 @@ static bool jit_compile(Cpu *c, Block *b)
             intptr_t d = ((intptr_t)g_jit.epi_rx - (intptr_t)em_rx(&s0)) >> 2;
             E(&s0, 0x14000000u | ((uint32_t)d & 0x3FFFFFFu)); /* b al epílogo */
         }
+        /* v0.18.63, el de la caché de un EIP variable: w9 = EIP, x14 = la caché */
+        g_jit.ic_rx = em_rx(&s0);
+        E(&s0, 0x4A49412Au);                          /* eor w10, w9, w9, lsr #16 */
+        E(&s0, 0x1200454Au);                          /* and w10, w10, #0x3FFFF */
+        movx(&s0, W11, (uint64_t)(uintptr_t)g_jtab);
+        E(&s0, 0x8B0A116Bu);                          /* add x11, x11, x10, lsl #4 */
+        ldrw(&s0, W12, W11, 0);
+        cmpw(&s0, W12, W9);
+        uint32_t *imiss1 = fwd_bcond(&s0, COND_NE);
+        ldrx(&s0, W13, W11, 8);
+        uint32_t *imiss2 = fwd_cb(&s0, J_CBZ | 0x80000000u, W13); /* cbz x13 */
+        movx(&s0, W12, (uint64_t)(uintptr_t)&g_link_delta);
+        ldrx(&s0, W12, W12, 0);
+        E(&s0, 0x8B0C01CEu);                          /* add x14, x14, x12 */
+        E(&s0, 0xB90001C9u);                          /* str w9, [x14] */
+        E(&s0, 0xF90005CDu);                          /* str x13, [x14, #8] */
+        E(&s0, 0xD61F0000u | 13u << 5);               /* br x13 */
+        patch(&s0, imiss1);
+        patch(&s0, imiss2);
+        movw(&s0, X0, 0);
+        {
+            intptr_t d = ((intptr_t)g_jit.epi_rx - (intptr_t)em_rx(&s0)) >> 2;
+            E(&s0, 0x14000000u | ((uint32_t)d & 0x3FFFFFFu)); /* b al epílogo */
+        }
         size_t len = (size_t)((uint8_t *)s0.p - g_jit.rw);
         jit_publish(0, len);
         jit_begin_write();
@@ -1449,6 +1493,7 @@ static bool jit_compile(Cpu *c, Block *b)
         e.exit_eip = 0;
         e.fj = false;
         e.nlink = 0;
+        e.ic_ldr_eip = NULL;
         uint32_t *start = e.p;
         Slow bx = {{0}, 0}; /* no se puede entrar: vuelve a run_blocks */
         /* entrada desde otro bloque */
@@ -1523,17 +1568,35 @@ static bool jit_compile(Cpu *c, Block *b)
             emit_link(&e, fixed);
         }
         uint32_t *look = e.p;
+        uint32_t *miss1 = NULL, *miss2 = NULL;
         ldrw(&e, W9, XC, OFF(eip));
-        E(&e, 0x4A49412Au);                          /* eor w10, w9, w9, lsr #16 */
-        E(&e, 0x1200454Au);                          /* and w10, w10, #0x3FFFF (JTAB - 1) */
-        movx(&e, W11, (uint64_t)(uintptr_t)g_jtab);
-        E(&e, 0x8B0A116Bu);                          /* add x11, x11, x10, lsl #4 */
-        ldrw(&e, W12, W11, 0);
-        cmpw(&e, W12, W9);
-        uint32_t *miss1 = fwd_bcond(&e, COND_NE);
-        ldrx(&e, W13, W11, 8);
-        uint32_t *miss2 = fwd_cb(&e, J_CBZ | 0x80000000u, W13); /* cbz x13 */
-        E(&e, 0xD61F0000u | 13u << 5);               /* br x13 */
+        if (g_link_on) {
+            /* v0.18.63: primero la caché del último EIP de aquí (ret a quien
+             * llamó, el mismo salto indirecto); si no, el resolvedor común */
+            e.ic_ldr_eip = e.p;
+            E(&e, 0x18000000u | W12);                /* ldr w12, caché.eip (se parchea) */
+            cmpw(&e, W12, W9);
+            uint32_t *icm = fwd_bcond(&e, COND_NE);
+            e.ic_ldr_entry = e.p;
+            E(&e, 0x58000000u | 13u);                /* ldr x13, caché.entrada */
+            E(&e, 0xD61F0000u | 13u << 5);           /* br x13 */
+            patch(&e, icm);
+            e.ic_adr = e.p;
+            E(&e, 0x10000000u | 14u);                /* adr x14, caché */
+            intptr_t d = ((intptr_t)g_jit.ic_rx - (intptr_t)em_rx(&e)) >> 2;
+            E(&e, 0x14000000u | ((uint32_t)d & 0x3FFFFFFu));
+        } else {
+            E(&e, 0x4A49412Au);                          /* eor w10, w9, w9, lsr #16 */
+            E(&e, 0x1200454Au);                          /* and w10, w10, #0x3FFFF (JTAB - 1) */
+            movx(&e, W11, (uint64_t)(uintptr_t)g_jtab);
+            E(&e, 0x8B0A116Bu);                          /* add x11, x11, x10, lsl #4 */
+            ldrw(&e, W12, W11, 0);
+            cmpw(&e, W12, W9);
+            miss1 = fwd_bcond(&e, COND_NE);
+            ldrx(&e, W13, W11, 8);
+            miss2 = fwd_cb(&e, J_CBZ | 0x80000000u, W13); /* cbz x13 */
+            E(&e, 0xD61F0000u | 13u << 5);               /* br x13 */
+        }
         /* las salidas de los jcc de en medio: devuelve al presupuesto las que
          * no se hicieron, cuenta las hechas y busca el siguiente */
         for (unsigned k = 0; k < nside; k++) {
