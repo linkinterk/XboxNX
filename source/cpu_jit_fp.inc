@@ -1413,8 +1413,12 @@ static bool emit_int(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned p
         return true;
     }
     if (f == x_jmp) {
-        movw(e, W12, in->imm);
-        strw(e, W12, XC, OFF(eip));
+        if (g_link_on && i + 1 == b->n) {
+            e->exit_eip = in->imm; /* por la casilla (el trocito pone el EIP) */
+        } else {
+            movw(e, W12, in->imm);
+            strw(e, W12, XC, OFF(eip));
+        }
         *ret = false;
         return true;
     }
@@ -1427,7 +1431,10 @@ static bool emit_int(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned p
             strw_r(e, W12, W10, W11);
             strw(e, W9, XC, ROFF(R_ESP));
             movw(e, W12, in->imm);
-            strw(e, W12, XC, OFF(eip));
+            strw(e, W12, XC, OFF(eip)); /* (también lo pone el trocito de la casilla) */
+            if (i + 1 == b->n) {
+                e->exit_eip = in->imm;
+            }
         } else {
             emit_page(e, false, &s1, &s2, &s3);
             ldrw_r(e, W12, W10, W11);

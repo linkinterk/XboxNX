@@ -29,6 +29,15 @@ typedef struct JSlot {
     void *entry;
 } JSlot;
 static JSlot g_jtab[JTAB];
+/* v0.18.61, bloques unidos: una salida a un EIP fijo salta por una casilla
+ * de 8 bytes junto al código (ldr x13, casilla; br x13). Al principio la
+ * casilla apunta a un trocito que busca el bloque en g_jtab; si lo
+ * encuentra, escribe su entrada en la casilla (por la vista escribible del
+ * búfer: g_link_delta = rw - rx) y la próxima vez se salta directo. La
+ * entrada del otro bloque sigue comprobando presupuesto, interrupción,
+ * página y código. Sin dos vistas (Horizon sin CodeMemory) no se escribe. */
+static int64_t g_link_delta;
+static uint8_t g_link_on;
 static int g_jit_no_dead = -1; /* CPU_SIN_MUERTOS=1: guardar siempre los flags (pruebas) */
 /* veces que corrió cada bloque traducido (para el perfil) */
 #define JCNT (1u << 19)
@@ -51,6 +60,7 @@ static struct {
     size_t base;      /* etapa 5: [0, base) son las rutinas comunes (no se vacían) */
     uintptr_t slow_rx; /* la rutina común que llama a la función de C de una instrucción */
     uintptr_t enter_rx, epi_rx; /* el prólogo y el epílogo comunes */
+    uintptr_t resolve_rx; /* v0.18.61: busca el bloque de una salida fija y la une */
 #ifdef __SWITCH__
     Jit j;
 #endif
@@ -85,6 +95,14 @@ static bool jit_init(void)
     g_jit.rw = g_jit.rx = p;
 #endif
     g_jit.ok = true;
+#ifdef __SWITCH__
+    /* las casillas se escriben por la otra vista (solo con CodeMemory) */
+    g_link_on = g_jit.j.type == JitType_CodeMemory && !getenv("XBOXNX_SIN_UNIR");
+    g_link_delta = (int64_t)((intptr_t)g_jit.rw - (intptr_t)g_jit.rx);
+#else
+    g_link_on = !getenv("XBOXNX_SIN_UNIR");
+    g_link_delta = 0;
+#endif
     return true;
 }
 
@@ -138,6 +156,15 @@ typedef struct Em {
     unsigned nzcv, nzcv_prev;
     uint32_t *jcc_site; /* un jcc a mitad del bloque hecho con b.cond: lo une jit_compile */
     bool jcc_none;      /* un jcc a la siguiente instrucción: sin salida */
+    uint32_t exit_eip;  /* la última instrucción dejó un EIP fijo (jmp, call): 0 si no */
+    bool fj;            /* la última es un jcc con los flags de ARM: dos salidas fijas */
+    int fj_cc;
+    uint32_t fj_taken, fj_next;
+    struct {
+        uint32_t *ldr;
+        uint32_t target;
+    } link[80];
+    unsigned nlink;
 } Em;
 
 static inline void E(Em *e, uint32_t ins)
@@ -887,6 +914,24 @@ static bool emit_more(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned 
             e->jcc_none = true; /* salta a la siguiente: no hace nada */
             return true;
         }
+        if (i + 1 == b->n && g_link_on && cc != 14 && cc != 16) {
+            /* v0.18.61: el último: dos salidas fijas (jit_compile) */
+            if (e->nzcv_prev != prev_kind) {
+                if (prev_kind == LF_SUB) {
+                    ldrw(e, W9, XC, OFF(lf_a));
+                    ldrw(e, W10, XC, OFF(lf_b));
+                    cmpw(e, W9, W10);
+                } else {
+                    ldrw(e, W11, XC, OFF(lf_res));
+                    E(e, 0x6A0B017Fu); /* tst w11, w11 */
+                }
+            }
+            e->fj = true;
+            e->fj_cc = cc;
+            e->fj_taken = in->imm;
+            e->fj_next = in->next;
+            return true;
+        }
         if (i + 1 < b->n && cc != 14 && cc != 16) {
             /* v0.18.61: a mitad del bloque, un b.cond a la salida (que pone
              * el EIP); si no salta, sigue sin tocar nada */
@@ -1190,6 +1235,58 @@ static bool emit_insn(Em *e, const Block *b, unsigned i, const Vm *vm)
     return false;
 }
 
+/* Una salida al EIP fijo target por su casilla (x24 ya contado). */
+static void emit_link(Em *e, uint32_t target)
+{
+    if (e->nlink >= sizeof(e->link) / sizeof(e->link[0])) {
+        /* sin lugar: el resolvedor sin casilla (x14 = 0), como la tabla de antes */
+        movw(e, W9, target);
+        strw(e, W9, XC, OFF(eip));
+        E(e, 0xD280000Eu); /* mov x14, #0 */
+        intptr_t d = ((intptr_t)g_jit.resolve_rx - (intptr_t)em_rx(e)) >> 2;
+        E(e, 0x14000000u | ((uint32_t)d & 0x3FFFFFFu));
+        return;
+    }
+    e->link[e->nlink].ldr = e->p;
+    e->link[e->nlink].target = target;
+    e->nlink++;
+    E(e, 0x58000000u | 13u);        /* ldr x13, casilla (se parchea) */
+    E(e, 0xD61F0000u | 13u << 5);   /* br x13 */
+}
+
+/* Al final del bloque: los trocitos que buscan (pone el EIP y va al
+ * resolvedor común con x14 = la casilla) y las casillas. */
+static void emit_links(Em *e)
+{
+    uint32_t *stub[80], *adr[80];
+    for (unsigned k = 0; k < e->nlink; k++) {
+        stub[k] = e->p;
+        movw(e, W9, e->link[k].target);
+        strw(e, W9, XC, OFF(eip));
+        adr[k] = e->p;
+        E(e, 0x10000000u | 14u); /* adr x14, casilla (se parchea) */
+        intptr_t d = ((intptr_t)g_jit.resolve_rx - (intptr_t)em_rx(e)) >> 2;
+        E(e, 0x14000000u | ((uint32_t)d & 0x3FFFFFFu));
+    }
+    if (((uintptr_t)e->p & 7u) != 0) {
+        E(e, 0xD503201Fu); /* nop: las casillas alineadas a 8 */
+    }
+    for (unsigned k = 0; k < e->nlink && !e->full; k++) {
+        uint32_t *slot = e->p;
+        uint64_t v = (uint64_t)((uintptr_t)g_jit.rx + (uintptr_t)((uint8_t *)stub[k] - g_jit.rw));
+        E(e, (uint32_t)v);
+        E(e, (uint32_t)(v >> 32));
+        if (e->full) {
+            break;
+        }
+        int32_t dl = (int32_t)(slot - e->link[k].ldr); /* en palabras */
+        *e->link[k].ldr |= ((uint32_t)dl & 0x7FFFFu) << 5;
+        int32_t da = (int32_t)((uint8_t *)slot - (uint8_t *)adr[k]); /* en bytes */
+        *adr[k] |= ((uint32_t)da & 3u) << 29 | (((uint32_t)da >> 2) & 0x7FFFFu) << 5;
+    }
+    e->nlink = 0;
+}
+
 /* Traduce el bloque; false si no hay JIT o no cupo. */
 static bool jit_compile(Cpu *c, Block *b)
 {
@@ -1234,6 +1331,36 @@ static bool jit_compile(Cpu *c, Block *b)
         E(&s0, 0xA94153F3u); /* ldp x19, x20, [sp, #16] */
         E(&s0, 0xA8C47BFDu); /* ldp x29, x30, [sp], #64 */
         E(&s0, 0xD65F03C0u); /* ret */
+        /* v0.18.61, el resolvedor: w9 = EIP (ya puesto en c->eip), x14 = la
+         * casilla (vista ejecutable; 0: ninguna) */
+        g_jit.resolve_rx = em_rx(&s0);
+        E(&s0, 0x4A49412Au);                          /* eor w10, w9, w9, lsr #16 */
+        E(&s0, 0x1200454Au);                          /* and w10, w10, #0x3FFFF */
+        movx(&s0, W11, (uint64_t)(uintptr_t)g_jtab);
+        E(&s0, 0x8B0A116Bu);                          /* add x11, x11, x10, lsl #4 */
+        ldrw(&s0, W12, W11, 0);
+        cmpw(&s0, W12, W9);
+        uint32_t *rmiss1 = fwd_bcond(&s0, COND_NE);
+        ldrx(&s0, W13, W11, 8);
+        uint32_t *rmiss2 = fwd_cb(&s0, J_CBZ | 0x80000000u, W13); /* cbz x13 */
+        uint32_t *rgo1 = fwd_cb(&s0, J_CBZ | 0x80000000u, 14);    /* cbz x14: sin casilla */
+        movx(&s0, W12, (uint64_t)(uintptr_t)&g_link_on);
+        E(&s0, 0x39400000u | 12u << 5 | 12u);         /* ldrb w12, [x12] */
+        uint32_t *rgo2 = fwd_cb(&s0, J_CBZ, W12);
+        movx(&s0, W12, (uint64_t)(uintptr_t)&g_link_delta);
+        ldrx(&s0, W12, W12, 0);
+        E(&s0, 0x8B0C01CEu);                          /* add x14, x14, x12 */
+        E(&s0, 0xF90001CDu);                          /* str x13, [x14] */
+        patch(&s0, rgo1);
+        patch(&s0, rgo2);
+        E(&s0, 0xD61F0000u | 13u << 5);               /* br x13 */
+        patch(&s0, rmiss1);
+        patch(&s0, rmiss2);
+        movw(&s0, X0, 0);
+        {
+            intptr_t d = ((intptr_t)g_jit.epi_rx - (intptr_t)em_rx(&s0)) >> 2;
+            E(&s0, 0x14000000u | ((uint32_t)d & 0x3FFFFFFu)); /* b al epílogo */
+        }
         size_t len = (size_t)((uint8_t *)s0.p - g_jit.rw);
         jit_publish(0, len);
         jit_begin_write();
@@ -1268,6 +1395,9 @@ static bool jit_compile(Cpu *c, Block *b)
         e.nzcv = e.nzcv_prev = 0;
         e.jcc_site = NULL;
         e.jcc_none = false;
+        e.exit_eip = 0;
+        e.fj = false;
+        e.nlink = 0;
         uint32_t *start = e.p;
         Slow bx = {{0}, 0}; /* no se puede entrar: vuelve a run_blocks */
         /* entrada desde otro bloque */
@@ -1306,6 +1436,8 @@ static bool jit_compile(Cpu *c, Block *b)
             e.lf_dead = !g_jit_no_dead && lf_dead_at(b, i);
             e.jcc_site = NULL;
             e.jcc_none = false;
+            e.exit_eip = 0;
+            e.fj = false;
             stale = emit_insn(&e, b, i, c->vm);
             e.lf_dead = false;
             if (b->in[i].fn == x_jcc && i + 1 < b->n && !e.jcc_none) {
@@ -1322,12 +1454,21 @@ static bool jit_compile(Cpu *c, Block *b)
                 side_k[nside++] = i + 1;
             }
         }
-        if (stale) {
+        /* terminó: el siguiente (v0.18.61: si es fijo, por su casilla) */
+        uint32_t fixed = stale ? b->in[b->n - 1].next : e.exit_eip;
+        if (stale && !g_link_on) {
             movw(&e, W9, b->in[b->n - 1].next);
             strw(&e, W9, XC, OFF(eip));
         }
-        /* terminó: el siguiente en la tabla */
         E(&e, 0x91000000u | b->n << 10 | 24u << 5 | 24u); /* add x24, x24, #n */
+        if (g_link_on && e.fj) {
+            uint32_t *tk = fwd_bcond(&e, e.fj_cc);
+            emit_link(&e, e.fj_next);
+            patch(&e, tk);
+            emit_link(&e, e.fj_taken);
+        } else if (g_link_on && fixed) {
+            emit_link(&e, fixed);
+        }
         uint32_t *look = e.p;
         ldrw(&e, W9, XC, OFF(eip));
         E(&e, 0x4A49412Au);                          /* eor w10, w9, w9, lsr #16 */
@@ -1344,13 +1485,17 @@ static bool jit_compile(Cpu *c, Block *b)
          * no se hicieron, cuenta las hechas y busca el siguiente */
         for (unsigned k = 0; k < nside; k++) {
             patch(&e, side_at[k]);
-            if (side_tgt[k]) {
+            if (side_tgt[k] && !g_link_on) {
                 movw(&e, W9, side_tgt[k]);
                 strw(&e, W9, XC, OFF(eip));
             }
             E(&e, 0x91000000u | (b->n - side_k[k]) << 10 | 23u << 5 | 23u); /* add x23, x23, #(n - k) */
             E(&e, 0x91000000u | side_k[k] << 10 | 24u << 5 | 24u);          /* add x24, x24, #k */
-            E(&e, 0x14000000u | ((uint32_t)(look - e.p) & 0x3FFFFFFu));      /* b look */
+            if (side_tgt[k] && g_link_on) {
+                emit_link(&e, side_tgt[k]);
+            } else {
+                E(&e, 0x14000000u | ((uint32_t)(look - e.p) & 0x3FFFFFFu)); /* b look */
+            }
         }
         /* no se pudo entrar: el EIP es el de este bloque y nada hecho */
         for (unsigned k = 0; k < bx.n; k++) {
@@ -1366,6 +1511,7 @@ static bool jit_compile(Cpu *c, Block *b)
             E(&e, 0x14000000u | ((uint32_t)d & 0x3FFFFFFu)); /* b al epílogo común */
         }
         emit_colds(&e, b, c->vm); /* los caminos lentos, fuera de la línea */
+        emit_links(&e);           /* los trocitos de las salidas fijas y sus casillas */
         if (e.full) {
             /* sin espacio: se vacía todo y se intenta otra vez */
             g_jit.used = g_jit.base;
