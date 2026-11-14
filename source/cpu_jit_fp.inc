@@ -936,8 +936,10 @@ static void emit_lf_full(Em *e, unsigned kind, unsigned sz, int cin)
         strb(e, W12, XC, OFF(lf_sz));
         strb(e, cin, XC, OFF(lf_cin));
     }
-    strw(e, W9, XC, OFF(lf_a));
-    strw(e, W10, XC, OFF(lf_b));
+    if (kind != LF_LOGIC) { /* las lógicas solo usan el resultado */
+        strw(e, W9, XC, OFF(lf_a));
+        strw(e, W10, XC, OFF(lf_b));
+    }
     strw(e, W11, XC, OFF(lf_res));
     /* los saltos nativos solo saben de 32 bits sin acarreo */
     e->lf_kind = (sz == 4 && cin < 0 && kind != LF_MUL) ? kind : 0;
@@ -1050,8 +1052,10 @@ static bool emit_alu_any(Em *e, const Block *b, unsigned i, const Vm *vm, unsign
         }
         movw(e, W12, kind | 4u << 8);
         strw(e, W12, XC, OFF(lf_op));
-        strw(e, d, XC, OFF(lf_a));
-        strw(e, src, XC, OFF(lf_b));
+        if (kind != LF_LOGIC) {
+            strw(e, d, XC, OFF(lf_a));
+            strw(e, src, XC, OFF(lf_b));
+        }
         rrr(e, opcs[aop], W11, d, src);
         strw(e, W11, XC, OFF(lf_res));
         if (wr) {

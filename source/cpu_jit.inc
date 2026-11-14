@@ -480,8 +480,10 @@ static void emit_lf(Em *e, unsigned kind)
     }
     movw(e, W12, kind | 4u << 8); /* lf_op, lf_sz = 4, lf_cin = 0 de una vez */
     strw(e, W12, XC, OFF(lf_op));
-    strw(e, W9, XC, OFF(lf_a));
-    strw(e, W10, XC, OFF(lf_b));
+    if (kind != LF_LOGIC) { /* v0.18.66: las lógicas solo usan el resultado (flags_sync, cond) */
+        strw(e, W9, XC, OFF(lf_a));
+        strw(e, W10, XC, OFF(lf_b));
+    }
     strw(e, W11, XC, OFF(lf_res));
 }
 
