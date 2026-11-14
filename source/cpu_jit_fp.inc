@@ -185,6 +185,7 @@ static void cw_rc0(Em *e, Slow *s)
 /* d2 = d0 op d1 como farith (op del x87: 0 add 1 mul 4 sub 5 subr 6 div 7 divr);
  * NaN al lento; con la precisión de 24 bits (cw en w15) se redondea a float
  * si está en el rango normal de float (si no, al lento). */
+static void fround_n(Em *e, Slow *s);
 static void farith_n(Em *e, unsigned op, Slow *s)
 {
     switch (op) {
@@ -195,6 +196,13 @@ static void farith_n(Em *e, unsigned op, Slow *s)
     case 6: fop(e, FDIVD, 2, 0, 1); break;
     default: fop(e, FDIVD, 2, 1, 0); break;
     }
+    fround_n(e, s);
+}
+
+/* d2 como lo deja el x87: NaN al lento; con 24 bits de precisión (cw en
+ * w15), redondeado a float si cae en su rango normal (si no, al lento) */
+static void fround_n(Em *e, Slow *s)
+{
     fcmpd(e, 2, 2);
     slow_bcond(e, s, COND_VS);
     E(e, 0x7218041Fu | (uint32_t)W15 << 5); /* tst w15, #0x300 (PC) */
@@ -498,6 +506,12 @@ static bool emit_x87(Em *e, const Block *b, unsigned i, const Vm *vm)
             fmov_dx(e, 1, XZR);
             fcompare_n(e);
         } else if (m == 0xD0) { /* fnop */
+        } else if (m == 0xFA) { /* v0.18.65: fsqrt (redondeo al más cercano; precisión como farith) */
+            cw_rc0(e, &s);
+            st_load(e, 0, 0);
+            E(e, 0x1E61C000u | 0u << 5 | 2u); /* fsqrt d2, d0 */
+            fround_n(e, &s);
+            strd(e, 2, W13, STOFF);
         } else {
             return false;
         }
@@ -1125,27 +1139,33 @@ static bool emit_imul(Em *e, const Block *b, unsigned i, const Vm *vm)
 static bool emit_grp3(Em *e, const Block *b, unsigned i, const Vm *vm)
 {
     const Insn *in = &b->in[i];
-    if (in->fn != x_interp || in->aop != 0xF7 || in->sz != 4 || in->reg < 2) {
+    if (in->fn != x_interp || (in->aop != 0xF7 && in->aop != 0xF6) || in->reg < 2) {
         return false;
     }
-    unsigned op = in->reg;
+    unsigned op = in->reg, sz = in->sz;
+    /* v0.18.65: not / neg de 8, 16 y 32 bits; mul, imul, div solo de 32 */
+    if ((sz != 1 && sz != 2 && sz != 4) || (op >= 4 && (in->aop != 0xF7 || sz != 4))) {
+        return false;
+    }
     bool mem = !in->is_reg;
     Slow sl = {{0}, 0};
     if (mem) {
-        mem_x13(e, in, 4, op <= 3, &sl);
+        mem_x13(e, in, sz, op <= 3, &sl);
     }
     switch (op) {
     case 2: /* not */
-        opnd_ld(e, W9, mem, in->rm, 4);
+        opnd_ld(e, W9, mem, in->rm, sz);
         E(e, 0x2A2003E0u | (uint32_t)W9 << 16 | W11); /* mvn w11, w9 */
-        opnd_st(e, W11, mem, in->rm, 4);
+        zext_sz(e, W11, sz);
+        opnd_st(e, W11, mem, in->rm, sz);
         break;
     case 3: /* neg */
-        opnd_ld(e, W10, mem, in->rm, 4);
+        opnd_ld(e, W10, mem, in->rm, sz);
         movw(e, W9, 0);
         rrr(e, SUBW, W11, W9, W10);
-        opnd_st(e, W11, mem, in->rm, 4);
-        emit_lf_full(e, LF_SUB, 4, -1);
+        zext_sz(e, W11, sz);
+        opnd_st(e, W11, mem, in->rm, sz);
+        emit_lf_full(e, LF_SUB, sz, -1);
         break;
     case 4:
     case 5: /* mul / imul: edx:eax = eax * v */
@@ -1237,7 +1257,7 @@ static bool emit_shift_more(Em *e, const Insn *in)
 static uint32_t jit_cond(Cpu *c, uint32_t n) { return cond(c, (int)n) ? 1u : 0u; }
 
 /* w0 = la condición n con los flags que haya (función de C, sin más) */
-static void emit_cond_call(Em *e, unsigned n)
+static void emit_cond_c(Em *e, unsigned n)
 {
     movx_r(e, X0, XC);
     movw(e, X1, n);
@@ -1245,6 +1265,74 @@ static void emit_cond_call(Em *e, unsigned n)
     regs_spill(e);
     E(e, 0xD63F0000u | 9u << 5); /* blr x9 */
     regs_load(e);
+}
+
+/* v0.18.65: w0 = la condición n sin llamar a C casi nunca. Si los flags ya
+ * están calculados en c->flags (lf_op = 0: tras comiss, fcomi, sahf, popf o
+ * una función de C), de sus bits. Si no, ZF, PF y SF salen del resultado
+ * (lf_res, igual para todas las clases); las demás, la función de C. */
+static void emit_cond_call(Em *e, unsigned n)
+{
+    unsigned base = (n & 15) >> 1, neg = n & 1;
+    ldrb_i(e, W12, XC, OFF(lf_op));
+    uint32_t *lazy = fwd_cb(e, J_CBNZ, W12);
+    ldrw(e, W13, XC, OFF(flags));
+    switch (base) {
+    case 0: E(e, 0x530B2DA0u); break;                   /* OF: ubfx w0, w13, #11, #1 */
+    case 1: E(e, 0x12000000u | (uint32_t)W13 << 5); break; /* CF: and w0, w13, #1 */
+    case 2: E(e, 0x53061800u | (uint32_t)W13 << 5); break; /* ZF: ubfx w0, w13, #6, #1 */
+    case 3:                                              /* CF | ZF */
+        movw(e, 14, 0x41);
+        rrr(e, ANDW, X0, W13, 14);
+        E(e, 0x7100001Fu);                              /* cmp w0, #0 */
+        cset(e, X0, COND_NE);
+        break;
+    case 4: E(e, 0x53071C00u | (uint32_t)W13 << 5); break; /* SF: ubfx w0, w13, #7, #1 */
+    case 5: E(e, 0x53020800u | (uint32_t)W13 << 5); break; /* PF: ubfx w0, w13, #2, #1 */
+    default:                                             /* SF != OF (| ZF) */
+        E(e, 0x53071C00u | (uint32_t)W13 << 5 | 14u);  /* ubfx w14, w13, #7, #1 */
+        E(e, 0x530B2DA0u);                              /* ubfx w0, w13, #11, #1 */
+        rrr(e, EORW, X0, X0, 14);
+        if (base == 7) {
+            E(e, 0x53061800u | (uint32_t)W13 << 5 | 14u); /* ubfx w14, w13, #6, #1 */
+            rrr(e, ORRW, X0, X0, 14);
+        }
+        break;
+    }
+    uint32_t *done = fwd_b(e);
+    patch(e, lazy);
+    if (base == 2 || base == 4 || base == 5) {
+        ldrw(e, W13, XC, OFF(lf_res));
+        if (base == 2) { /* ZF: el resultado (guardado ya recortado a su tamaño) es 0 */
+            E(e, 0x7100001Fu | (uint32_t)W13 << 5); /* cmp w13, #0 */
+            cset(e, X0, COND_EQ);
+        } else if (base == 5) { /* PF: paridad par del byte bajo */
+            E(e, 0x12001C00u | (uint32_t)W13 << 5 | W13);                       /* and w13, w13, #0xff */
+            E(e, 0x4A400000u | (uint32_t)W13 << 16 | 4u << 10 | (uint32_t)W13 << 5 | W13); /* eor w13, w13, w13, lsr #4 */
+            E(e, 0x4A400000u | (uint32_t)W13 << 16 | 2u << 10 | (uint32_t)W13 << 5 | W13);
+            E(e, 0x4A400000u | (uint32_t)W13 << 16 | 1u << 10 | (uint32_t)W13 << 5 | W13);
+            E(e, 0x12000000u | (uint32_t)W13 << 5);                               /* and w0, w13, #1 */
+            E(e, 0x52000000u);                                                     /* eor w0, w0, #1 */
+        } else { /* SF: el bit alto de su tamaño */
+            ldrb_i(e, 14, XC, OFF(lf_sz));
+            lslw_i(e, 14, 14, 3);
+            subwi(e, 14, 14, 1);
+            E(e, 0x1AC02400u | 14u << 16 | (uint32_t)W13 << 5 | W13); /* lsr w13, w13, w14 */
+            E(e, 0x12000000u | (uint32_t)W13 << 5);                   /* and w0, w13, #1 */
+        }
+        patch(e, done);
+        if (neg) {
+            E(e, 0x52000000u); /* eor w0, w0, #1 */
+        }
+        return;
+    }
+    emit_cond_c(e, n); /* ya con su negación */
+    uint32_t *done2 = fwd_b(e);
+    patch(e, done);
+    if (neg) {
+        E(e, 0x52000000u); /* eor w0, w0, #1 */
+    }
+    patch(e, done2);
 }
 
 /* x13 = la dirección en el host del operando de memoria de 4 bytes (o al lento) */
@@ -1297,6 +1385,30 @@ static bool emit_int(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned p
         emit_lf_cin(e, in->aop ? LF_DEC : LF_INC);
         uint32_t *done = fwd_b(e);
         fallback_tail(e, b, i, vm, done, s1, s2, s3);
+        return true;
+    }
+    if (f == x_incdec && (in->sz == 1 || in->sz == 2)) { /* v0.18.65: inc / dec de 8 y 16 bits */
+        unsigned sz = in->sz;
+        bool mem = !in->is_reg;
+        Slow sl = {{0}, 0};
+        if (!e->lf_dead) {
+            emit_cf(e, prev);
+            movw_r(e, W15, W12);
+        }
+        if (mem) {
+            mem_x13(e, in, sz, true, &sl);
+        }
+        opnd_ld(e, W9, mem, in->rm, sz);
+        if (in->aop) {
+            subwi(e, W11, W9, 1);
+        } else {
+            addwi(e, W11, W9, 1);
+        }
+        zext_sz(e, W11, sz);
+        opnd_st(e, W11, mem, in->rm, sz);
+        movw(e, W10, 1);
+        emit_lf_full(e, in->aop ? LF_DEC : LF_INC, sz, W15);
+        slow_tail(e, b, i, vm, &sl);
         return true;
     }
     if (emit_alu_any(e, b, i, vm, prev) || emit_imul(e, b, i, vm) || emit_grp3(e, b, i, vm) || emit_shift_more(e, in)) {
@@ -1904,7 +2016,24 @@ static bool emit_extra(Em *e, const Block *b, unsigned i, const Vm *vm)
         slow_tail(e, b, i, vm, &s);
         return true;
     }
-    if (!is0f && (op == 0x60 || op == 0x61 || op == 0x9C || op == 0x9E || op == 0x9F || op == 0xD7 || op == 0xF5 ||
+    if (!is0f && op == 0x9F) { /* lahf: de c->flags si ya están calculados (tras comiss...); si no, C */
+        ldrb_i(e, W12, XC, OFF(lf_op));
+        uint32_t *lazy = fwd_cb(e, J_CBNZ, W12);
+        ldrw(e, W13, XC, OFF(flags));
+        movw(e, 14, 0xD5);
+        rrr(e, ANDW, W13, W13, 14);
+        E(e, 0x321F01ADu); /* orr w13, w13, #2 */
+        strb(e, W13, XC, r8off(4));
+        uint32_t *done = fwd_b(e);
+        patch(e, lazy);
+        mark_helper(e, b, i);
+        call_c(e, (uintptr_t)jit_op1, (int)i, false);
+        helper_result(e, i, &s);
+        slow_tail(e, b, i, vm, &s);
+        patch(e, done);
+        return true;
+    }
+    if (!is0f && (op == 0x60 || op == 0x61 || op == 0x9C || op == 0x9E || op == 0xD7 || op == 0xF5 ||
                   op == 0xF8 || op == 0xF9 || op == 0xFC || op == 0xFD)) {
         mark_helper(e, b, i);
         call_c(e, (uintptr_t)jit_op1, (int)i, false);

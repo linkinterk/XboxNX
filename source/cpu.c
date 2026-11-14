@@ -2791,7 +2791,7 @@ unsigned cpu_test_slow(Cpu *c, uint32_t eip, uint32_t *starts, unsigned *ninsn)
     *ninsn = b->n;
     unsigned k = 0;
     for (unsigned i = 0; i < b->n; i++) {
-        if ((b->slow >> i) & 1) {
+        if (((b->slow | b->helper) >> i) & 1) {
             starts[k++] = b->in[i].start;
         }
     }
@@ -2833,13 +2833,28 @@ static inline uint64_t cpu_tick(void)
 
 static const volatile uint8_t g_no_yield;
 
+/* v0.18.65: la vuelta medida que termina con un return (una parada) también
+ * cuenta en st_t_all (antes se perdía: con los bloques unidos casi todas las
+ * vueltas largas del JIT terminan así y "decodificar" salía inflado). */
+#define t_iter (c->st_t_iter)
+static CpuStop run_blocks_(Cpu *c, uint64_t max);
 static CpuStop run_blocks(Cpu *c, uint64_t max)
+{
+    CpuStop r = run_blocks_(c, max);
+    if (t_iter) {
+        c->st_t_all += cpu_tick() - t_iter;
+        t_iter = 0;
+    }
+    return r;
+}
+
+static CpuStop run_blocks_(Cpu *c, uint64_t max)
 {
     uint64_t done = 0;
     if (!c->yield) {
         c->yield = &g_no_yield; /* el JIT lo lee sin mirar si es NULL */
     }
-    uint64_t t_iter = 0; /* principio de la vuelta medida (0: esta no se mide) */
+    t_iter = 0; /* principio de la vuelta medida (0: esta no se mide) */
     c->st_runs++;
     while (done < max) {
         if (t_iter) {
@@ -2966,11 +2981,9 @@ static CpuStop run_blocks(Cpu *c, uint64_t max)
             done++;
         }
     }
-    if (t_iter) {
-        c->st_t_all += cpu_tick() - t_iter;
-    }
     return CPU_LIMIT;
 }
+#undef t_iter
 
 CpuStop cpu_step(Cpu *c)
 {

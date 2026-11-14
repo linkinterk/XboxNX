@@ -280,11 +280,17 @@ static void clear_color(Kernel *k, uint32_t flags)
     }
     unsigned fmt = g_hw.surf_format & 0xF, type = (g_hw.surf_format >> 8) & 0xF;
     unsigned aa = (g_hw.surf_format >> 12) & 0xF;
-    if (type != 1) {
-        return; /* swizzle: más adelante */
-    }
     unsigned bpp = fmt == 1 || fmt == 2 || fmt == 3 ? 2 : (fmt >= 4 && fmt <= 8) ? 4 : 0;
     uint32_t pitch = g_hw.surf_pitch & 0xFFFF;
+    /* v0.18.65: con swizzle, solo en la GPU (la superficie es una textura normal) */
+    unsigned lw = (g_hw.surf_format >> 16) & 0xFF, lh = (g_hw.surf_format >> 24) & 0xFF;
+    bool swz = type == 2 && bpp == 4 && gpu_enabled() && lw >= 1 && lw <= 11 && lh <= 11;
+    if (type != 1 && !swz) {
+        return;
+    }
+    if (swz) {
+        pitch = (1u << lw) * 4u;
+    }
     if (!bpp || !pitch) {
         return;
     }
@@ -296,6 +302,7 @@ static void clear_color(Kernel *k, uint32_t flags)
     if (x2 > cw) x2 = cw;
     if (y2 > ch) y2 = ch;
     if (x2 > pitch / bpp) x2 = pitch / bpp;
+    if (swz && y2 > (1u << lh)) y2 = 1u << lh;
     if (x1 >= x2 || y1 >= y2) {
         return;
     }
@@ -310,10 +317,16 @@ static void clear_color(Kernel *k, uint32_t flags)
     uint32_t val = g_hw.clear_value;
     if (bpp == 4 && gpu_enabled()) { /* 4c: la superficie vive en la GPU */
         unsigned m4 = (flags & 0x10 ? 4u : 0) | (flags & 0x20 ? 2u : 0) | (flags & 0x40 ? 1u : 0) | (flags & 0x80 ? 8u : 0);
+        if (swz) {
+            m4 |= 0x10u | lh << 8; /* con swizzle y su alto (log2) */
+        }
         if (gpu_clear_color(base, pitch, (int)y2, (int)x1, (int)y1, (int)x2, (int)y2, val, m4)) {
             g_hw.st.clears++;
             return;
         }
+    }
+    if (swz) {
+        return;
     }
     for (uint32_t y = y1; y < y2; y++) {
         uint32_t row = base + y * pitch;

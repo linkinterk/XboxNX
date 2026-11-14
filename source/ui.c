@@ -969,7 +969,9 @@ void ui_resumen_exit(Runner *r)
     /* gráficos: qué pide leer lo dibujado al momento, y los dibujos sin destino */
     const GpuStats *gs = gpu_stats();
     const SwStats *sw = sw_stats();
-    fprintf(f, "Al salir · gráficos: leídas al momento %llu (textura %llu, software %llu, todo %llu, otro %llu); "
+    fprintf(f, "Al salir · gráficos: texturas con swizzle tomadas de lo dibujado %llu · ",
+            (unsigned long long)gpu_stats()->swz_direct);
+    fprintf(f, "leídas al momento %llu (textura %llu, software %llu, todo %llu, otro %llu); "
                "ejemplo de textura %08X fmt %X %ux%u %s sobre superficie %08X %ux%u pitch %u · "
                "sin destino %u (formato %u, pitch %u, swizzle %u fmt %X, sin color %u, recorte %u, memoria %u)\n",
             (unsigned long long)gs->sflushes, (unsigned long long)gs->sfl_why[0], (unsigned long long)gs->sfl_why[1],

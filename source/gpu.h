@@ -46,6 +46,8 @@ typedef struct GpuDraw {
     const float *verts;     /* nverts * GPU_VERT_FLOATS */
     /* destino */
     uint32_t color_pa, pitch;
+    bool swz;               /* v0.18.65: con swizzle (pitch = ancho * 4, potencias de 2) */
+    int swz_h;              /* su alto entero (la superficie tiene este alto) */
     unsigned fmt;           /* 4..8: 32 bits (8: con alfa) */
     int w, h;               /* tamaño de la superficie (pitch/4 x y1) */
     uint32_t zeta_pa, zpitch;
@@ -137,6 +139,7 @@ typedef struct GpuStats {
     /* v0.18.61: por qué (0 una textura sobre lo dibujado, 1 el dibujo por
      * software, 2 todo de una vez, 3 otro) y un ejemplo de la de textura */
     uint64_t sfl_why[4];
+    uint64_t swz_direct; /* v0.18.65: texturas con swizzle tomadas directo de una superficie */
     uint32_t sfl_tex_addr, sfl_tex_fmt, sfl_tex_wh, sfl_surf_pa, sfl_surf_wh, sfl_surf_pitch;
     bool sfl_tex_linear;
     int rp_cs;            /* el cuadro con compute shader: 0 sin probar, 1 se usa, 2 no dio lo mismo, 3 no hay */

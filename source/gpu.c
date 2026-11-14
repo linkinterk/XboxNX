@@ -167,7 +167,101 @@ typedef struct Surf {
     bool dirty;        /* la GPU tiene datos que la RAM no */
     unsigned used;     /* cuadro en que se usó */
     uint8_t params;    /* filtro y repetición puestos al usarla de textura (1 + clave) */
+    bool swz;          /* v0.18.65: en la RAM va con swizzle (en la GPU, textura normal) */
 } Surf;
+
+/* v0.18.65: swizzle de las superficies (como las texturas del NV2A: los
+ * bits de x e y intercalados; el lado mayor pone los que sobran arriba). */
+static struct {
+    uint32_t *x, *y;
+    int w, h;
+} g_sz;
+
+static bool sz_tables(int w, int h)
+{
+    if (g_sz.x && g_sz.w == w && g_sz.h == h) {
+        return true;
+    }
+    free(g_sz.x);
+    free(g_sz.y);
+    g_sz.x = malloc((size_t)w * 4);
+    g_sz.y = malloc((size_t)h * 4);
+    if (!g_sz.x || !g_sz.y) {
+        free(g_sz.x);
+        free(g_sz.y);
+        g_sz.x = g_sz.y = NULL;
+        return false;
+    }
+    g_sz.w = w, g_sz.h = h;
+    uint32_t mx = 0, my = 0;
+    for (uint32_t i = 1, bit = 1; i < (uint32_t)w || i < (uint32_t)h; i <<= 1) {
+        if (i < (uint32_t)w) {
+            mx |= bit;
+            bit <<= 1;
+        }
+        if (i < (uint32_t)h) {
+            my |= bit;
+            bit <<= 1;
+        }
+    }
+    for (int x = 0; x < w; x++) {
+        uint32_t r = 0;
+        for (uint32_t b = 1, sh = 0; b <= mx; b <<= 1) {
+            if (mx & b) {
+                r |= (((uint32_t)x >> sh++) & 1) ? b : 0;
+            }
+        }
+        g_sz.x[x] = r;
+    }
+    for (int y = 0; y < h; y++) {
+        uint32_t r = 0;
+        for (uint32_t b = 1, sh = 0; b <= my; b <<= 1) {
+            if (my & b) {
+                r |= (((uint32_t)y >> sh++) & 1) ? b : 0;
+            }
+        }
+        g_sz.y[y] = r;
+    }
+    return true;
+}
+
+/* lineal (w x h, 4 bytes) <-> swizzle; to_swz: de lin a swz */
+static bool sz_copy(uint32_t *swz, uint32_t *lin, int w, int h, bool to_swz)
+{
+    if (!sz_tables(w, h)) {
+        return false;
+    }
+    for (int y = 0; y < h; y++) {
+        uint32_t ym = g_sz.y[y];
+        uint32_t *row = lin + (size_t)y * (size_t)w;
+        if (to_swz) {
+            for (int x = 0; x < w; x++) {
+                swz[g_sz.x[x] | ym] = row[x];
+            }
+        } else {
+            for (int x = 0; x < w; x++) {
+                row[x] = swz[g_sz.x[x] | ym];
+            }
+        }
+    }
+    return true;
+}
+
+static uint32_t *g_sz_tmp; /* lo lineal de una superficie con swizzle */
+static size_t g_sz_cap;
+
+static uint32_t *sz_tmp(size_t bytes)
+{
+    if (bytes > g_sz_cap) {
+        uint32_t *n = realloc(g_sz_tmp, bytes);
+        if (!n) {
+            return NULL;
+        }
+        g_sz_tmp = n;
+        g_sz_cap = bytes;
+    }
+    return g_sz_tmp;
+}
 
 typedef struct Zeta {
     uint32_t pa, zpitch;
@@ -1385,6 +1479,20 @@ static int surf_find(uint32_t pa)
     return -1;
 }
 
+/* v0.18.65: en la misma dirección puede haber una lineal y otra con swizzle
+ * (Halo 2 usa la misma memoria de las dos formas en pasos distintos): se
+ * guardan las dos y cada una se busca por su tipo (si no, cambiar de una a
+ * otra la pasaba a la RAM esperando cada vez). */
+static int surf_find_t(uint32_t pa, bool swz)
+{
+    for (int i = 0; i < MAX_SURF; i++) {
+        if (G.surf[i].tex && G.surf[i].pa == pa && G.surf[i].swz == swz) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 /* Etapa 5: qué textura tiene cada unidad (para no volver a ponerla en cada
  * dibujo: cada glBindTexture hace que el driver revalide las texturas). */
 static int g_unit;
@@ -1608,10 +1716,15 @@ static void impl_readback_poll(void)
 }
 
 /* La superficie i a la RAM sin esperar: al PBO, y a la RAM luego. */
+static void surf_flush(int i);
 static void surf_flush_async(int i)
 {
     Surf *s = &G.surf[i];
     if (!s->dirty || !G.ram) {
+        return;
+    }
+    if (s->swz) {
+        surf_flush(i);
         return;
     }
     rb_finish(true); /* la anterior primero */
@@ -1719,7 +1832,15 @@ static void surf_flush(int i)
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, RB.ssbo2);
         const void *p = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, (GLsizeiptr)bytes, GL_MAP_READ_BIT);
         if (p) {
-            memcpy(G.ram + s->pa, p, bytes);
+            if (s->swz) {
+                uint32_t *lin = sz_tmp(bytes);
+                if (lin) {
+                    memcpy(lin, p, bytes);
+                    sz_copy((uint32_t *)(void *)(G.ram + s->pa), lin, s->w, s->h, true);
+                }
+            } else {
+                memcpy(G.ram + s->pa, p, bytes);
+            }
             glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
         }
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
@@ -1735,7 +1856,13 @@ static void surf_flush(int i)
     SC.valid = false; /* la caché de estado de impl_draw ya no vale */
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glPixelStorei(GL_PACK_ROW_LENGTH, (GLint)(s->pitch / 4));
-    glReadPixels(0, 0, s->w, s->h, GL_BGRA, GL_UNSIGNED_BYTE, G.ram + s->pa);
+    uint32_t *lin = s->swz ? sz_tmp(bytes) : NULL;
+    if (s->swz && lin) {
+        glReadPixels(0, 0, s->w, s->h, GL_BGRA, GL_UNSIGNED_BYTE, lin);
+        sz_copy((uint32_t *)(void *)(G.ram + s->pa), lin, s->w, s->h, true);
+    } else if (!s->swz) {
+        glReadPixels(0, 0, s->w, s->h, GL_BGRA, GL_UNSIGNED_BYTE, G.ram + s->pa);
+    }
     glPixelStorei(GL_PACK_ROW_LENGTH, 0);
     s->dirty = false;
     G.st.flushes++;
@@ -1749,8 +1876,16 @@ static void surf_upload(Surf *s)
     tex_bind(GL_TEXTURE_2D, s->tex);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)(s->pitch / 4));
-    glTexImage2D(GL_TEXTURE_2D, 0, s->fmt == 8 ? GL_RGBA8 : GL_RGB8, s->w, s->h, 0, GL_BGRA, GL_UNSIGNED_BYTE,
-                 G.ram && end <= G.ram_size ? G.ram + s->pa : NULL);
+    const void *src = G.ram && end <= G.ram_size ? G.ram + s->pa : NULL;
+    if (src && s->swz) { /* de la RAM con swizzle a lineal */
+        uint32_t *lin = sz_tmp((size_t)s->pitch * (size_t)s->h);
+        if (lin && sz_copy((uint32_t *)(void *)(G.ram + s->pa), lin, s->w, s->h, false)) {
+            src = lin;
+        } else {
+            src = NULL;
+        }
+    }
+    glTexImage2D(GL_TEXTURE_2D, 0, s->fmt == 8 ? GL_RGBA8 : GL_RGB8, s->w, s->h, 0, GL_BGRA, GL_UNSIGNED_BYTE, src);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     G.st.uploads++;
 }
@@ -1771,13 +1906,13 @@ static void surf_free(int i)
 }
 
 /* La superficie de color en pa (la crea o la agranda). */
-static int surf_get(uint32_t pa, uint32_t pitch, int h, unsigned fmt)
+static int surf_get(uint32_t pa, uint32_t pitch, int h, unsigned fmt, bool swz)
 {
     int w = (int)(pitch / 4);
-    int i = surf_find(pa);
+    int i = surf_find_t(pa, swz);
     if (i >= 0) {
         Surf *s = &G.surf[i];
-        if (s->pitch == pitch && s->h >= h && s->fmt == fmt) {
+        if (s->pitch == pitch && s->h >= h && s->fmt == fmt && s->swz == swz && (!swz || s->h == h)) {
             s->used = G.frame;
             return i;
         }
@@ -1802,6 +1937,7 @@ static int surf_get(uint32_t pa, uint32_t pitch, int h, unsigned fmt)
     s->w = w;
     s->h = h;
     s->fmt = fmt;
+    s->swz = swz;
     s->used = G.frame;
     glGenTextures(1, &s->tex);
     tex_bind(GL_TEXTURE_2D, s->tex);
@@ -1930,11 +2066,12 @@ static void impl_flush_surface(uint32_t pa)
     if (!G.ready) {
         return;
     }
-    int i = surf_find(pa);
-    if (i >= 0) {
-        g_sfl_why = 1;
-        surf_flush(i);
-        g_sfl_why = 3;
+    for (int i = 0; i < MAX_SURF; i++) {
+        if (G.surf[i].tex && G.surf[i].pa == pa) {
+            g_sfl_why = 1;
+            surf_flush(i);
+            g_sfl_why = 3;
+        }
     }
 }
 
@@ -1943,7 +2080,10 @@ static void impl_flush_surface_async(uint32_t pa)
     if (!G.ready) {
         return;
     }
-    int i = surf_find(pa);
+    int i = surf_find_t(pa, false); /* lo que se muestra: lineal */
+    if (i < 0) {
+        i = surf_find(pa);
+    }
     if (i >= 0) {
         surf_flush_async(i);
     }
@@ -2018,7 +2158,7 @@ static GLuint tex_get(const GpuTex *t, float scale[2])
 {
     scale[0] = scale[1] = 1;
     if (t->linear) {
-        int si = surf_find(t->addr);
+        int si = surf_find_t(t->addr, false);
         if (si >= 0 && !t->cube) {
             Surf *s = &G.surf[si];
             s->used = G.frame;
@@ -2036,6 +2176,28 @@ static GLuint tex_get(const GpuTex *t, float scale[2])
         }
         scale[0] = 1.0f / (float)t->w;
         scale[1] = 1.0f / (float)t->h;
+    } else if (!t->cube) {
+        /* v0.18.65: una textura con swizzle sobre una superficie con
+         * swizzle del mismo tamaño y formato: la textura de la GPU directo
+         * (antes: a la RAM, esperando, y de vuelta) */
+        int si = surf_find_t(t->addr, true);
+        if (si >= 0) {
+            Surf *s = &G.surf[si];
+            bool fmt_ok = (t->fmt == 0x06 && s->fmt == 8) || (t->fmt == 0x07 && s->fmt != 8);
+            if (s->swz && fmt_ok && s->w == (int)t->w && s->h == (int)t->h) {
+                s->used = G.frame;
+                tex_bind(GL_TEXTURE_2D, s->tex);
+                uint8_t key = (uint8_t)(1 + ((t->bilinear ? 1 : 0) | wkey(t->au) << 1 | wkey(t->av) << 3));
+                if (s->params != key) {
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, t->bilinear ? GL_LINEAR : GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, t->bilinear ? GL_LINEAR : GL_NEAREST);
+                    wrap_mode(GL_TEXTURE_2D, t->au, t->av);
+                    s->params = key;
+                }
+                G.st.swz_direct++;
+                return s->tex;
+            }
+        }
     }
     uint64_t sf0 = G.st.sfl_why[0];
     flush_range(t->addr, t->bytes);
@@ -2227,7 +2389,7 @@ static bool gpu_draw_(const GpuDraw *d)
         }
     }
     g_zone = Z_GL_TARGET;
-    int si = surf_get(d->color_pa, d->pitch, d->h, d->fmt);
+    int si = surf_get(d->color_pa, d->pitch, d->swz ? d->swz_h : d->h, d->fmt, d->swz);
     int zi = -1;
     if (d->zfmt && d->zeta_pa) {
         zi = zeta_get(d->zeta_pa, d->zpitch, G.surf[si].w, G.surf[si].h);
@@ -2553,8 +2715,13 @@ static bool impl_clear_color(uint32_t pa, uint32_t pitch, int h, int x0, int y0,
     if (!G.on || !G.ram || pitch < 4 || h <= 0) {
         return false;
     }
-    int si = surf_find(pa);
-    if (si >= 0 && G.surf[si].pitch == pitch) {
+    bool swz = (mask & 0x10u) != 0; /* v0.18.65: con swizzle (alto entero: 1 << bits 8..11) */
+    if (swz) {
+        h = 1 << ((mask >> 8) & 0xF);
+        mask &= 0xF;
+    }
+    int si = surf_find_t(pa, swz);
+    if (si >= 0 && G.surf[si].pitch == pitch && (!swz || G.surf[si].h == h)) {
         /* ya existe: se borra lo que tiene (antes, si el rectángulo era más
          * alto, se rehacía la superficie entera: a la RAM y de vuelta) */
         if (y1 > G.surf[si].h) {
@@ -2564,7 +2731,7 @@ static bool impl_clear_color(uint32_t pa, uint32_t pitch, int h, int x0, int y0,
             return true;
         }
     } else {
-        si = surf_get(pa, pitch, h, si >= 0 ? G.surf[si].fmt : 8);
+        si = surf_get(pa, pitch, h, si >= 0 ? G.surf[si].fmt : 8, swz);
         G.st.clear_new++;
     }
     Surf *s = &G.surf[si];

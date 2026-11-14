@@ -899,6 +899,7 @@ typedef struct Target {
     uint32_t zpitch, zfmt;
     float zmax;
     int x0, y0, x1, y1; /* recorte */
+    bool swz;           /* v0.18.65: superficie con swizzle (solo la GPU la dibuja) */
 } Target;
 
 static void read_px(const Target *t, const uint8_t *p, float d[4])
@@ -1303,7 +1304,17 @@ static bool target(Target *t)
     t->bpp = (fmt == 1 || fmt == 2 || fmt == 3) ? 2 : (fmt >= 4 && fmt <= 8) ? 4 : 0;
     t->pitch = S.surf_pitch & 0xFFFF;
     S.st.surf_format = S.surf_format, S.st.surf_pitch = S.surf_pitch, S.st.clip_h = S.clip_h, S.st.clip_v = S.clip_v;
-    S.st.no_target_why = !t->bpp ? 1 : !t->pitch ? 2 : type != 1 ? 3 : !S.has_color ? 4 : 0;
+    /* v0.18.65: con swizzle (tipo 2) el tamaño va en el formato (log2 de
+     * ancho y alto) y lo dibuja la GPU en una textura normal; a la RAM se
+     * pasa con swizzle (Halo 2: superficies de 64x64 que luego usa como
+     * textura; antes esos dibujos se saltaban) */
+    unsigned lw = (S.surf_format >> 16) & 0xFF, lh = (S.surf_format >> 24) & 0xFF;
+    bool swz = type == 2 && t->bpp == 4 && gpu_enabled() && lw >= 1 && lw <= 11 && lh <= 11;
+    if (swz) {
+        t->swz = true;
+        t->pitch = (1u << lw) * 4u;
+    }
+    S.st.no_target_why = !t->bpp ? 1 : !t->pitch ? 2 : (type != 1 && !swz) ? 3 : !S.has_color ? 4 : 0;
     if (S.st.no_target_why) {
         return false;
     }
@@ -1314,6 +1325,9 @@ static bool target(Target *t)
     t->y1 = t->y0 + (int)((S.clip_v >> 16) * fy);
     if (t->x1 > (int)(t->pitch / t->bpp)) {
         t->x1 = (int)(t->pitch / t->bpp);
+    }
+    if (t->swz && t->y1 > (1 << lh)) {
+        t->y1 = 1 << lh;
     }
     if (t->x1 <= t->x0 || t->y1 <= t->y0) {
         S.st.no_target_why = 5;
@@ -1766,6 +1780,8 @@ static bool gpu_try(const Target *t, const OutVert *ov)
     }
     d.color_pa = (uint32_t)(t->color - S.ram);
     d.pitch = t->pitch;
+    d.swz = t->swz;
+    d.swz_h = t->swz ? 1 << ((S.surf_format >> 24) & 0xFF) : 0;
     d.fmt = t->bpp == 4 ? t->fmt : 0;
     d.w = (int)(t->pitch / (t->bpp ? t->bpp : 4));
     d.h = t->y1;
@@ -1990,6 +2006,12 @@ static void draw_(void)
     }
     if (gpu_enabled()) {
         if (gpu_try(&t, ov)) {
+            free(ov);
+            return;
+        }
+        if (t.swz) { /* con swizzle solo la GPU */
+            S.st.no_target++;
+            S.st.no_target_n[3]++;
             free(ov);
             return;
         }
