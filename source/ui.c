@@ -961,7 +961,8 @@ static void draw_xbox_screen(const UiState *s)
                     }
                 }
             }
-            int o2 = snprintf(e, sizeof(e), "Kernel (más tiempo, %.1f s):", r->kns_total / 1e9);
+            int o2 = snprintf(e, sizeof(e), "Kernel (más tiempo, %.1f s; %llu de la hora sin salir de la CPU):",
+                              r->kns_total / 1e9, (unsigned long long)r->kfast);
             for (int t = 0; t < 5 && top[t] >= 0 && r->counts[top[t]]; t++) {
                 const KExport *x = kernel_export((unsigned)top[t]);
                 o2 += snprintf(e + o2, sizeof(e) - (size_t)o2, " %s %u %.1fs %.1fus", x ? x->name : "?",
@@ -981,9 +982,10 @@ static void draw_xbox_screen(const UiState *s)
         }
         unsigned mem_u, mem_t;
         crash_heap(&mem_u, &mem_t);
-        snprintf(e, sizeof(e), "JIT %s: %llu traducidos, búfer %.1f de %.0f MB, vaciado %u veces · %llu decodificados · código reescrito %llu veces · montón en uso %u de %u MB",
+        snprintf(e, sizeof(e), "JIT %s: %llu traducidos, búfer %.1f de %.0f MB, vaciado %u veces · %llu decodificados (%llu bloques, %llu compartiendo casilla) · código reescrito %llu veces · montón en uso %u de %u MB",
                  js.on ? "activo" : "apagado", (unsigned long long)js.compiled, js.used / 1048576.0,
-                 js.size / 1048576.0, js.flushes, (unsigned long long)js.decodes,
+                 js.size / 1048576.0, js.flushes, (unsigned long long)js.decodes, (unsigned long long)js.blocks,
+                 (unsigned long long)js.chained,
                  (unsigned long long)r->cpu.vm->rewrites, mem_u, mem_t);
         ovl_text(ly, C_WARN, e);
         ly += 22;

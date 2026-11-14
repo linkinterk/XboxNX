@@ -90,11 +90,13 @@ static uint64_t rd64(Kernel *k, uint32_t va) { return (uint64_t)rd(k, va) | ((ui
 static KThread *cur(Kernel *k) { return k->cur >= 0 ? &k->threads[k->cur] : NULL; }
 static uint32_t me(Kernel *k) { return k->cur >= 0 ? k->threads[k->cur].ethread : 0; }
 
-uint64_t kps_system_time(const Kernel *k)
+uint64_t kps_system_time_at(const Kernel *k, uint64_t now_ns)
 {
     uint64_t boot = k->boot_filetime ? k->boot_filetime : BOOT_FILETIME;
-    return boot + (uint64_t)k->time_offset + k->now_ns / 100;
+    return boot + (uint64_t)k->time_offset + now_ns / 100;
 }
+
+uint64_t kps_system_time(const Kernel *k) { return kps_system_time_at(k, k->now_ns); }
 
 static uint64_t system_time(Kernel *k) { return kps_system_time(k); }
 

@@ -74,6 +74,9 @@ typedef struct Cpu {
     uint32_t fault_addr;
     bool fault_write;
     unsigned kcall_ordinal;
+    /* etapa 5: llamadas al kernel que se pueden contestar sin salir de
+     * cpu_run (true: ya hecha, con eax/edx, eip y esp de la vuelta) */
+    bool (*kfast)(struct Cpu *c, unsigned ordinal);
     char why[64];             /* detalle (qué instrucción falta) */
 
     uint32_t trace[CPU_TRACE]; /* las últimas EIP */
@@ -125,6 +128,8 @@ typedef struct CpuJitStats {
     size_t used, size;
     uint32_t flushes;
     uint64_t decodes;  /* bloques decodificados (con o sin JIT) */
+    uint64_t blocks;   /* bloques guardados en la tabla */
+    uint64_t chained;  /* de ellos, los que comparten casilla (antes se echaban) */
     uint64_t compile_ticks, ticks_per_s; /* tiempo traduciendo */
 } CpuJitStats;
 void cpu_jit_stats(CpuJitStats *s);

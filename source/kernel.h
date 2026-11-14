@@ -270,6 +270,7 @@ void kio_dump(struct Kernel *k, void *file); /* los archivos abiertos (FILE *) *
 void ksys_register(Kernel *k);
 /* Hora del sistema del Xbox (FILETIME). */
 uint64_t kps_system_time(const Kernel *k);
+uint64_t kps_system_time_at(const Kernel *k, uint64_t now_ns);
 /* Espera un objeto (para las funciones de otros módulos que bloquean). */
 uint64_t kps_wait_one(KCall *c, uint32_t object, const char *what);
 

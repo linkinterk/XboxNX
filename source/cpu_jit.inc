@@ -23,7 +23,7 @@ typedef uint32_t (*JitEnter)(Cpu *c, uint64_t budget, void *entry);
  * EIP) en esta tabla y salta a su entrada sin volver a run_blocks. Cada
  * entrada comprueba presupuesto, interrupción, página y generación del
  * código antes de correr; si algo no va, vuelve a run_blocks. */
-#define JTAB (1u << 16)
+#define JTAB (1u << 18) /* etapa 5: con 65536 Halo 2 (cientos de miles de bloques) volvía mucho a run_blocks */
 typedef struct JSlot {
     uint32_t eip, pad;
     void *entry;
@@ -1217,7 +1217,7 @@ static bool jit_compile(Cpu *c, Block *b)
         uint32_t *look = e.p;
         ldrw(&e, W9, XC, OFF(eip));
         E(&e, 0x4A49412Au);                          /* eor w10, w9, w9, lsr #16 */
-        E(&e, 0x12003D4Au);                          /* and w10, w10, #0xFFFF */
+        E(&e, 0x1200454Au);                          /* and w10, w10, #0x3FFFF (JTAB - 1) */
         movx(&e, W11, (uint64_t)(uintptr_t)g_jtab);
         E(&e, 0x8B0A116Bu);                          /* add x11, x11, x10, lsl #4 */
         ldrw(&e, W12, W11, 0);

@@ -54,6 +54,7 @@ typedef struct Runner {
     uint32_t counts[K_ORDINAL_MAX]; /* llamadas de cada función del kernel */
     uint64_t kns[K_ORDINAL_MAX];    /* tiempo real en cada una (con el cambio de hilo que provoque) */
     uint64_t kns_total;
+    uint64_t kfast;          /* etapa 5: contestadas sin salir de cpu_run (la hora) */
     uint64_t ns;             /* tiempo de CPU del intérprete */
     uint64_t quantum_left;   /* instrucciones hasta cambiar de hilo */
     /* HalReturnToFirmware: lo que el juego dejó en LaunchDataPage */

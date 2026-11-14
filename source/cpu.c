@@ -1387,6 +1387,9 @@ static CpuStop step(Cpu *c)
         uint8_t v = fetch8(c);
         if (v == 0x3F) { /* llamada al kernel: int 0x3F, ordinal de 16 bits */
             c->kcall_ordinal = fetch16(c);
+            if (c->kfast && c->kfast(c, c->kcall_ordinal)) {
+                break; /* contestada aquí mismo, sin salir de cpu_run */
+            }
             c->stop = CPU_KCALL;
             break;
         }
@@ -1533,6 +1536,7 @@ struct Insn {
 };
 
 typedef struct Block {
+    struct Block *next;   /* etapa 5: los otros de la misma casilla de la tabla */
     uint32_t eip, ppage, gen;
     unsigned n;
     void *jit;            /* su traducción a ARM64 (2d.2), si la hay */
@@ -2429,6 +2433,10 @@ static bool ends_block(InsnFn f)
 }
 
 static uint64_t g_decodes; /* bloques decodificados (para la pantalla) */
+/* etapa 5: bloques en la tabla, y los que antes se habrían echado unos a
+ * otros (misma casilla, otro EIP: se decodificaban y traducían otra vez) */
+static uint64_t g_nblocks, g_chained;
+#define BLK_CAP 1000000u /* más bloques que esto (~600 MB): se vuelve a reusar la casilla */
 static bool g_superblocks = true; /* etapa 5: los jcc no terminan el bloque */
 static uint64_t g_compile_ticks; /* tiempo traduciendo al JIT */
 
@@ -2484,6 +2492,33 @@ static Block *get_block(Cpu *c, uint32_t eip)
     if (b && s->eip == eip && b->ppage == pp && b->gen == c->vm->gen[pp] && c->vm->code[pp]) {
         return b;
     }
+    /* Etapa 5: los bloques que caen en la misma casilla van en una lista
+     * (antes el nuevo echaba al que estaba: en Halo 2 eso era el 16% del
+     * tiempo decodificando otra vez, más traducirlos otra vez al JIT y
+     * llenar el búfer). El que se pide pasa al frente. */
+    Block *old = NULL; /* el de este EIP que ya no vale: se decodifica en su lugar */
+    if (b && s->eip == eip) {
+        old = b;
+    } else if (b) {
+        for (Block **pl = &b->next; *pl; pl = &(*pl)->next) {
+            Block *x = *pl;
+            if (x->eip != eip) {
+                continue;
+            }
+            *pl = x->next; /* al frente */
+            x->next = s->b;
+            s->b = x;
+            s->eip = eip;
+            if (x->ppage == pp && x->gen == c->vm->gen[pp] && c->vm->code[pp]) {
+                return x;
+            }
+            old = x;
+            break;
+        }
+        if (!old && g_nblocks >= BLK_CAP) {
+            old = b; /* demasiados: como antes, se reusa el de la casilla */
+        }
+    }
     /* decodificar */
     Insn tmp[BLK_MAX];
     Rd r = {c->vm->ram + ((size_t)pp << 12), eip & 0xFFFu, false};
@@ -2503,9 +2538,19 @@ static Block *get_block(Cpu *c, uint32_t eip)
         }
     }
     /* n == 0: la primera ya no tiene función (queda guardado: el intérprete) */
-    Block *nb = realloc(b, sizeof(Block) + n * sizeof(Insn));
+    Block *nb = realloc(old, sizeof(Block) + n * sizeof(Insn));
     if (!nb) {
         return NULL;
+    }
+    if (old) {
+        s->b = nb; /* old era el primero de la lista (next se copió con él) */
+    } else {
+        nb->next = s->b;
+        s->b = nb;
+        g_nblocks++;
+        if (nb->next) {
+            g_chained++;
+        }
     }
     nb->eip = eip;
     nb->ppage = pp;
@@ -2528,7 +2573,6 @@ static Block *get_block(Cpu *c, uint32_t eip)
     memcpy(nb->in, tmp, n * sizeof(Insn));
     nb->spin = is_spin(nb);
     s->eip = eip;
-    s->b = nb;
     return nb;
 }
 
@@ -2548,6 +2592,8 @@ void cpu_jit_stats(CpuJitStats *s)
     s->flushes = g_jit.epoch ? g_jit.epoch - 1 : 0;
 #endif
     s->decodes = g_decodes;
+    s->blocks = g_nblocks;
+    s->chained = g_chained;
     s->compile_ticks = g_compile_ticks;
 #if defined(__SWITCH__)
     s->ticks_per_s = 19200000ull; /* el reloj del sistema de la Switch */
@@ -2573,10 +2619,7 @@ void cpu_profile(Cpu *c, CpuProfile *p)
         return;
     }
     for (unsigned i = 0; i < BLK_HASH; i++) {
-        const Block *b = tab[i].b;
-        if (!b) {
-            continue;
-        }
+      for (const Block *b = tab[i].b; b; b = b->next) {
         uint64_t ex = b->execs;
 #ifdef HAVE_JIT
         if (b->jit && b->jit_epoch == g_jit.epoch && b->jcnt) {
@@ -2609,6 +2652,7 @@ void cpu_profile(Cpu *c, CpuProfile *p)
             }
             w[key] += ex;
         }
+      }
     }
     for (int t = 0; t < CPU_PROF_TOP; t++) {
         unsigned best = 0;
@@ -2883,11 +2927,15 @@ void cpu_free(Cpu *c)
     BlockSlot *tab = c->blocks;
     if (tab) {
         for (unsigned i = 0; i < BLK_HASH; i++) {
-            free(tab[i].b);
+            for (Block *b = tab[i].b, *nx; b; b = nx) {
+                nx = b->next;
+                free(b);
+            }
         }
         free(tab);
     }
     c->blocks = NULL;
+    g_nblocks = g_chained = 0;
 }
 
 void cpu_init(Cpu *c, Vm *vm)

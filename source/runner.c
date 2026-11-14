@@ -6,8 +6,11 @@
 
 #include "hw.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+
+static bool kernel_fast(Cpu *c, unsigned ord);
 
 /* Pila del hilo de arranque */
 #define MAIN_STACK_SIZE  (256u * 1024u)
@@ -80,6 +83,7 @@ bool runner_boot(Runner *r, Vm *vm, Kernel *k, const LoadReport *load)
     r->cpu.port_out = hw_port_out;
     r->cpu.dev = k;
     r->cpu.clock_ns = &k->now_ns;
+    r->cpu.kfast = kernel_fast;
     k->cur = ti;
     t->state = KT_RUNNING;
     kps_load(k, &r->cpu);
@@ -193,6 +197,57 @@ static void io_log(Runner *r, unsigned ord, const KCall *kc, uint32_t ret, uint3
     size_t nl = strnlen(kc->note, sizeof(kc->note)), cap = sizeof(x->note) - 1;
     const char *from = nl > cap ? kc->note + nl - cap : kc->note; /* el final de la ruta */
     memcpy(x->note, from, nl > cap ? cap : nl);
+}
+
+/* Etapa 5: las que solo leen la hora se contestan sin salir de cpu_run (ni
+ * anotarlas en el registro de llamadas). Halo 2 (DirectSound, en cada voz)
+ * llama a KeQuerySystemTime hasta 250 000 veces por segundo, y cada una
+ * salía del JIT, pasaba por el despachador y volvía. La hora es la misma que
+ * daría la llamada normal: la del final de lo ya ejecutado. */
+static bool kernel_fast(Cpu *c, unsigned ord)
+{
+    Runner *r = (Runner *)(void *)((char *)c - offsetof(Runner, cpu));
+    Kernel *k = r->k;
+    if (!k || ord >= K_ORDINAL_MAX || !k->impl[ord]) {
+        return false;
+    }
+    uint64_t now = k->now_ns + (c->icount + 1 - c->clock_icount) * (c->ns_per_instr ? c->ns_per_instr : 1);
+    uint32_t esp = c->r[R_ESP], back, pop;
+    uint64_t ret;
+    switch (ord) {
+    case 128: { /* KeQuerySystemTime(*CurrentTime) */
+        uint32_t p = vm_rd32(c->vm, esp + 4);
+        uint64_t t = kps_system_time_at(k, now);
+        uint8_t *h = vm_host(c->vm, p);
+        if (!h || (p & 0xFFFu) > 0xFF8u) {
+            return false; /* fuera de la RAM o entre dos páginas: la normal */
+        }
+        if (!vm_wr32(c->vm, p, (uint32_t)t) || !vm_wr32(c->vm, p + 4, (uint32_t)(t >> 32))) {
+            return false;
+        }
+        ret = 0;
+        pop = 4;
+        break;
+    }
+    case 125: /* KeQueryInterruptTime() */
+        ret = now / 100;
+        pop = 0;
+        break;
+    case 126: /* KeQueryPerformanceCounter() */
+        ret = (uint64_t)((unsigned __int128)now * 3375000u / 1000000000u);
+        pop = 0;
+        break;
+    default:
+        return false;
+    }
+    back = vm_rd32(c->vm, esp);
+    c->r[R_EAX] = (uint32_t)ret;
+    c->r[R_EDX] = (uint32_t)(ret >> 32);
+    c->eip = back;
+    c->r[R_ESP] = esp + 4 + pop;
+    r->counts[ord]++;
+    r->kfast++;
+    return true;
 }
 
 static void kernel_call(Runner *r)

@@ -157,6 +157,36 @@ static void thread_tests(void)
     printf("3b hilos: %u cambios, %llu ns virtuales, fin: %s\n", k.switches, (unsigned long long)k.now_ns,
            g_run.end);
 
+    /* 1') etapa 5: KeQuerySystemTime sin salir de cpu_run: dos lecturas, la
+     *     segunda más tarde, y la pila y la vuelta bien */
+    g_pc = 0;
+    main_va = here();
+    push(SCRATCH + 0x200);
+    kcall("KeQuerySystemTime");
+    store_eax(SCRATCH + 0x210);
+    b1(0xB9); d4(5000);         /* mov ecx, 5000 */
+    b1(0x49); b1(0x75); b1(0xFD); /* dec ecx; jnz -3 (que pase el tiempo) */
+    push(SCRATCH + 0x208);
+    kcall("KeQuerySystemTime");
+    kcall("KeQueryInterruptTime");
+    store_eax(SCRATCH + 0x214);
+    b1(0x89); b1(0xE0); /* mov eax, esp */
+    store_eax(SCRATCH + 0x218);
+    push(7);
+    kcall("HalReturnToFirmware");
+    boot(main_va);
+    {
+        uint32_t esp0 = g_run.cpu.r[4];
+        CHECK(runner_slice(&g_run, 100000) == RUN_SYSTEM_STOP);
+        uint64_t t1 = rd(SCRATCH + 0x200) | (uint64_t)rd(SCRATCH + 0x204) << 32;
+        uint64_t t2 = rd(SCRATCH + 0x208) | (uint64_t)rd(SCRATCH + 0x20C) << 32;
+        CHECK(t1 > 0 && t2 > t1);
+        CHECK(rd(SCRATCH + 0x210) == 0 && rd(SCRATCH + 0x214) > 0);
+        CHECK(rd(SCRATCH + 0x218) == esp0);
+        CHECK(g_run.kfast == 3 && count_calls("KeQuerySystemTime") == 0);
+        printf("5 la hora sin salir de la CPU: %llu y %llu\n", (unsigned long long)t1, (unsigned long long)t2);
+    }
+
     /* 2) evento: el trabajador espera un evento que el principal señala */
     g_pc = 0;
     worker = here();

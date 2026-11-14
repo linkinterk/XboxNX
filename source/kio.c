@@ -63,6 +63,7 @@ typedef pthread_cond_t ACond;
 
 typedef struct AioReq {
     FILE *fp;
+    uint32_t id;      /* el archivo del host (host_id), para esperar solo por él */
     uint64_t off;
     uint8_t *buf;
     uint32_t len;
@@ -130,7 +131,9 @@ static void aio_init(void)
     ac_init(&g_aio.more);
     ac_init(&g_aio.done);
 #ifdef __SWITCH__
-    g_aio.on = R_SUCCEEDED(threadCreate(&g_aio_thr, aio_entry, NULL, NULL, 0x8000, 0x2C, 2)) &&
+    /* 0x2B: por encima del hilo de la GPU (0x2C, mismo núcleo), que si no
+     * lo dejaba esperando mientras dibujaba; casi todo el tiempo espera a la SD */
+    g_aio.on = R_SUCCEEDED(threadCreate(&g_aio_thr, aio_entry, NULL, NULL, 0x8000, 0x2B, 2)) &&
                R_SUCCEEDED(threadStart(&g_aio_thr));
 #else
     g_aio.on = pthread_create(&g_aio_thr, NULL, aio_entry, NULL) == 0;
@@ -153,8 +156,41 @@ static void aio_drain(void)
     am_unlock(&g_aio.m);
 }
 
+/* El archivo del host, como número (sin distinguir mayúsculas). */
+static uint32_t host_id(const char *s)
+{
+    uint32_t h = 2166136261u;
+    for (; *s; s++) {
+        h = (h ^ (uint32_t)tolower((unsigned char)*s)) * 16777619u;
+    }
+    return h | 1u;
+}
+
+/* Etapa 5: esperar solo lo que falta escribir de ESE archivo (antes, leer
+ * cualquier archivo del disco duro esperaba todas las escrituras: al cargar
+ * un nivel, Halo 2 lee cache004.map mientras copia a cache002.map, y cada
+ * lectura esperaba la copia entera). */
+static void aio_drain_id(uint32_t id)
+{
+    if (!g_aio.on) {
+        return;
+    }
+    am_lock(&g_aio.m);
+    for (;;) {
+        bool pend = false;
+        for (unsigned i = 0; i < g_aio.n && !pend; i++) {
+            pend = g_aio.q[(g_aio.head + i) % AIO_MAX].id == id;
+        }
+        if (!pend) {
+            break;
+        }
+        ac_wait(&g_aio.done, &g_aio.m);
+    }
+    am_unlock(&g_aio.m);
+}
+
 /* Encolar (buf pasa a ser de la cola). false: sin hilo, hacerla aquí. */
-static bool aio_write(FILE *fp, uint64_t off, uint8_t *buf, uint32_t len)
+static bool aio_write(FILE *fp, uint32_t id, uint64_t off, uint8_t *buf, uint32_t len)
 {
     if (!g_aio.on) {
         return false;
@@ -163,7 +199,7 @@ static bool aio_write(FILE *fp, uint64_t off, uint8_t *buf, uint32_t len)
     while (g_aio.n == AIO_MAX || (g_aio.bytes + len > AIO_BYTES && g_aio.n)) {
         ac_wait(&g_aio.done, &g_aio.m);
     }
-    g_aio.q[(g_aio.head + g_aio.n) % AIO_MAX] = (AioReq){fp, off, buf, len};
+    g_aio.q[(g_aio.head + g_aio.n) % AIO_MAX] = (AioReq){fp, id, off, buf, len};
     g_aio.n++;
     g_aio.bytes += len;
     g_aio.busy = true;
@@ -1026,7 +1062,9 @@ static uint64_t NtReadFile(KCall *c)
 {
     {
         KFile *f0 = file_of(c->k, c->a[0]);
-        if (!f0 || f0->kind != F_DISC) {
+        if (f0 && f0->kind == F_HOST && f0->host[0]) {
+            aio_drain_id(host_id(f0->host)); /* lo que falta escribir de este archivo */
+        } else if (!f0 || f0->kind != F_DISC) {
             aio_drain(); /* leer lo que se escribió en segundo plano */
         }
     }
@@ -1081,7 +1119,9 @@ static uint64_t NtReadFileScatter(KCall *c)
 {
     {
         KFile *f0 = file_of(c->k, c->a[0]);
-        if (!f0 || f0->kind != F_DISC) {
+        if (f0 && f0->kind == F_HOST && f0->host[0]) {
+            aio_drain_id(host_id(f0->host)); /* lo que falta escribir de este archivo */
+        } else if (!f0 || f0->kind != F_DISC) {
             aio_drain(); /* leer lo que se escribió en segundo plano */
         }
     }
@@ -1171,7 +1211,7 @@ static uint64_t NtWriteFile(KCall *c)
     uint32_t st = ST_SUCCESS, done = 0;
     uint8_t *copy = len ? malloc(len) : NULL;
     if (copy && vm_read(k->vm, c->a[5], copy, len)) {
-        if (aio_write(f->fp, off, copy, len)) { /* la escribe el hilo; el juego sigue */
+        if (aio_write(f->fp, host_id(f->host), off, copy, len)) { /* la escribe el hilo; el juego sigue */
             f->wrote = true;
             k->writes++;
             io_moved(f, named, off + len);
