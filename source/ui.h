@@ -70,6 +70,7 @@ typedef struct UiState {
 #define UI_PAGES 4
 
 void ui_draw(const UiState *s);
+void ui_resumen_exit(Runner *r); /* al salir: las instrucciones lentas, a resumen.txt */
 /* Filas visibles por página de la pantalla de detalle (para el scroll). */
 int ui_detail_rows(void);
 /* Filas visibles de la lista de importaciones de la etapa 2a. */

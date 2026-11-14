@@ -1440,8 +1440,8 @@ static struct {
      * shader copia la textura al búfer en la GPU, ya en BGRA, sin esperar:
      * el hilo de la GPU sigue con el cuadro siguiente. La primera vez se
      * compara con glReadPixels; si no da lo mismo, no se usa. */
-    GLuint cs, ssbo;
-    size_t scap;
+    GLuint cs, ssbo, ssbo2; /* ssbo2: para las lecturas que el juego espera */
+    size_t scap, scap2;
     int cs_state;     /* 0: sin probar, 1: se usa, -1: no hay o no dio lo mismo */
     bool via_cs;      /* lo que viene en camino está en el búfer del compute */
 } RB = {.mode = -1};
@@ -1494,23 +1494,23 @@ static bool cs_make(void)
     return true;
 }
 
-/* La superficie s al búfer del compute (en la GPU, sin esperar). */
-static bool cs_dispatch(const Surf *s, size_t bytes)
+/* La superficie s a un búfer del compute (en la GPU, sin esperar). */
+static bool cs_dispatch_to(const Surf *s, size_t bytes, GLuint *buf, size_t *cap)
 {
     if (!RB.cs && !cs_make()) {
         RB.cs_state = -1;
         return false;
     }
-    if (!RB.ssbo) {
-        glGenBuffers(1, &RB.ssbo);
+    if (!*buf) {
+        glGenBuffers(1, buf);
     }
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, RB.ssbo);
-    if (RB.scap < bytes) {
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, *buf);
+    if (*cap < bytes) {
         glBufferData(GL_SHADER_STORAGE_BUFFER, (GLsizeiptr)bytes, NULL, GL_STREAM_READ);
-        RB.scap = bytes;
+        *cap = bytes;
     }
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-    p_glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, RB.ssbo);
+    p_glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, *buf);
     tex_unit(7);
     tex_bind(GL_TEXTURE_2D, s->tex);
     glUseProgram(RB.cs);
@@ -1521,6 +1521,8 @@ static bool cs_dispatch(const Surf *s, size_t bytes)
     SC.valid = false; /* el programa puesto cambió */
     return true;
 }
+
+static bool cs_dispatch(const Surf *s, size_t bytes) { return cs_dispatch_to(s, bytes, &RB.ssbo, &RB.scap); }
 
 /* La primera vez: el compute y glReadPixels, ¿dan lo mismo? Deja la
  * superficie en la RAM (con lo de glReadPixels, que siempre vale). */
@@ -1702,6 +1704,30 @@ static void surf_flush(int i)
         s->dirty = false;
         return;
     }
+    uint64_t t0 = now_ns();
+    size_t bytes = (size_t)s->pitch * (size_t)s->h;
+    G.st.sflushes++;
+    int zprev = g_zone;
+    g_zone = Z_READ; /* en el perfil: "leer cuadro", no lo que la pidió */
+    /* etapa 5: también aquí por el compute (glReadPixels tardaba ~35 ms en la
+     * Switch: cuando una textura usa lo dibujado en otro formato, o cambia
+     * una superficie, el hilo de la GPU se quedaba esperando) */
+    if (RB.cs_state > 0 && cs_dispatch_to(s, bytes, &RB.ssbo2, &RB.scap2)) {
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, RB.ssbo2);
+        const void *p = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, (GLsizeiptr)bytes, GL_MAP_READ_BIT);
+        if (p) {
+            memcpy(G.ram + s->pa, p, bytes);
+            glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+        }
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        if (p) {
+            s->dirty = false;
+            G.st.flushes++;
+            G.st.ns_sflush += now_ns() - t0;
+            g_zone = zprev;
+            return;
+        }
+    }
     glBindFramebuffer(GL_READ_FRAMEBUFFER, s->fbo);
     SC.valid = false; /* la caché de estado de impl_draw ya no vale */
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
@@ -1710,6 +1736,8 @@ static void surf_flush(int i)
     glPixelStorei(GL_PACK_ROW_LENGTH, 0);
     s->dirty = false;
     G.st.flushes++;
+    G.st.ns_sflush += now_ns() - t0;
+    g_zone = zprev;
 }
 
 static void surf_upload(Surf *s)
@@ -2946,6 +2974,7 @@ static void q_exec(const QHdr *h)
     case C_INVAL: {
         uint32_t v[2];
         memcpy(v, body, 8);
+        g_zone = Z_INVAL; /* el juego escribió en la RAM de una superficie: subirla */
         impl_invalidate(v[0], v[1]);
         break;
     }
@@ -2973,6 +3002,7 @@ static void q_exec(const QHdr *h)
     case C_CALL: {
         CCall c;
         memcpy(&c, body, sizeof(c));
+        g_zone = Z_SYNC; /* lo que el juego espera (leer una superficie, consultas...) */
         c.fn(c.arg);
         __atomic_store_n(&Q.done, c.id, __ATOMIC_RELEASE);
         qm_lock(&Q.m);

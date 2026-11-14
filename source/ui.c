@@ -860,6 +860,96 @@ static void diag_end(const UiState *s)
     fclose(f);
 }
 
+/* ---- resumen.txt: una línea cada ~30 s con lo principal (para mandar
+ * solo este archivo en vez de rendimiento.txt y perfil.txt) */
+#ifdef __SWITCH__
+#define SUM_FILE "sdmc:/switch/XboxNX/resumen.txt"
+#else
+#define SUM_FILE "resumen.txt"
+#endif
+
+static void resumen_tick(const UiState *s, double fps, double spd)
+{
+    static time_t last;
+    static bool started;
+    static uint64_t p_get, p_dec, p_all, p_kfast, p_rd, p_rdns, p_busy, p_sfl, p_sflns;
+    static unsigned p_flushes;
+    static double fps_sum, spd_sum, fps_min = 1e9;
+    static unsigned n;
+    fps_sum += fps, spd_sum += spd, n++;
+    if (fps < fps_min) {
+        fps_min = fps;
+    }
+    time_t now = time(NULL);
+    if (!last) {
+        last = now;
+    }
+    if (now - last < 30) {
+        return;
+    }
+    double dt = (double)(now - last);
+    last = now;
+    const Runner *r = s->run;
+    const Cpu *c = &r->cpu;
+    CpuJitStats js;
+    cpu_jit_stats(&js);
+    const GpuStats *gs = gpu_stats();
+    uint64_t get = c->st_t_get - p_get, dec = c->st_t_dec - p_dec, all = c->st_t_all - p_all;
+    uint64_t kf = r->kfast - p_kfast, rd = r->counts[219] - p_rd, rdns = r->kns[219] - p_rdns;
+    uint64_t busy = gs->ns_busy - p_busy, sfl = gs->sflushes - p_sfl, sflns = gs->ns_sflush - p_sflns;
+    p_get = c->st_t_get, p_dec = c->st_t_dec, p_all = c->st_t_all, p_kfast = r->kfast;
+    p_rd = r->counts[219], p_rdns = r->kns[219], p_busy = gs->ns_busy, p_sfl = gs->sflushes, p_sflns = gs->ns_sflush;
+    unsigned fl = js.flushes - p_flushes;
+    p_flushes = js.flushes;
+    FILE *f = fopen(SUM_FILE, started ? "a" : "w");
+    if (f) {
+        if (!started) {
+            fprintf(f, "XboxNX v%s · resumen (cada ~30 s: promedios de esos 30 s)\n", s->version ? s->version : "?");
+        }
+        started = true;
+        struct tm *tm = localtime(&now);
+        char ts[16] = "?";
+        if (tm) {
+            strftime(ts, sizeof(ts), "%H:%M:%S", tm);
+        }
+        fprintf(f, "%s · %.1f FPS (mín %.1f) · juego %.0f%% · hilo del juego: CPU %u%% kernel %u%% audio %u%% GPU %u%% · "
+                   "buscar bloque %.1f%% (decodificar %.1f%%) · JIT vaciado %u · bloques %llu (%llu compartiendo) · "
+                   "hilo GPU %.0f%% · leídas al momento %llu (%.0f ms) · lecturas %llu (%.1f ms c/u) · hora rápida %.0f/s · "
+                   "pantalla %u ms\n",
+                ts, n ? fps_sum / n : 0.0, fps_min < 1e8 ? fps_min : 0.0, n ? 100.0 * spd_sum / n : 0.0,
+                (s->prof[PROF_CPU] + 5) / 10, (s->prof[PROF_KERNEL] + 5) / 10, (s->prof[PROF_APU] + 5) / 10,
+                (s->prof[PROF_GPU] + 5) / 10, all ? 100.0 * (double)get / (double)all : 0.0,
+                all ? 100.0 * (double)dec / (double)all : 0.0, fl, (unsigned long long)js.blocks,
+                (unsigned long long)js.chained, 100.0 * (double)busy / (dt * 1e9), (unsigned long long)sfl, sflns / 1e6,
+                (unsigned long long)rd, rd ? rdns / 1e6 / (double)rd : 0.0, (double)kf / dt, s->ui_ms);
+        fclose(f);
+    }
+    fps_sum = spd_sum = 0, n = 0, fps_min = 1e9;
+}
+
+/* Al salir (la CPU ya parada): las instrucciones x86 que el JIT no traduce
+ * y se hacen en C, las más usadas, al final de resumen.txt. */
+void ui_resumen_exit(Runner *r)
+{
+    if (!r || !r->cpu.vm) {
+        return;
+    }
+    CpuProfile pf;
+    cpu_profile(&r->cpu, &pf);
+    FILE *f = fopen(SUM_FILE, "a");
+    if (!f) {
+        return;
+    }
+    fprintf(f, "Al salir · instrucciones lentas (en C): %.2f%% de %llu", pf.insns ? 100.0 * (double)pf.slow / (double)pf.insns : 0.0,
+            (unsigned long long)pf.insns);
+    for (unsigned t = 0; t < pf.n; t++) {
+        fprintf(f, " · %s%02X %.2f%%", pf.op[t] >= 0x0F00 ? "0F" : "", pf.op[t] & 0xFF,
+                pf.insns ? 100.0 * (double)pf.count[t] / (double)pf.insns : 0.0);
+    }
+    fprintf(f, "\n");
+    fclose(f);
+}
+
 static void draw_xbox_screen(const UiState *s)
 {
     diag_begin();
@@ -879,6 +969,7 @@ static void draw_xbox_screen(const UiState *s)
         gfx_image(&img, (UI_W - w) / 2, 34, w, h, 0);
         double fps, spd;
         game_rate(r, &fps, &spd);
+        resumen_tick(s, fps, spd);
         snprintf(b, sizeof(b), "%.1f FPS · juego al %.0f%%  ·  Pantalla del Xbox  ·  %dx%d  ·  PCRTC %08X%s  ·  %u cuadros  ·  %u flips  ·  %.2f s del juego",
                  fps, spd * 100.0, img.w, img.h, (unsigned)hw_scanout(),
                  hw_shown() != (hw_scanout() & (VM_RAM_SIZE - 1u)) ? " (negro: se ve el último dibujado)" : "", hs->frames,
@@ -1020,10 +1111,10 @@ static void draw_xbox_screen(const UiState *s)
                      gs->ns_draw / 1e9, gs->ns_vbuf / 1e9, gs->ns_tex / 1e9, gs->ns_call / 1e9, gs->ns_read / 1e9, gs->ns_rp / 1e9, gs->rp_cs == 1 ? "por compute shader" : gs->rp_cs == 2 ? "el compute no coincidió" : gs->rp_cs == 3 ? "sin compute" : gs->rp_mode == 2 ? "usa RGBA" : gs->rp_mode == 1 ? "usa BGRA" : "probando", gs->rp_us[0], gs->rp_us[1], gs->surfaces, gs->clears_c, gs->clears_z, gs->clear_bind, gs->clear_new, gs->queries, gs->ns_query / 1e9, hw_stats()->zpass_tests, hw_stats()->reports, hw_stats()->reports_noinst, hw_stats()->reports_other, hw_stats()->other_class, gpu_info());
             ovl_text(ly, gpu_enabled() ? C_GREEN : C_WARN, e);
             if (gs->mt) {
-                char m[260];
-                snprintf(m, sizeof(m), "Hilo de la GPU: %u dibujos por la cola, %u perdidos, ocupado %.1f s · el juego: copiando %.1f s, esperando lugar %.1f s, %u esperas de respuesta (%.1f s) · cola máx %.1f MB",
+                char m[340];
+                snprintf(m, sizeof(m), "Hilo de la GPU: %u dibujos por la cola, %u perdidos, ocupado %.1f s · el juego: copiando %.1f s, esperando lugar %.1f s, %u esperas de respuesta (%.1f s) · cola máx %.1f MB · superficies leídas al momento %llu (%.1f s)",
                          gs->mt_draws, gs->mt_lost, gs->ns_busy / 1e9, gs->ns_enq / 1e9, gs->ns_qwait / 1e9, gs->syncs,
-                         gs->ns_sync / 1e9, gs->q_max / 1048576.0);
+                         gs->ns_sync / 1e9, gs->q_max / 1048576.0, (unsigned long long)gs->sflushes, gs->ns_sflush / 1e9);
                 diag_add(m);
             }
             {

@@ -133,6 +133,7 @@ typedef struct GpuStats {
     uint64_t ns_sync;  /* el juego esperando una respuesta del hilo */
     uint64_t q_max;    /* lo más lleno que estuvo la cola (bytes) */ /* borrados de color / Z, cuántos cambiaron de FBO, cuántos crearon superficie */
     int rp_mode;          /* 0 probando, 1 BGRA, 2 RGBA (cambiando R y B en la CPU) */
+    uint64_t sflushes, ns_sflush; /* lecturas de superficies que no podían esperar */
     int rp_cs;            /* el cuadro con compute shader: 0 sin probar, 1 se usa, 2 no dio lo mismo, 3 no hay */
     unsigned rp_us[2];    /* µs por lectura con cada forma, en la prueba */
     unsigned indexed; /* etapa 5: dibujos con índices (cada vértice una vez) */

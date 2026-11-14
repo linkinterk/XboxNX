@@ -35,7 +35,7 @@
 #include "apu/apu.h"
 #include <time.h>
 
-#define APP_VER   "0.18.59"
+#define APP_VER   "0.18.60"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -962,6 +962,10 @@ int main(int argc, char **argv)
      * hacía por su cuenta al terminar el programa, ya sin la RAM) */
     crash_step("cerrar la GPU");
     gpu_exit();
+    crash_step("resumen al salir");
+    if (g_run.k) {
+        ui_resumen_exit(&g_run);
+    }
     crash_step("soltar el JIT");
     cpu_free(&g_run.cpu);
     cpu_jit_exit();
