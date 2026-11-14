@@ -560,6 +560,8 @@ static void get_report(Kernel *k, uint32_t v)
                 last[slot].off = v & 0x00FFFFFFu;
                 last[slot].n = n;
             }
+            g_hw.st.report_last = n;
+            g_hw.st.reports_zero += n == 0;
             uint64_t ts = k->now_ns;
             p[0] = (uint32_t)ts;
             p[1] = (uint32_t)(ts >> 32);

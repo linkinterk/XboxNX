@@ -969,6 +969,12 @@ void ui_resumen_exit(Runner *r)
     /* gráficos: qué pide leer lo dibujado al momento, y los dibujos sin destino */
     const GpuStats *gs = gpu_stats();
     const SwStats *sw = sw_stats();
+    {
+        const HwStats *hs = hw_stats();
+        fprintf(f, "Al salir · pruebas de visibilidad: %u encendidas, %u borradas, %u informes (%u con 0 píxeles, %u sin DMA), "
+                   "el último %u píxeles\n",
+                hs->zpass_on, hs->zpass_tests, hs->reports, hs->reports_zero, hs->reports_noinst, (unsigned)hs->report_last);
+    }
     fprintf(f, "Al salir · gráficos: texturas con swizzle tomadas de lo dibujado %llu · ",
             (unsigned long long)gpu_stats()->swz_direct);
     fprintf(f, "leídas al momento %llu (textura %llu, software %llu, todo %llu, otro %llu); "

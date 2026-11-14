@@ -1957,6 +1957,63 @@ static bool emit_extra(Em *e, const Block *b, unsigned i, const Vm *vm)
     if (emit_shift_mem(e, b, i, vm)) {
         return true;
     }
+    if (f == x_str && in->imm == 0xF3 && !in->fs && (in->aop == 0xA4 || in->aop == 0xA5 || in->aop == 0xAA || in->aop == 0xAB) &&
+        (in->sz == 1 || in->sz == 4)) {
+        /* v0.18.65: rep movs / rep stos hacia adelante dentro de una página
+         * (las copias cortas de Halo 2): un bucle aquí; si cruzan de página,
+         * van hacia atrás, son de más de 4 KB o tocan código, la de C. */
+        bool mov = in->aop == 0xA4 || in->aop == 0xA5;
+        unsigned sh = in->sz == 4 ? 2 : 0;
+        int ecx = k_rmap[R_ECX], esi = k_rmap[R_ESI], edi = k_rmap[R_EDI], eax = k_rmap[R_EAX];
+        uint32_t *none = fwd_cb(e, J_CBZ, ecx);
+        ldrw(e, W12, XC, OFF(flags));
+        E(e, 0x7216019Fu);                       /* tst w12, #0x400 (DF) */
+        slow_bcond(e, &s, COND_NE);
+        E(e, 0x7100001Fu | (sh ? 1024u : 4095u) << 10 | (uint32_t)ecx << 5); /* cmp ecx, #máximo */
+        slow_bcond(e, &s, COND_HI);
+        lslw_i(e, X1, ecx, sh);                  /* w1 = bytes */
+        /* destino: x10 */
+        lsrw(e, W10, edi, 12);
+        ldrw_lsl2(e, W10, XPT, W10);
+        slow_add(e, &s, fwd_cb(e, J_CBZ, W10));
+        ubfx12(e, W11, edi);
+        rrr(e, ADDW, 14, W11, X1);
+        cmpwi(e, 14, 0x1000);
+        slow_bcond(e, &s, COND_HI);
+        E(e, 0x386A6ACFu);                       /* ldrb w15, [x22, x10]: página con código */
+        slow_add(e, &s, fwd_cb(e, J_CBNZ, W15));
+        E(e, 0x8B0A328Au);                       /* add x10, x20, x10, lsl #12 */
+        E(e, 0x8B0B014Au);                       /* add x10, x10, x11 */
+        if (mov) { /* origen: x14 */
+            lsrw(e, W13, esi, 12);
+            ldrw_lsl2(e, W13, XPT, W13);
+            slow_add(e, &s, fwd_cb(e, J_CBZ, W13));
+            ubfx12(e, W11, esi);
+            rrr(e, ADDW, 14, W11, X1);
+            cmpwi(e, 14, 0x1000);
+            slow_bcond(e, &s, COND_HI);
+            E(e, 0x8B0D328Eu);                   /* add x14, x20, x13, lsl #12 */
+            E(e, 0x8B0B01CEu);                   /* add x14, x14, x11 */
+        }
+        mov_w(e, W13, X1);
+        uint32_t *loop = e->p;
+        if (mov) {
+            E(e, (sh ? 0xB84045CCu : 0x384015CCu)); /* ldr(b) w12, [x14], #n */
+            E(e, (sh ? 0xB800454Cu : 0x3800154Cu)); /* str(b) w12, [x10], #n */
+        } else {
+            E(e, (sh ? 0xB8004540u : 0x38001540u) | (uint32_t)eax); /* str(b) eax, [x10], #n */
+        }
+        E(e, 0x71000000u | (1u << sh) << 10 | (uint32_t)W13 << 5 | W13); /* subs w13, w13, #n */
+        E(e, 0x54000001u | (((uint32_t)(loop - e->p)) & 0x7FFFFu) << 5);  /* b.ne loop */
+        rrr(e, ADDW, edi, edi, X1);
+        if (mov) {
+            rrr(e, ADDW, esi, esi, X1);
+        }
+        movw(e, ecx, 0);
+        patch(e, none);
+        slow_tail(e, b, i, vm, &s);
+        return true;
+    }
     if (is_rot_reg(in) && e->lf_dead) { /* rol / ror sin flags (nadie los lee) */
         unsigned cnt = in->imm & 31;
         if (in->sz == 4) {
