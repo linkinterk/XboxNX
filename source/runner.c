@@ -247,6 +247,21 @@ static bool kernel_fast(Cpu *c, unsigned ord)
     c->r[R_ESP] = esp + 4 + pop;
     r->counts[ord]++;
     r->kfast++;
+    { /* quién la pide (para resumen.txt): el que más se queda; el menor se reemplaza */
+        unsigned lo = 0;
+        for (unsigned j = 0; j < 8; j++) {
+            if (r->kf_who[j] == back) {
+                r->kf_n[j]++;
+                goto counted;
+            }
+            if (r->kf_n[j] < r->kf_n[lo]) {
+                lo = j;
+            }
+        }
+        r->kf_who[lo] = back;
+        r->kf_n[lo] = 1;
+    counted:;
+    }
     return true;
 }
 

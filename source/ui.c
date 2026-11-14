@@ -959,6 +959,13 @@ void ui_resumen_exit(Runner *r)
         fprintf(f, " · %s %.1f%%", nm, pf.insns ? 100.0 * (double)pf.count[t] / (double)pf.insns : 0.0);
     }
     fprintf(f, "\n");
+    fprintf(f, "Al salir · la hora sin salir de la CPU %llu veces; quién la pide:", (unsigned long long)r->kfast);
+    for (unsigned j = 0; j < 8; j++) {
+        if (r->kf_n[j]) {
+            fprintf(f, " %08X×%llu", (unsigned)r->kf_who[j], (unsigned long long)r->kf_n[j]);
+        }
+    }
+    fprintf(f, "\n");
     /* gráficos: qué pide leer lo dibujado al momento, y los dibujos sin destino */
     const GpuStats *gs = gpu_stats();
     const SwStats *sw = sw_stats();

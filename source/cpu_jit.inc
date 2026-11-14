@@ -61,6 +61,7 @@ static struct {
     uintptr_t slow_rx; /* la rutina común que llama a la función de C de una instrucción */
     uintptr_t enter_rx, epi_rx; /* el prólogo y el epílogo comunes */
     uintptr_t resolve_rx; /* v0.18.61: busca el bloque de una salida fija y la une */
+    uintptr_t same_rx;    /* v0.18.62: lo mismo dentro de la misma página (a la entrada rápida) */
 #ifdef __SWITCH__
     Jit j;
 #endif
@@ -164,6 +165,7 @@ typedef struct Em {
         uint32_t *ldr;
         uint32_t target;
     } link[80];
+    uint32_t page; /* la página virtual del bloque (las salidas dentro de ella van a la entrada rápida) */
     unsigned nlink;
 } Em;
 
@@ -1235,6 +1237,36 @@ static bool emit_insn(Em *e, const Block *b, unsigned i, const Vm *vm)
     return false;
 }
 
+/* v0.18.62: una salida a un bloque de la misma página. Quien salta pasó al
+ * entrar las comprobaciones de página y de código, y si escribió en su
+ * página ya salió (jit_slow_c); entonces el destino, si se tradujo con la
+ * misma página física y el mismo código, no las necesita: su entrada
+ * rápida. Si luego alguien escribe en la página, el que salta tampoco
+ * vuelve a correr (su entrada normal falla), así que la casilla no se usa.
+ * Devuelve la entrada (y la escribe en la casilla) o NULL: a run_blocks. */
+static void *jit_resolve_same(Cpu *c, uint32_t eip, uintptr_t slot_rx)
+{
+    uint32_t pe = c->vm->pt[eip >> 12];
+    if (!pe) {
+        return NULL;
+    }
+    uint32_t pp = pe - 1;
+    BlockSlot *tab = c->blocks;
+    if (!tab) {
+        return NULL;
+    }
+    for (Block *t = tab[(eip ^ (eip >> 16)) & (BLK_HASH - 1)].b; t; t = t->next) {
+        if (t->eip == eip && t->jit && t->jit_fast && t->jit_epoch == g_jit.epoch && t->ppage == pp &&
+            t->gen == c->vm->gen[pp] && !t->spin) {
+            if (g_link_on && slot_rx) {
+                *(void **)(slot_rx + (uintptr_t)g_link_delta) = t->jit_fast;
+            }
+            return t->jit_fast;
+        }
+    }
+    return NULL;
+}
+
 /* Una salida al EIP fijo target por su casilla (x24 ya contado). */
 static void emit_link(Em *e, uint32_t target)
 {
@@ -1265,7 +1297,8 @@ static void emit_links(Em *e)
         strw(e, W9, XC, OFF(eip));
         adr[k] = e->p;
         E(e, 0x10000000u | 14u); /* adr x14, casilla (se parchea) */
-        intptr_t d = ((intptr_t)g_jit.resolve_rx - (intptr_t)em_rx(e)) >> 2;
+        bool same = (e->link[k].target >> 12) == e->page;
+        intptr_t d = ((intptr_t)(same ? g_jit.same_rx : g_jit.resolve_rx) - (intptr_t)em_rx(e)) >> 2;
         E(e, 0x14000000u | ((uint32_t)d & 0x3FFFFFFu));
     }
     if (((uintptr_t)e->p & 7u) != 0) {
@@ -1361,6 +1394,24 @@ static bool jit_compile(Cpu *c, Block *b)
             intptr_t d = ((intptr_t)g_jit.epi_rx - (intptr_t)em_rx(&s0)) >> 2;
             E(&s0, 0x14000000u | ((uint32_t)d & 0x3FFFFFFu)); /* b al epílogo */
         }
+        /* v0.18.62, el de la misma página: w9 = EIP, x14 = la casilla; en C */
+        g_jit.same_rx = em_rx(&s0);
+        regs_spill(&s0);
+        movx_r(&s0, X0, XC);
+        movw_r(&s0, X1, W9);
+        movx_r(&s0, 2, 14);
+        movx(&s0, W9, (uint64_t)(uintptr_t)jit_resolve_same);
+        E(&s0, 0xD63F0000u | 9u << 5); /* blr x9 */
+        movx_r(&s0, W13, X0);
+        regs_load(&s0);
+        uint32_t *smiss = fwd_cb(&s0, J_CBZ | 0x80000000u, W13); /* cbz x13 */
+        E(&s0, 0xD61F0000u | 13u << 5);                          /* br x13 */
+        patch(&s0, smiss);
+        movw(&s0, X0, 0);
+        {
+            intptr_t d = ((intptr_t)g_jit.epi_rx - (intptr_t)em_rx(&s0)) >> 2;
+            E(&s0, 0x14000000u | ((uint32_t)d & 0x3FFFFFFu)); /* b al epílogo */
+        }
         size_t len = (size_t)((uint8_t *)s0.p - g_jit.rw);
         jit_publish(0, len);
         jit_begin_write();
@@ -1402,12 +1453,7 @@ static bool jit_compile(Cpu *c, Block *b)
         Slow bx = {{0}, 0}; /* no se puede entrar: vuelve a run_blocks */
         /* entrada desde otro bloque */
         uint32_t *chain = e.p;
-        E(&e, 0xF100001Fu | b->n << 10 | 23u << 5); /* cmp x23, #n */
-        slow_bcond(&e, &bx, 3);                      /* b.lo: no alcanza */
-        E(&e, 0xD1000000u | b->n << 10 | 23u << 5 | 23u); /* sub x23, x23, #n */
-        ldrx(&e, W9, XC, OFF(yield));
-        ldrb_i(&e, W9, W9, 0);
-        slow_add(&e, &bx, fwd_cb(&e, J_CBNZ, W9));   /* una interrupción */
+        e.page = b->eip >> 12;
         movw(&e, W9, b->eip >> 12);
         ldrw_lsl2(&e, W10, XPT, W9);
         movw(&e, W11, b->ppage + 1);
@@ -1418,6 +1464,13 @@ static bool jit_compile(Cpu *c, Block *b)
         movw(&e, W11, b->gen);
         cmpw(&e, W10, W11);
         slow_bcond(&e, &bx, COND_NE);                /* el código cambió */
+        uint32_t *fast = e.p; /* v0.18.62: desde la misma página se entra aquí */
+        E(&e, 0xF100001Fu | b->n << 10 | 23u << 5); /* cmp x23, #n */
+        slow_bcond(&e, &bx, 3);                      /* b.lo: no alcanza */
+        E(&e, 0xD1000000u | b->n << 10 | 23u << 5 | 23u); /* sub x23, x23, #n */
+        ldrx(&e, W9, XC, OFF(yield));
+        ldrb_i(&e, W9, W9, 0);
+        slow_add(&e, &bx, fwd_cb(&e, J_CBNZ, W9));   /* una interrupción */
         /* etapa 5: en vez de contar (leer, sumar, escribir), dice qué bloque
          * corre; un hilo aparte (sampler.c) lo muestrea */
         uint32_t cnt = 0;
@@ -1530,6 +1583,7 @@ static bool jit_compile(Cpu *c, Block *b)
         g_jit.used = (off + len + 15) & ~(size_t)15;
         b->jit = (void *)(g_jit.rx + off);
         b->jit_chain = (void *)(g_jit.rx + off + (size_t)((uint8_t *)chain - (uint8_t *)start));
+        b->jit_fast = (void *)(g_jit.rx + off + (size_t)((uint8_t *)fast - (uint8_t *)start));
         b->jcnt = cnt;
         b->jit_epoch = g_jit.epoch;
         g_jit.compiled++;

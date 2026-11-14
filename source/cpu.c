@@ -1545,6 +1545,7 @@ typedef struct Block {
     unsigned n;
     void *jit;            /* su traducción a ARM64 (2d.2), si la hay */
     void *jit_chain;      /* su entrada desde otro bloque traducido (encadenar) */
+    void *jit_fast;       /* v0.18.62: la entrada sin comprobar página ni código (desde la misma página) */
     uint32_t jcnt;        /* su contador de veces en el JIT (g_jcnt) */
     bool spin;            /* un bucle sobre sí mismo que solo lee y compara */
     uint32_t jit_epoch;   /* del búfer del JIT en que se tradujo */
