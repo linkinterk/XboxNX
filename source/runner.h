@@ -57,6 +57,8 @@ typedef struct Runner {
     uint64_t kfast;          /* etapa 5: contestadas sin salir de cpu_run (la hora) */
     uint32_t kf_who[8];      /* v0.18.62: quién pide la hora (dirección de vuelta), los más */
     uint64_t kf_n[8];
+    uint32_t kf_who2[8];     /* v0.18.68: y quién llamó a esa función ([ebp+4]) */
+    uint64_t kf_n2[8];
     uint64_t ns;             /* tiempo de CPU del intérprete */
     uint64_t quantum_left;   /* instrucciones hasta cambiar de hilo */
     /* HalReturnToFirmware: lo que el juego dejó en LaunchDataPage */

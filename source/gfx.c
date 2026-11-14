@@ -71,6 +71,15 @@ void gfx_rect(int x, int y, int w, int h, uint32_t c)
 {
     int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
     int x1 = x + w > g.w ? g.w : x + w, y1 = y + h > g.h ? g.h : y + h;
+    if ((c >> 24) == 255) { /* v0.18.68: opaco, sin mezclar */
+        for (int yy = y0; yy < y1; yy++) {
+            uint32_t *row = &g.px[yy * g.stride];
+            for (int xx = x0; xx < x1; xx++) {
+                row[xx] = c;
+            }
+        }
+        return;
+    }
     for (int yy = y0; yy < y1; yy++) {
         uint32_t *row = &g.px[yy * g.stride];
         for (int xx = x0; xx < x1; xx++) {
@@ -228,6 +237,127 @@ void gfx_image(const XImage *img, int x, int y, int w, int h, int r)
                 dst[dx] = blend(dst[dx], out, cov);
             }
         }
+    }
+}
+
+/* v0.18.68: la pantalla del juego (opaca, sin esquinas) en dos pasadas: cada
+ * fila de origen se escala a lo ancho una sola vez (dos en caché) y luego se
+ * mezclan dos filas, de a 4 píxeles con NEON. Da lo mismo que gfx_image (los
+ * mismos pesos de 7 bits) con un cuarto del trabajo: escalar 640x480 a la
+ * pantalla tardaba 20-30 ms en la Switch. */
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
+static int g_oxa[2048];
+static uint8_t g_ofx[2048 * 4];
+
+static void hscale(const uint32_t *src, uint32_t *out, int n)
+{
+    int i = 0;
+#if defined(__aarch64__)
+    const uint8x16_t k128 = vdupq_n_u8(128);
+    for (; i + 4 <= n; i += 4) {
+        /* cada carga de 64 bits trae el píxel y el de al lado */
+        uint32x4_t p01 = vcombine_u32(vld1_u32(src + g_oxa[i]), vld1_u32(src + g_oxa[i + 1]));
+        uint32x4_t p23 = vcombine_u32(vld1_u32(src + g_oxa[i + 2]), vld1_u32(src + g_oxa[i + 3]));
+        uint32x4x2_t ab = vuzpq_u32(p01, p23);
+        uint8x16_t a = vreinterpretq_u8_u32(ab.val[0]), b = vreinterpretq_u8_u32(ab.val[1]);
+        uint8x16_t f = vld1q_u8(g_ofx + i * 4), nf = vsubq_u8(k128, f);
+        uint16x8_t lo = vmlal_u8(vmull_u8(vget_low_u8(a), vget_low_u8(nf)), vget_low_u8(b), vget_low_u8(f));
+        uint16x8_t hi = vmlal_high_u8(vmull_high_u8(a, nf), b, f);
+        vst1q_u8((uint8_t *)(out + i), vcombine_u8(vshrn_n_u16(lo, 7), vshrn_n_u16(hi, 7)));
+    }
+#endif
+    for (; i < n; i++) {
+        out[i] = lerp2(src[g_oxa[i]], src[g_oxa[i] + 1], g_ofx[i * 4]);
+    }
+}
+
+static void vmix(const uint32_t *a, const uint32_t *b, uint32_t *dst, int n, uint32_t f)
+{
+    int i = 0;
+#if defined(__aarch64__)
+    const uint8x8_t vf = vdup_n_u8((uint8_t)f), vnf = vdup_n_u8((uint8_t)(128 - f));
+    for (; i + 4 <= n; i += 4) {
+        uint8x16_t x = vld1q_u8((const uint8_t *)(a + i)), y = vld1q_u8((const uint8_t *)(b + i));
+        uint16x8_t lo = vmlal_u8(vmull_u8(vget_low_u8(x), vnf), vget_low_u8(y), vf);
+        uint16x8_t hi = vmlal_u8(vmull_u8(vget_high_u8(x), vnf), vget_high_u8(y), vf);
+        vst1q_u8((uint8_t *)(dst + i), vcombine_u8(vshrn_n_u16(lo, 7), vshrn_n_u16(hi, 7)));
+    }
+#endif
+    for (; i < n; i++) {
+        dst[i] = lerp2(a[i], b[i], f);
+    }
+}
+
+void gfx_image_opaque(const XImage *img, int x, int y, int w, int h)
+{
+    if (!img || !img->px || w <= 0 || h <= 0 || img->w < 2 || img->h <= 0 || img->w > 2048 || w > 2048) {
+        gfx_image(img, x, y, w, h, 0);
+        return;
+    }
+    int xx0 = x < 0 ? -x : 0, xx1 = x + w > g.w ? g.w - x : w;
+    if (xx1 <= xx0) {
+        return;
+    }
+    /* columnas: el píxel izquierdo (con el derecho al lado) y el peso; en los
+     * bordes el peso 0 o 128 deja un solo píxel, como el recorte de gfx_image */
+    for (int xx = xx0; xx < xx1; xx++) {
+        int sx = (int)(((int64_t)(2 * xx + 1) * img->w * 128) / (2 * w)) - 64;
+        int x0 = sx >> 7, f = sx & 127;
+        if (x0 < 0) {
+            x0 = 0, f = 0;
+        } else if (x0 >= img->w - 1) {
+            x0 = img->w - 2, f = 128;
+        }
+        g_oxa[xx - xx0] = x0;
+        memset(g_ofx + (xx - xx0) * 4, f, 4);
+    }
+    int n = xx1 - xx0;
+    static uint32_t *rows;
+    static int rows_n;
+    if (rows_n < n) {
+        free(rows);
+        rows = (uint32_t *)malloc((size_t)n * 2 * sizeof(uint32_t));
+        rows_n = rows ? n : 0;
+        if (!rows) {
+            return;
+        }
+    }
+    uint32_t *ra = rows, *rb = rows + n;
+    int ca = -1, cb = -1;
+    const uint32_t *px = (const uint32_t *)img->px;
+    for (int yy = 0; yy < h; yy++) {
+        int dy = y + yy;
+        if ((unsigned)dy >= (unsigned)g.h) {
+            continue;
+        }
+        int sy = (int)(((int64_t)(2 * yy + 1) * img->h * 128) / (2 * h)) - 64;
+        int y0 = sy >> 7;
+        uint32_t fy = (uint32_t)(sy & 127);
+        int ya = y0 < 0 ? 0 : (y0 >= img->h ? img->h - 1 : y0);
+        int yb = y0 + 1 >= img->h ? img->h - 1 : (y0 + 1 < 0 ? 0 : y0 + 1);
+        if (ya != ca) {
+            if (ya == cb) {
+                uint32_t *t = ra;
+                ra = rb, rb = t;
+                cb = ca, ca = ya;
+            } else {
+                hscale(px + (size_t)ya * img->w, ra, n);
+                ca = ya;
+            }
+        }
+        uint32_t *dst = &g.px[(size_t)dy * g.stride + x + xx0];
+        if (yb == ya || fy == 0) {
+            memcpy(dst, ra, (size_t)n * 4);
+            continue;
+        }
+        if (yb != cb) {
+            hscale(px + (size_t)yb * img->w, rb, n);
+            cb = yb;
+        }
+        vmix(ra, rb, dst, n, fy);
     }
 }
 

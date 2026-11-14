@@ -97,7 +97,7 @@ int main(int argc, char **argv)
     }
 
     UiState s = {0};
-    s.version = "0.18.67";
+    s.version = "0.18.68";
     s.cards = cards;
 
     s.screen = UI_LOADING;
@@ -194,6 +194,10 @@ int main(int argc, char **argv)
     s.run_screen = true;
     ui_draw(&s);
     save(argv[3], "13_pantalla");
+    s.run_diag = true; /* v0.18.68: con los datos encima (tocar la imagen) */
+    ui_draw(&s);
+    save(argv[3], "13b_pantalla_datos");
+    s.run_diag = false;
     s.run_screen = false;
     vm_free(&vm);
 

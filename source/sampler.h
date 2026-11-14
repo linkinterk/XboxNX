@@ -22,5 +22,7 @@ void sampler_set_status(void (*fn)(char *out, unsigned n));
 void sampler_mark_clean(void);
 /* Muestras desde el principio en el bloque del JIT que empieza en eip. */
 uint32_t sampler_hits(uint32_t eip);
+/* Los n bloques con más muestras (de mayor a menor); total: todas las de bloques. */
+unsigned sampler_top(unsigned n, uint32_t *eip, uint32_t *cnt, uint64_t *total);
 
 #endif

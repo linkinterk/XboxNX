@@ -58,6 +58,7 @@ typedef struct UiState {
     bool ui_async;           /* la pantalla se dibuja en otro hilo */
     int stage_back;          /* la pantalla a la que vuelve */
     bool run_screen;         /* X: ver la pantalla del Xbox en vez del registro */
+    bool run_diag;           /* v0.18.68: los datos encima del juego (tocar la imagen) */
     char toast[160];         /* un aviso en el registro (el volcado) */
     char last_crash[240];    /* el cierre de la vez anterior (cierre.txt) */
     /* pruebas */
@@ -70,6 +71,7 @@ typedef struct UiState {
 #define UI_PAGES 4
 
 void ui_draw(const UiState *s);
+bool ui_run_touch(UiState *s, int tx, int ty); /* jugando: true si el toque es para salir */
 void ui_resumen_exit(Runner *r); /* al salir: las instrucciones lentas, a resumen.txt */
 /* Filas visibles por página de la pantalla de detalle (para el scroll). */
 int ui_detail_rows(void);

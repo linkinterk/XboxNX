@@ -262,6 +262,22 @@ static bool kernel_fast(Cpu *c, unsigned ord)
         r->kf_n[lo] = 1;
     counted:;
     }
+    { /* v0.18.68: el que llamó a la función que pide la hora */
+        uint32_t w2 = vm_rd32(c->vm, c->r[R_EBP] + 4);
+        unsigned lo = 0;
+        for (unsigned j = 0; j < 8; j++) {
+            if (r->kf_who2[j] == w2) {
+                r->kf_n2[j]++;
+                goto counted2;
+            }
+            if (r->kf_n2[j] < r->kf_n2[lo]) {
+                lo = j;
+            }
+        }
+        r->kf_who2[lo] = w2;
+        r->kf_n2[lo] = 1;
+    counted2:;
+    }
     return true;
 }
 

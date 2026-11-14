@@ -11,6 +11,9 @@ struct Kernel;
 
 typedef struct ApuStats {
     uint64_t frames, ep_frames, writes;
+    uint64_t ns_busy;   /* v0.18.68: tiempo haciendo cuadros (VP + DSP) */
+    uint64_t skipped;   /* cuadros que no se hicieron por ir más de 100 ms atrasado */
+    uint64_t lag_ns;    /* lo atrasado que iba la última vez (tiempo del juego) */
     unsigned logs;
     bool gp_running, ep_running;
 } ApuStats;

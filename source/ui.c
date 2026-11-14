@@ -796,9 +796,13 @@ static void diag_add(const char *t)
     }
 }
 
+static bool g_ovl_draw = true; /* sin los datos en pantalla, solo van al archivo */
+
 static void ovl_text(int y, uint32_t col, const char *t)
 {
-    gfx_text_fit(24, y, 16, UI_W - 48, col, t);
+    if (g_ovl_draw) {
+        gfx_text_fit(24, y, 16, UI_W - 48, col, t);
+    }
     diag_add(t);
 }
 
@@ -873,7 +877,8 @@ static void resumen_tick(const UiState *s, double fps, double spd)
 {
     static time_t last;
     static bool started;
-    static uint64_t p_get, p_dec, p_all, p_kfast, p_rd, p_rdns, p_busy, p_sfl, p_sflns, p_why[4], p_cc, p_wait;
+    static uint64_t p_get, p_dec, p_all, p_kfast, p_rd, p_rdns, p_busy, p_sfl, p_sflns, p_why[5], p_cc, p_wait;
+    static uint64_t p_af, p_abusy, p_askip, p_dn, p_dt;
     static unsigned p_flushes;
     static double fps_sum, spd_sum, fps_min = 1e9;
     static unsigned n;
@@ -902,12 +907,18 @@ static void resumen_tick(const UiState *s, double fps, double spd)
     p_rd = r->counts[219], p_rdns = r->kns[219], p_busy = gs->ns_busy, p_sfl = gs->sflushes, p_sflns = gs->ns_sflush;
     unsigned fl = js.flushes - p_flushes;
     p_flushes = js.flushes;
-    uint64_t why[4], cc = c->st_ccall - p_cc, wait = (gs->ns_qwait + gs->ns_sync) - p_wait;
-    for (int k = 0; k < 4; k++) {
+    uint64_t why[5], cc = c->st_ccall - p_cc, wait = (gs->ns_qwait + gs->ns_sync) - p_wait;
+    for (int k = 0; k < 5; k++) {
         why[k] = gs->sfl_why[k] - p_why[k];
         p_why[k] = gs->sfl_why[k];
     }
     p_cc = c->st_ccall, p_wait = gs->ns_qwait + gs->ns_sync;
+    const ApuStats *as = apu_stats();
+    uint64_t af = as->frames - p_af, abusy = as->ns_busy - p_abusy, askip = as->skipped - p_askip;
+    p_af = as->frames, p_abusy = as->ns_busy, p_askip = as->skipped;
+    uint64_t dn = js.decodes - p_dn, dtk = js.dec_ticks - p_dt;
+    p_dn = js.decodes, p_dt = js.dec_ticks;
+    double tps = js.ticks_per_s ? (double)js.ticks_per_s : 1e9;
     FILE *f = fopen(SUM_FILE, started ? "a" : "w");
     if (f) {
         if (!started) {
@@ -921,17 +932,20 @@ static void resumen_tick(const UiState *s, double fps, double spd)
         }
         fprintf(f, "%s · %.1f FPS (mín %.1f) · juego %.0f%% · hilo del juego: CPU %u%% kernel %u%% audio %u%% GPU %u%% · "
                    "buscar bloque %.1f%% (decodificar %.1f%%) · JIT vaciado %u · bloques %llu (%llu compartiendo) · "
-                   "hilo GPU %.0f%% · leídas al momento %llu (%.0f ms; textura %llu software %llu todo %llu otro %llu) · "
+                   "hilo GPU %.0f%% · leídas al momento %llu (%.0f ms; textura %llu software %llu todo %llu tamaño %llu sin lugar %llu) · "
                    "esperando a la GPU %.1f%% · lecturas %llu (%.1f ms c/u) · hora rápida %.0f/s · C desde el JIT %.0fk/s · "
-                   "pantalla %u ms\n",
+                   "pantalla %u ms · decodificados %llu (%.1f us c/u) · sonido: %.0f cuadros/s, ocupado %.0f%%, atrasado %.0f ms, "
+                   "saltados %llu\n",
                 ts, n ? fps_sum / n : 0.0, fps_min < 1e8 ? fps_min : 0.0, n ? 100.0 * spd_sum / n : 0.0,
                 (s->prof[PROF_CPU] + 5) / 10, (s->prof[PROF_KERNEL] + 5) / 10, (s->prof[PROF_APU] + 5) / 10,
                 (s->prof[PROF_GPU] + 5) / 10, all ? 100.0 * (double)get / (double)all : 0.0,
                 all ? 100.0 * (double)dec / (double)all : 0.0, fl, (unsigned long long)js.blocks,
                 (unsigned long long)js.chained, 100.0 * (double)busy / (dt * 1e9), (unsigned long long)sfl, sflns / 1e6,
                 (unsigned long long)why[0], (unsigned long long)why[1], (unsigned long long)why[2],
-                (unsigned long long)why[3], 100.0 * (double)wait / (dt * 1e9), (unsigned long long)rd,
-                rd ? rdns / 1e6 / (double)rd : 0.0, (double)kf / dt, (double)cc / dt / 1000.0, s->ui_ms);
+                (unsigned long long)why[3], (unsigned long long)why[4], 100.0 * (double)wait / (dt * 1e9), (unsigned long long)rd,
+                rd ? rdns / 1e6 / (double)rd : 0.0, (double)kf / dt, (double)cc / dt / 1000.0, s->ui_ms,
+                (unsigned long long)dn, dn ? (double)dtk / tps * 1e6 / (double)dn : 0.0, (double)af / dt,
+                100.0 * (double)abusy / (dt * 1e9), as->lag_ns / 1e6, (unsigned long long)askip);
         fclose(f);
     }
     fps_sum = spd_sum = 0, n = 0, fps_min = 1e9;
@@ -946,6 +960,8 @@ void ui_resumen_exit(Runner *r)
     }
     CpuProfile pf;
     cpu_profile_w(&r->cpu, &pf, sampler_hits);
+    CpuJitStats js;
+    cpu_jit_stats(&js);
     FILE *f = fopen(SUM_FILE, "a");
     if (!f) {
         return;
@@ -959,10 +975,34 @@ void ui_resumen_exit(Runner *r)
         fprintf(f, " · %s %.1f%%", nm, pf.insns ? 100.0 * (double)pf.count[t] / (double)pf.insns : 0.0);
     }
     fprintf(f, "\n");
+    { /* los bloques con más tiempo: su EIP, % y 48 bytes de código (para verlos en la PC) */
+        uint32_t te[12], tc[12];
+        uint64_t tt = 0;
+        unsigned tn = sampler_top(12, te, tc, &tt);
+        for (unsigned j = 0; j < tn; j++) {
+            uint8_t by[48];
+            memset(by, 0, sizeof(by));
+            vm_read(r->cpu.vm, te[j], by, sizeof(by));
+            fprintf(f, "Bloque %08X %5.2f%% ", (unsigned)te[j], tt ? 100.0 * tc[j] / (double)tt : 0.0);
+            for (unsigned q = 0; q < sizeof(by); q++) {
+                fprintf(f, "%02X", by[q]);
+            }
+            fprintf(f, "\n");
+        }
+    }
+    fprintf(f, "Al salir · decodificados %llu bloques, %.1f us c/u, el más lento %.2f ms\n", (unsigned long long)js.decodes,
+            js.decodes ? (double)js.dec_ticks / (double)(js.ticks_per_s ? js.ticks_per_s : 1) * 1e6 / (double)js.decodes : 0.0,
+            (double)js.dec_max / (double)(js.ticks_per_s ? js.ticks_per_s : 1) * 1e3);
     fprintf(f, "Al salir · la hora sin salir de la CPU %llu veces; quién la pide:", (unsigned long long)r->kfast);
     for (unsigned j = 0; j < 8; j++) {
         if (r->kf_n[j]) {
             fprintf(f, " %08X×%llu", (unsigned)r->kf_who[j], (unsigned long long)r->kf_n[j]);
+        }
+    }
+    fprintf(f, "; quién llamó a esa función:");
+    for (unsigned j = 0; j < 8; j++) {
+        if (r->kf_n2[j]) {
+            fprintf(f, " %08X×%llu", (unsigned)r->kf_who2[j], (unsigned long long)r->kf_n2[j]);
         }
     }
     fprintf(f, "\n");
@@ -971,12 +1011,23 @@ void ui_resumen_exit(Runner *r)
     const SwStats *sw = sw_stats();
     {
         const HwStats *hs = hw_stats();
-        fprintf(f, "Al salir · pruebas de visibilidad: %u encendidas, %u borradas, %u informes (%u con 0 píxeles, %u sin DMA), "
-                   "el último %u píxeles\n",
-                hs->zpass_on, hs->zpass_tests, hs->reports, hs->reports_zero, hs->reports_noinst, (unsigned)hs->report_last);
+        fprintf(f, "Al salir · pruebas de visibilidad: %u encendidas, %u apagadas, %u borradas, %u informes (%u con 0 píxeles, "
+                   "%u sin DMA), el último %u píxeles; tras el último apagado:",
+                hs->zpass_on, hs->zpass_off, hs->zpass_tests, hs->reports, hs->reports_zero, hs->reports_noinst,
+                (unsigned)hs->report_last);
+        for (unsigned j = 0; j < hs->after_n && j < 8; j++) {
+            fprintf(f, " %X:%04X=%08X", (unsigned)(hs->after_off[j][0] >> 16), (unsigned)(hs->after_off[j][0] & 0xFFFF),
+                    (unsigned)hs->after_off[j][1]);
+        }
+        fprintf(f, "\n");
     }
     fprintf(f, "Al salir · gráficos: texturas con swizzle tomadas de lo dibujado %llu · ",
             (unsigned long long)gpu_stats()->swz_direct);
+    fprintf(f, "superficies cambiadas de tamaño %llu (ej. %08X de %ux%u%s a %ux%u%s), echadas por falta de lugar %llu · ",
+            (unsigned long long)gs->sfl_why[3], (unsigned)gs->sfl_chg_pa, (unsigned)(gs->sfl_chg_old >> 16),
+            (unsigned)(gs->sfl_chg_old & 0x7FFF), (gs->sfl_chg_old & 0x8000) ? " swz" : "",
+            (unsigned)(gs->sfl_chg_new >> 16), (unsigned)(gs->sfl_chg_new & 0x7FFF),
+            (gs->sfl_chg_new & 0x8000) ? " swz" : "", (unsigned long long)gs->sfl_why[4]);
     fprintf(f, "leídas al momento %llu (textura %llu, software %llu, todo %llu, otro %llu); "
                "ejemplo de textura %08X fmt %X %ux%u %s sobre superficie %08X %ux%u pitch %u · "
                "sin destino %u (formato %u, pitch %u, swizzle %u fmt %X, sin color %u, recorte %u, memoria %u)\n",
@@ -998,18 +1049,63 @@ static void draw_xbox_screen(const UiState *s)
     static XImage img;
     const HwStats *hs = hw_stats();
     char b[256];
-    gfx_clear(HEX(0x000000));
     bool ok = kn && hw_screen(kn, &img);
+    /* v0.18.68: sin los datos, la imagen ocupa toda la altura (960x720 si es
+     * 4:3) y en los costados quedan los FPS y el botón de salir; tocar la
+     * imagen muestra u oculta los datos (antes tapaban la parte de arriba
+     * del juego y dibujarlos costaba más de 10 ms por cuadro) */
+    bool ovl = s->run_diag;
     if (ok) {
-        int h = BOTBAR_Y - 40, w = img.w * h / img.h;
-        if (w > UI_W - 40) {
-            w = UI_W - 40;
-            h = img.h * w / img.w;
+        int h, w, ix, iy;
+        if (ovl) {
+            h = BOTBAR_Y - 40, w = img.w * h / img.h;
+            if (w > UI_W - 40) {
+                w = UI_W - 40;
+                h = img.h * w / img.w;
+            }
+            ix = (UI_W - w) / 2, iy = 34;
+        } else {
+            h = UI_H, w = img.w * h / img.h;
+            if (w > UI_W) {
+                w = UI_W;
+                h = img.h * w / img.w;
+            }
+            ix = (UI_W - w) / 2, iy = (UI_H - h) / 2;
         }
-        gfx_image(&img, (UI_W - w) / 2, 34, w, h, 0);
+        /* solo se borra lo que la imagen no tapa */
+        gfx_rect(0, 0, UI_W, iy, HEX(0x000000));
+        gfx_rect(0, iy + h, UI_W, UI_H - iy - h, HEX(0x000000));
+        gfx_rect(0, iy, ix, h, HEX(0x000000));
+        gfx_rect(ix + w, iy, UI_W - ix - w, h, HEX(0x000000));
+        gfx_image_opaque(&img, ix, iy, w, h);
         double fps, spd;
         game_rate(r, &fps, &spd);
         resumen_tick(s, fps, spd);
+        if (!ovl) {
+            char t[64];
+            int mw = ix >= 150 ? ix : 0; /* el margen de la izquierda */
+            if (!mw) {
+                gfx_rrect(10, 10, 176, 62, 10, WITH_ALPHA(HEX(0x000000), 170));
+            }
+            snprintf(t, sizeof(t), "%.1f FPS", fps);
+            gfx_text(22, 16, 26, fps >= 25.0 ? C_GREEN : C_ON, t);
+            snprintf(t, sizeof(t), "juego al %.0f%%", spd * 100.0);
+            gfx_text(22, 48, 17, C_ON_VAR, t);
+            if (mw) {
+                snprintf(t, sizeof(t), "%dx%d", img.w, img.h);
+                gfx_text(22, 74, 15, C_ON_VAR, t);
+                gfx_text_fit(14, UI_H - 62, 14, mw - 20, C_ON_VAR, "Toca la imagen");
+                gfx_text_fit(14, UI_H - 42, 14, mw - 20, C_ON_VAR, "para ver los datos");
+            }
+            int rw = UI_W - ix - w; /* el de la derecha */
+            if (rw >= 150) {
+                gfx_rrect(ix + w + 12, UI_H - 64, rw - 24, 48, 24, C_SURF_HI);
+                gfx_text_center(ix + w + 12, rw - 24, UI_H - 52, 19, C_ON, "Salir");
+            } else {
+                gfx_rrect(UI_W - 170, UI_H - 60, 160, 48, 24, WITH_ALPHA(HEX(0x000000), 170));
+                gfx_text_center(UI_W - 170, 160, UI_H - 48, 19, C_ON, "Salir");
+            }
+        }
         snprintf(b, sizeof(b), "%.1f FPS · juego al %.0f%%  ·  Pantalla del Xbox  ·  %dx%d  ·  PCRTC %08X%s  ·  %u cuadros  ·  %u flips  ·  %.2f s del juego",
                  fps, spd * 100.0, img.w, img.h, (unsigned)hw_scanout(),
                  hw_shown() != (hw_scanout() & (VM_RAM_SIZE - 1u)) ? " (negro: se ve el último dibujado)" : "", hs->frames,
@@ -1033,160 +1129,184 @@ static void draw_xbox_screen(const UiState *s)
                 o += snprintf(d2 + o, sizeof(d2) - (size_t)o, " %02X", dw->formats[i]);
             }
         }
-        gfx_text_fit(20, BOTBAR_Y + 22, 15, 880, C_ON_VAR, d2);
+        if (ovl) {
+            gfx_text_fit(20, BOTBAR_Y + 22, 15, 880, C_ON_VAR, d2);
+        }
         diag_add(b);
         diag_add(d2);
         diag_prof(s);
-        /* el dibujo por software: el último dibujo con lo que dio */
-        const SwStats *sw = sw_stats();
-        const __typeof__(sw->last) *L = &sw->last;
-        char e[720];
-        int ly = 40;
-        snprintf(e, sizeof(e), "Software: %llu triángulos, %llu píxeles · sin shader %u · sin destino %u (motivo %u: fmt %X pitch %X clip %X %X) · shader con error %u · se muestra %08X",
-                 (unsigned long long)sw->triangles, (unsigned long long)sw->pixels, sw->skipped_ff, sw->no_target,
-                 sw->no_target_why, (unsigned)sw->surf_format, (unsigned)sw->surf_pitch, (unsigned)sw->clip_h,
-                 (unsigned)sw->clip_v, sw->vs_errors, (unsigned)hw_scanout());
-        gfx_rrect(14, ly - 4, UI_W - 28, 298, 10, WITH_ALPHA(HEX(0x000000), 200));
-        ovl_text(ly, C_ON, e);
-        ly += 22;
-        snprintf(e, sizeof(e), "Último: prim %u, %u vértices, %llu tri, %llu px, %u ocultos, %u tras Z · destino %08X pitch %u fmt %X · Z %08X",
-                 (unsigned)L->prim, (unsigned)L->nverts, (unsigned long long)L->tris, (unsigned long long)L->pixels,
-                 L->culled, L->depth_fail, (unsigned)L->target_pa, (unsigned)L->target_pitch, (unsigned)L->target_fmt,
-                 (unsigned)L->zeta_pa);
-        ovl_text(ly, C_ON, e);
-        ly += 22;
-        snprintf(e, sizeof(e), "Textura 0: %s modo %u fmt %02X %ux%u en %08X · combiners %X final %08X %08X · 1er píxel %08X",
-                 L->tex_on ? "sí" : "no", L->tex_mode, (unsigned)L->tex_fmt, (unsigned)L->tex_w, (unsigned)L->tex_h,
-                 (unsigned)L->tex_pa, (unsigned)L->cctl, (unsigned)L->fcw0, (unsigned)L->fcw1, (unsigned)L->first_px);
-        ovl_text(ly, C_ON, e);
-        ly += 22;
-        snprintf(e, sizeof(e), "Vértice 0: pos %.1f %.1f %.1f %.2f · oD0 %.2f %.2f %.2f %.2f · oT0 %.2f %.2f %.2f %.2f",
-                 L->pos[0], L->pos[1], L->pos[2], L->pos[3], L->d0[0], L->d0[1], L->d0[2], L->d0[3], L->t0[0], L->t0[1],
-                 L->t0[2], L->t0[3]);
-        ovl_text(ly, C_ON, e);
-        ly += 22;
-        /* las interrupciones: si el GPU queda en una trampa, por qué no se atiende */
-        char irq[200];
-        hw_irq_debug(irq, sizeof(irq));
-        const uint8_t *pirql = vm_host(r->cpu.vm, K_KPCR_VA + 0x24);
-        snprintf(e, sizeof(e), "IRQL %u · DPC en cola %u · %s%s · %u ISR, %u DPC · esperas saltadas %llu (%.1f s) · %s",
-                 pirql ? *pirql : 0, kn->ndpc, kn->in_isr ? "en ISR" : "sin ISR", kn->in_dpc ? ", en DPC" : "",
-                 kn->isrs_run, kn->dpcs_run, (unsigned long long)r->idle_skips, kn->idle_ns_skipped / 1e9, irq);
-        ovl_text(ly, C_WARN, e);
-        ly += 22;
-        CpuJitStats js;
-        cpu_jit_stats(&js);
-        snprintf(e, sizeof(e), "Archivos: %u lecturas (%.1f MB), %u escrituras, %u abiertos · último: %s", kn->reads,
-                 kn->bytes_read / 1048576.0, kn->writes, kn->files_open, kn->last_io[0] ? kn->last_io : "-");
-        ovl_text(ly, C_WARN, e);
-        ly += 22;
-        /* las 5 funciones del kernel más llamadas y la última apertura fallida */
-        {
-            int top[5] = {-1, -1, -1, -1, -1};
-            for (int o = 0; o < (int)K_ORDINAL_MAX; o++) {
-                for (int t = 0; t < 5; t++) {
-                    if (top[t] < 0 || r->kns[o] > r->kns[top[t]]) {
-                        memmove(&top[t + 1], &top[t], (size_t)(4 - t) * sizeof(int));
-                        top[t] = o;
+        if (ovl || g_diag_go) {
+            g_ovl_draw = ovl;
+            /* el dibujo por software: el último dibujo con lo que dio */
+            const SwStats *sw = sw_stats();
+            const __typeof__(sw->last) *L = &sw->last;
+            char e[720];
+            int ly = 40;
+            snprintf(e, sizeof(e), "Software: %llu triángulos, %llu píxeles · sin shader %u · sin destino %u (motivo %u: fmt %X pitch %X clip %X %X) · shader con error %u · se muestra %08X",
+                     (unsigned long long)sw->triangles, (unsigned long long)sw->pixels, sw->skipped_ff, sw->no_target,
+                     sw->no_target_why, (unsigned)sw->surf_format, (unsigned)sw->surf_pitch, (unsigned)sw->clip_h,
+                     (unsigned)sw->clip_v, sw->vs_errors, (unsigned)hw_scanout());
+            if (ovl) {
+                gfx_rrect(14, ly - 4, UI_W - 28, 298, 10, WITH_ALPHA(HEX(0x000000), 200));
+            }
+            ovl_text(ly, C_ON, e);
+            ly += 22;
+            snprintf(e, sizeof(e), "Último: prim %u, %u vértices, %llu tri, %llu px, %u ocultos, %u tras Z · destino %08X pitch %u fmt %X · Z %08X",
+                     (unsigned)L->prim, (unsigned)L->nverts, (unsigned long long)L->tris, (unsigned long long)L->pixels,
+                     L->culled, L->depth_fail, (unsigned)L->target_pa, (unsigned)L->target_pitch, (unsigned)L->target_fmt,
+                     (unsigned)L->zeta_pa);
+            ovl_text(ly, C_ON, e);
+            ly += 22;
+            snprintf(e, sizeof(e), "Textura 0: %s modo %u fmt %02X %ux%u en %08X · combiners %X final %08X %08X · 1er píxel %08X",
+                     L->tex_on ? "sí" : "no", L->tex_mode, (unsigned)L->tex_fmt, (unsigned)L->tex_w, (unsigned)L->tex_h,
+                     (unsigned)L->tex_pa, (unsigned)L->cctl, (unsigned)L->fcw0, (unsigned)L->fcw1, (unsigned)L->first_px);
+            ovl_text(ly, C_ON, e);
+            ly += 22;
+            snprintf(e, sizeof(e), "Vértice 0: pos %.1f %.1f %.1f %.2f · oD0 %.2f %.2f %.2f %.2f · oT0 %.2f %.2f %.2f %.2f",
+                     L->pos[0], L->pos[1], L->pos[2], L->pos[3], L->d0[0], L->d0[1], L->d0[2], L->d0[3], L->t0[0], L->t0[1],
+                     L->t0[2], L->t0[3]);
+            ovl_text(ly, C_ON, e);
+            ly += 22;
+            /* las interrupciones: si el GPU queda en una trampa, por qué no se atiende */
+            char irq[200];
+            hw_irq_debug(irq, sizeof(irq));
+            const uint8_t *pirql = vm_host(r->cpu.vm, K_KPCR_VA + 0x24);
+            snprintf(e, sizeof(e), "IRQL %u · DPC en cola %u · %s%s · %u ISR, %u DPC · esperas saltadas %llu (%.1f s) · %s",
+                     pirql ? *pirql : 0, kn->ndpc, kn->in_isr ? "en ISR" : "sin ISR", kn->in_dpc ? ", en DPC" : "",
+                     kn->isrs_run, kn->dpcs_run, (unsigned long long)r->idle_skips, kn->idle_ns_skipped / 1e9, irq);
+            ovl_text(ly, C_WARN, e);
+            ly += 22;
+            CpuJitStats js;
+            cpu_jit_stats(&js);
+            snprintf(e, sizeof(e), "Archivos: %u lecturas (%.1f MB), %u escrituras, %u abiertos · último: %s", kn->reads,
+                     kn->bytes_read / 1048576.0, kn->writes, kn->files_open, kn->last_io[0] ? kn->last_io : "-");
+            ovl_text(ly, C_WARN, e);
+            ly += 22;
+            /* las 5 funciones del kernel más llamadas y la última apertura fallida */
+            {
+                int top[5] = {-1, -1, -1, -1, -1};
+                for (int o = 0; o < (int)K_ORDINAL_MAX; o++) {
+                    for (int t = 0; t < 5; t++) {
+                        if (top[t] < 0 || r->kns[o] > r->kns[top[t]]) {
+                            memmove(&top[t + 1], &top[t], (size_t)(4 - t) * sizeof(int));
+                            top[t] = o;
+                            break;
+                        }
+                    }
+                }
+                int o2 = snprintf(e, sizeof(e), "Kernel (más tiempo, %.1f s; %llu de la hora sin salir de la CPU):",
+                                  r->kns_total / 1e9, (unsigned long long)r->kfast);
+                for (int t = 0; t < 5 && top[t] >= 0 && r->counts[top[t]]; t++) {
+                    const KExport *x = kernel_export((unsigned)top[t]);
+                    o2 += snprintf(e + o2, sizeof(e) - (size_t)o2, " %s %u %.1fs %.1fus", x ? x->name : "?",
+                                   (unsigned)r->counts[top[t]], r->kns[top[t]] / 1e9,
+                                   r->counts[top[t]] ? r->kns[top[t]] / 1e3 / r->counts[top[t]] : 0.0);
+                    if (o2 >= (int)sizeof(e)) {
                         break;
                     }
                 }
+                ovl_text(ly, C_WARN, e);
+                ly += 22;
+                snprintf(e, sizeof(e), "Aperturas fallidas: %u · última: %s · APC: %u encolados, %u corridos%s",
+                         kn->open_fails, kn->last_fail[0] ? kn->last_fail : "-", kn->apcs_queued, kn->apcs_run,
+                         kn->apc_lost ? " (con pérdidas)" : "");
+                ovl_text(ly, C_WARN, e);
+                ly += 22;
             }
-            int o2 = snprintf(e, sizeof(e), "Kernel (más tiempo, %.1f s; %llu de la hora sin salir de la CPU):",
-                              r->kns_total / 1e9, (unsigned long long)r->kfast);
-            for (int t = 0; t < 5 && top[t] >= 0 && r->counts[top[t]]; t++) {
-                const KExport *x = kernel_export((unsigned)top[t]);
-                o2 += snprintf(e + o2, sizeof(e) - (size_t)o2, " %s %u %.1fs %.1fus", x ? x->name : "?",
-                               (unsigned)r->counts[top[t]], r->kns[top[t]] / 1e9,
-                               r->counts[top[t]] ? r->kns[top[t]] / 1e3 / r->counts[top[t]] : 0.0);
-                if (o2 >= (int)sizeof(e)) {
-                    break;
-                }
-            }
+            unsigned mem_u, mem_t;
+            crash_heap(&mem_u, &mem_t);
+            snprintf(e, sizeof(e), "JIT %s: %llu traducidos, búfer %.1f de %.0f MB, vaciado %u veces · %llu decodificados (%llu bloques, %llu compartiendo casilla) · código reescrito %llu veces · montón en uso %u de %u MB",
+                     js.on ? "activo" : "apagado", (unsigned long long)js.compiled, js.used / 1048576.0,
+                     js.size / 1048576.0, js.flushes, (unsigned long long)js.decodes, (unsigned long long)js.blocks,
+                     (unsigned long long)js.chained,
+                     (unsigned long long)r->cpu.vm->rewrites, mem_u, mem_t);
             ovl_text(ly, C_WARN, e);
             ly += 22;
-            snprintf(e, sizeof(e), "Aperturas fallidas: %u · última: %s · APC: %u encolados, %u corridos%s",
-                     kn->open_fails, kn->last_fail[0] ? kn->last_fail : "-", kn->apcs_queued, kn->apcs_run,
-                     kn->apc_lost ? " (con pérdidas)" : "");
-            ovl_text(ly, C_WARN, e);
-            ly += 22;
-        }
-        unsigned mem_u, mem_t;
-        crash_heap(&mem_u, &mem_t);
-        snprintf(e, sizeof(e), "JIT %s: %llu traducidos, búfer %.1f de %.0f MB, vaciado %u veces · %llu decodificados (%llu bloques, %llu compartiendo casilla) · código reescrito %llu veces · montón en uso %u de %u MB",
-                 js.on ? "activo" : "apagado", (unsigned long long)js.compiled, js.used / 1048576.0,
-                 js.size / 1048576.0, js.flushes, (unsigned long long)js.decodes, (unsigned long long)js.blocks,
-                 (unsigned long long)js.chained,
-                 (unsigned long long)r->cpu.vm->rewrites, mem_u, mem_t);
-        ovl_text(ly, C_WARN, e);
-        ly += 22;
-        /* dónde se va el tiempo del CPU (muestreado en run_blocks) */
-        {
-            const Cpu *cc = &r->cpu;
-            double all = (double)cc->st_t_all;
-            double jit = all > 0 ? 100.0 * (double)cc->st_t_jit / all : 0;
-            double in = all > 0 ? 100.0 * (double)cc->st_t_int / all : 0;
-            double sp = all > 0 ? 100.0 * (double)cc->st_t_step / all : 0;
-            double gb = all > 0 ? 100.0 * (double)cc->st_t_get / all : 0;
-            double gd = all > 0 ? 100.0 * (double)cc->st_t_dec / all : 0;
-            double nb = (double)(cc->st_disp ? cc->st_disp : 1);
-            double ns_blk = js.ticks_per_s && cc->st_disp ? (double)cc->st_t_all * 64.0 / nb * 1e9 / (double)js.ticks_per_s : 0;
-            snprintf(e, sizeof(e),
-                     "Tiempo CPU: traducido %.0f%%, bloques sin traducir %.0f%%, intérprete suelto %.0f%%, buscar bloque %.0f%% (decodificar %.1f%%), resto %.0f%% · %.0f ns por vuelta · %.1fM vueltas (%.0f%% JIT), %.1fM sueltas · C: %.2f lentas y %.2f de respaldo por bloque · %.1fM llamadas a cpu_run · traducir %.1f s",
-                     jit, in, sp, gb, gd, 100.0 - jit - in - sp - gb, ns_blk, nb / 1e6,
-                     100.0 * (double)cc->st_jit / nb, cc->st_steps / 1e6,
-                     cc->st_jit ? (double)cc->st_ccall / (double)cc->st_jit : 0.0,
-                     cc->st_jit ? (double)cc->st_cfb / (double)cc->st_jit : 0.0, cc->st_runs / 1e6,
-                     js.ticks_per_s ? (double)js.compile_ticks / (double)js.ticks_per_s : 0.0);
-            ovl_text(ly, C_WARN, e);
-            ly += 22;
-        }
-        /* el perfil por bloques: sampler.c, en perfil.txt */
-        {
-            const GpuStats *gs = gpu_stats();
-            snprintf(e, sizeof(e), "GPU %s · %u dibujos (vértices en GPU %u · %u shaders%s, %s: compilar %.1f s · %u de otras veces, %u ya listos · %u dibujos esperaron) · %u por software · %u subidas (%.0f MB) · %u copias · en gpu_draw %.1f s (vértices %.1f s, texturas %.1f s, llamada %.1f s), leer cuadros %.1f s (glReadPixels %.1f s; %s, BGRA %u µs, RGBA %u µs), superficies %u, borrados %u color %u Z (%u cambiaron de FBO, %u nuevos), visibilidad %u (%.1f s; pruebas %u, informes %u, sin DMA %u, por otro subcanal %u clase %X) · %s",
-                     gpu_enabled() ? "activa" : gpu_ready() ? "apagada (L3)" : "no", gs->draws, gs->vs_draws, gs->vs_progs,
-                     gs->vs_bad ? " · fallos" : "", gs->sso ? "por etapas" : "enteros", gs->ns_link / 1e9, gs->vs_known,
-                     gs->vs_pre, gs->vs_deferred, gs->fallbacks, gs->uploads, gs->upload_bytes / 1048576.0, gs->flushes,
-                     gs->ns_draw / 1e9, gs->ns_vbuf / 1e9, gs->ns_tex / 1e9, gs->ns_call / 1e9, gs->ns_read / 1e9, gs->ns_rp / 1e9, gs->rp_cs == 1 ? "por compute shader" : gs->rp_cs == 2 ? "el compute no coincidió" : gs->rp_cs == 3 ? "sin compute" : gs->rp_mode == 2 ? "usa RGBA" : gs->rp_mode == 1 ? "usa BGRA" : "probando", gs->rp_us[0], gs->rp_us[1], gs->surfaces, gs->clears_c, gs->clears_z, gs->clear_bind, gs->clear_new, gs->queries, gs->ns_query / 1e9, hw_stats()->zpass_tests, hw_stats()->reports, hw_stats()->reports_noinst, hw_stats()->reports_other, hw_stats()->other_class, gpu_info());
-            ovl_text(ly, gpu_enabled() ? C_GREEN : C_WARN, e);
-            if (gs->mt) {
-                char m[340];
-                snprintf(m, sizeof(m), "Hilo de la GPU: %u dibujos por la cola, %u perdidos, ocupado %.1f s · el juego: copiando %.1f s, esperando lugar %.1f s, %u esperas de respuesta (%.1f s) · cola máx %.1f MB · superficies leídas al momento %llu (%.1f s)",
-                         gs->mt_draws, gs->mt_lost, gs->ns_busy / 1e9, gs->ns_enq / 1e9, gs->ns_qwait / 1e9, gs->syncs,
-                         gs->ns_sync / 1e9, gs->q_max / 1048576.0, (unsigned long long)gs->sflushes, gs->ns_sflush / 1e9);
-                diag_add(m);
-            }
+            /* dónde se va el tiempo del CPU (muestreado en run_blocks) */
             {
-                /* visibilidad: qué métodos 0x17C0..0x17FC mandó el juego */
-                char v[200];
-                int o = snprintf(v, sizeof(v), "Visibilidad, métodos 17C0-17FC:");
-                for (int i = 0; i < 16 && o < (int)sizeof(v) - 16; i++) {
-                    if (hw_stats()->m17c[i]) {
-                        o += snprintf(v + o, sizeof(v) - (size_t)o, " %X×%u", 0x17C0 + i * 4, hw_stats()->m17c[i]);
-                    }
-                }
-                snprintf(v + o, sizeof(v) - (size_t)o, " (encender %u)", hw_stats()->zpass_on);
-                diag_add(v);
+                const Cpu *cc = &r->cpu;
+                double all = (double)cc->st_t_all;
+                double jit = all > 0 ? 100.0 * (double)cc->st_t_jit / all : 0;
+                double in = all > 0 ? 100.0 * (double)cc->st_t_int / all : 0;
+                double sp = all > 0 ? 100.0 * (double)cc->st_t_step / all : 0;
+                double gb = all > 0 ? 100.0 * (double)cc->st_t_get / all : 0;
+                double gd = all > 0 ? 100.0 * (double)cc->st_t_dec / all : 0;
+                double nb = (double)(cc->st_disp ? cc->st_disp : 1);
+                double ns_blk = js.ticks_per_s && cc->st_disp ? (double)cc->st_t_all * 64.0 / nb * 1e9 / (double)js.ticks_per_s : 0;
+                snprintf(e, sizeof(e),
+                         "Tiempo CPU: traducido %.0f%%, bloques sin traducir %.0f%%, intérprete suelto %.0f%%, buscar bloque %.0f%% (decodificar %.1f%%), resto %.0f%% · %.0f ns por vuelta · %.1fM vueltas (%.0f%% JIT), %.1fM sueltas · C: %.2f lentas y %.2f de respaldo por bloque · %.1fM llamadas a cpu_run · traducir %.1f s",
+                         jit, in, sp, gb, gd, 100.0 - jit - in - sp - gb, ns_blk, nb / 1e6,
+                         100.0 * (double)cc->st_jit / nb, cc->st_steps / 1e6,
+                         cc->st_jit ? (double)cc->st_ccall / (double)cc->st_jit : 0.0,
+                         cc->st_jit ? (double)cc->st_cfb / (double)cc->st_jit : 0.0, cc->st_runs / 1e6,
+                         js.ticks_per_s ? (double)js.compile_ticks / (double)js.ticks_per_s : 0.0);
+                ovl_text(ly, C_WARN, e);
+                ly += 22;
             }
+            /* el perfil por bloques: sampler.c, en perfil.txt */
+            {
+                const GpuStats *gs = gpu_stats();
+                snprintf(e, sizeof(e), "GPU %s · %u dibujos (vértices en GPU %u · %u shaders%s, %s: compilar %.1f s · %u de otras veces, %u ya listos · %u dibujos esperaron) · %u por software · %u subidas (%.0f MB) · %u copias · en gpu_draw %.1f s (vértices %.1f s, texturas %.1f s, llamada %.1f s), leer cuadros %.1f s (glReadPixels %.1f s; %s, BGRA %u µs, RGBA %u µs), superficies %u, borrados %u color %u Z (%u cambiaron de FBO, %u nuevos), visibilidad %u (%.1f s; pruebas %u, informes %u, sin DMA %u, por otro subcanal %u clase %X) · %s",
+                         gpu_enabled() ? "activa" : gpu_ready() ? "apagada (L3)" : "no", gs->draws, gs->vs_draws, gs->vs_progs,
+                         gs->vs_bad ? " · fallos" : "", gs->sso ? "por etapas" : "enteros", gs->ns_link / 1e9, gs->vs_known,
+                         gs->vs_pre, gs->vs_deferred, gs->fallbacks, gs->uploads, gs->upload_bytes / 1048576.0, gs->flushes,
+                         gs->ns_draw / 1e9, gs->ns_vbuf / 1e9, gs->ns_tex / 1e9, gs->ns_call / 1e9, gs->ns_read / 1e9, gs->ns_rp / 1e9, gs->rp_cs == 1 ? "por compute shader" : gs->rp_cs == 2 ? "el compute no coincidió" : gs->rp_cs == 3 ? "sin compute" : gs->rp_mode == 2 ? "usa RGBA" : gs->rp_mode == 1 ? "usa BGRA" : "probando", gs->rp_us[0], gs->rp_us[1], gs->surfaces, gs->clears_c, gs->clears_z, gs->clear_bind, gs->clear_new, gs->queries, gs->ns_query / 1e9, hw_stats()->zpass_tests, hw_stats()->reports, hw_stats()->reports_noinst, hw_stats()->reports_other, hw_stats()->other_class, gpu_info());
+                ovl_text(ly, gpu_enabled() ? C_GREEN : C_WARN, e);
+                if (gs->mt) {
+                    char m[340];
+                    snprintf(m, sizeof(m), "Hilo de la GPU: %u dibujos por la cola, %u perdidos, ocupado %.1f s · el juego: copiando %.1f s, esperando lugar %.1f s, %u esperas de respuesta (%.1f s) · cola máx %.1f MB · superficies leídas al momento %llu (%.1f s)",
+                             gs->mt_draws, gs->mt_lost, gs->ns_busy / 1e9, gs->ns_enq / 1e9, gs->ns_qwait / 1e9, gs->syncs,
+                             gs->ns_sync / 1e9, gs->q_max / 1048576.0, (unsigned long long)gs->sflushes, gs->ns_sflush / 1e9);
+                    diag_add(m);
+                }
+                {
+                    /* visibilidad: qué métodos 0x17C0..0x17FC mandó el juego */
+                    char v[200];
+                    int o = snprintf(v, sizeof(v), "Visibilidad, métodos 17C0-17FC:");
+                    for (int i = 0; i < 16 && o < (int)sizeof(v) - 16; i++) {
+                        if (hw_stats()->m17c[i]) {
+                            o += snprintf(v + o, sizeof(v) - (size_t)o, " %X×%u", 0x17C0 + i * 4, hw_stats()->m17c[i]);
+                        }
+                    }
+                    snprintf(v + o, sizeof(v) - (size_t)o, " (encender %u)", hw_stats()->zpass_on);
+                    diag_add(v);
+                }
+            }
+            ly += 22;
+            ovl_text(ly, sound_on() ? C_GREEN : C_WARN, sound_info());
+            g_ovl_draw = true;
         }
-        ly += 22;
-        ovl_text(ly, sound_on() ? C_GREEN : C_WARN, sound_info());
     } else {
+        gfx_clear(HEX(0x000000));
         snprintf(b, sizeof(b), "Pantalla del Xbox: el juego todavía no eligió un modo de video");
         gfx_text_center(0, UI_W, 330, 22, C_ON_VAR, "Todavía no hay imagen");
+        ovl = true;
     }
-    gfx_text_fit(20, 6, 18, UI_W - 40, C_ON_VAR, b);
-    /* aquí los botones son del juego: L3 + R3 vuelve al registro */
-    gfx_rect(0, BOTBAR_Y, UI_W, 1, C_OUTLINE);
-    /* los botones son del juego: para salir, tocar la pantalla (o L3 + R3) */
-    gfx_rrect(UI_W - 330, BOTBAR_Y + 10, 310, 44, 22, C_SURF_HI);
-    gfx_text_center(UI_W - 330, 310, BOTBAR_Y + 21, 19, C_ON, "Toca aquí para salir");
-    const UsbStats *us = usb_stats();
-    snprintf(b, sizeof(b), "Control: %s · el juego lo leyó %u veces", us->operational ? "USB activo" : "USB sin iniciar",
-             us->polls);
-    gfx_text_fit(UI_W - 520, 6, 18, 500, us->polls ? C_GREEN : C_ON_VAR, b);
+    if (ovl) {
+        gfx_text_fit(20, 6, 18, UI_W - 40, C_ON_VAR, b);
+        /* aquí los botones son del juego: L3 + R3 vuelve al registro */
+        gfx_rect(0, BOTBAR_Y, UI_W, 1, C_OUTLINE);
+        /* los botones son del juego: para salir, tocar aquí (o L3 + R3) */
+        gfx_rrect(UI_W - 330, BOTBAR_Y + 10, 310, 44, 22, C_SURF_HI);
+        gfx_text_center(UI_W - 330, 310, BOTBAR_Y + 21, 19, C_ON, "Toca aquí para salir");
+        gfx_text_fit(20, BOTBAR_Y + 4, 14, 880, C_ON_VAR, "Tocar la imagen oculta los datos");
+        const UsbStats *us = usb_stats();
+        snprintf(b, sizeof(b), "Control: %s · el juego lo leyó %u veces", us->operational ? "USB activo" : "USB sin iniciar",
+                 us->polls);
+        gfx_text_fit(UI_W - 520, 6, 18, 500, us->polls ? C_GREEN : C_ON_VAR, b);
+    }
     diag_end(s);
+}
+
+/* v0.18.68: en la pantalla del juego, abajo a la derecha sale; el resto de la
+ * pantalla muestra u oculta los datos */
+bool ui_run_touch(UiState *s, int tx, int ty)
+{
+    if (tx >= UI_W - 330 && ty >= BOTBAR_Y) {
+        return true;
+    }
+    s->run_diag = !s->run_diag;
+    return false;
 }
 
 static void draw_run(const UiState *s)

@@ -35,7 +35,7 @@
 #include "apu/apu.h"
 #include <time.h>
 
-#define APP_VER   "0.18.67"
+#define APP_VER   "0.18.68"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -795,10 +795,14 @@ int main(int argc, char **argv)
             if (g_ui.run_screen) {
                 u64 held = padGetButtons(&pad);
                 NcPadState ps = {0};
-                if (((held & HidNpadButton_StickL) && (held & HidNpadButton_StickR)) || tx >= 0) {
+                if (((held & HidNpadButton_StickL) && (held & HidNpadButton_StickR)) ||
+                    (tx >= 0 && ui_run_touch(&g_ui, tx, ty))) {
                     g_ui.run_screen = false;
                     dirty = true;
                 } else {
+                    if (tx >= 0) {
+                        dirty = true; /* los datos se mostraron u ocultaron */
+                    }
                     pad_to_xbox(&pad, held, &ps);
                 }
                 nc_pad_set(0, &ps);

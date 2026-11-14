@@ -32,6 +32,8 @@ void gfx_rrect_outline(int x, int y, int w, int h, int r, int thick, uint32_t c)
 void gfx_circle(int cx, int cy, int r, uint32_t c);
 /* Imagen escalada (bilineal) con esquinas redondeadas (r = 0: sin redondear). */
 void gfx_image(const XImage *img, int x, int y, int w, int h, int r);
+/* La misma imagen sin esquinas ni transparencia (la pantalla del juego): rápida. */
+void gfx_image_opaque(const XImage *img, int x, int y, int w, int h);
 
 /* Fuente TrueType (en la Switch, la fuente del sistema). */
 bool gfx_font_init(const uint8_t *ttf, size_t len);

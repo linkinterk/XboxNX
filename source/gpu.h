@@ -138,7 +138,8 @@ typedef struct GpuStats {
     uint64_t sflushes, ns_sflush; /* lecturas de superficies que no podían esperar */
     /* v0.18.61: por qué (0 una textura sobre lo dibujado, 1 el dibujo por
      * software, 2 todo de una vez, 3 otro) y un ejemplo de la de textura */
-    uint64_t sfl_why[4];
+    uint64_t sfl_why[5];  /* v0.18.68: [3] otro tamaño o formato en la misma dirección, [4] echada por falta de lugar */
+    uint32_t sfl_chg_pa, sfl_chg_old, sfl_chg_new; /* un ejemplo de [3]: pitch/4 << 16 | alto (y swizzle en el bit 15) */
     uint64_t swz_direct; /* v0.18.65: texturas con swizzle tomadas directo de una superficie */
     uint32_t sfl_tex_addr, sfl_tex_fmt, sfl_tex_wh, sfl_surf_pa, sfl_surf_wh, sfl_surf_pitch;
     bool sfl_tex_linear;

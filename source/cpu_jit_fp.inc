@@ -506,6 +506,19 @@ static bool emit_x87(Em *e, const Block *b, unsigned i, const Vm *vm)
             fmov_dx(e, 1, XZR);
             fcompare_n(e);
         } else if (m == 0xD0) { /* fnop */
+        } else if (m >= 0xE9 && m <= 0xED) { /* v0.18.68: las constantes (los mismos double que el intérprete) */
+            static const uint64_t kc[5] = {0x400a934f0979a371ull, 0x3ff71547652b82feull, 0x400921fb54442d18ull,
+                                           0x3fd34413509f79ffull, 0x3fe62e42fefa39efull};
+            movx(e, W14, kc[m - 0xE9]);
+            fmov_dx(e, 0, W14);
+            fpush_d(e, 0);
+        } else if (m == 0xFC) { /* v0.18.68: frndint al más cercano (par); NaN al lento */
+            cw_rc0(e, &s);
+            st_load(e, 0, 0);
+            fcmpd(e, 0, 0);
+            slow_bcond(e, &s, COND_VS);
+            E(e, 0x1E644000u); /* frintn d0, d0 */
+            strd(e, 0, W13, STOFF);
         } else if (m == 0xFA) { /* v0.18.65: fsqrt (redondeo al más cercano; precisión como farith) */
             cw_rc0(e, &s);
             st_load(e, 0, 0);
@@ -1684,6 +1697,38 @@ static uint32_t jit_op1(Cpu *c, const Insn *in)
     return 0;
 }
 
+/* v0.18.68: la llamada al kernel que contesta kfast (la hora) sin salir del
+ * JIT: icount como en jit_slow_c (para la hora); 0 hecha (EIP de vuelta),
+ * 1 no es de esas (la de siempre: para con CPU_KCALL). */
+static uint32_t jit_kfast(Cpu *c, const Insn *in, uint64_t before)
+{
+    if (!c->kfast) {
+        return 1;
+    }
+    c->icount += before;
+    c->eip = in->next;
+    c->kcall_ordinal = in->imm;
+    bool ok = c->kfast(c, in->imm);
+    c->icount -= before;
+    return ok ? 0u : 1u;
+}
+
+static void emit_kcall(Em *e, const Block *b, unsigned i, const Vm *vm)
+{
+    regs_spill(e);
+    movx_r(e, X0, XC);
+    adr_insn(e, i);
+    E(e, 0x91000000u | (i & 0xFFFu) << 10 | 24u << 5 | 2u); /* add x2, x24, #i */
+    movx(e, W9, (uint64_t)(uintptr_t)jit_kfast);
+    E(e, 0xD63F0000u | 9u << 5); /* blr x9 */
+    regs_load(e);
+    uint32_t *done = fwd_cb(e, J_CBZ, X0);
+    e->fallback = true;
+    emit_call(e, b, i, vm); /* la de siempre: CPU_KCALL */
+    e->fallback = false;
+    patch(e, done);
+}
+
 /* SSE nuevas en código nativo; false: no es de estas */
 static bool emit_sse2(Em *e, const Block *b, unsigned i, const Vm *vm)
 {
@@ -2060,6 +2105,18 @@ static bool emit_extra(Em *e, const Block *b, unsigned i, const Vm *vm)
         return true;
     }
     if (!is0f && op == 0x9B) { /* fwait: nada */
+        return true;
+    }
+    if (!is0f && op == 0xDD && !in->is_reg && in->reg == 7) { /* v0.18.68: fnstsw m16 */
+        mem_at(e, in, 2, true, &s);
+        ldrh_i(e, W12, XC, OFF(fpu_sw));
+        movw(e, W13, 0x3800);
+        rrr(e, BICW, W12, W12, W13);
+        ldrb_i(e, W13, XC, OFF(fp.top));
+        lslw(e, W13, W13, 11);
+        rrr(e, ORRW, W12, W12, W13);
+        strh_r(e, W12, W10, W11);
+        slow_tail(e, b, i, vm, &s);
         return true;
     }
     if (!is0f && op >= 0xD8 && op <= 0xDF) {

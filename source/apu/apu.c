@@ -305,7 +305,22 @@ static bool frames_stopped(MCPXAPUState *d)
            (mode != NV_PAPU_FECTL_FEMETHMODE_FREE_RUNNING && mode != NV_PAPU_FECTL_FEMETHMODE_TRAPPED);
 }
 
+static uint64_t mono_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void se_frame_(MCPXAPUState *d);
 static void se_frame(MCPXAPUState *d)
+{
+    uint64_t t0 = mono_ns();
+    se_frame_(d);
+    g_stats.ns_busy += mono_ns() - t0;
+}
+
+static void se_frame_(MCPXAPUState *d)
 {
     float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME];
     memset(mixbins, 0, sizeof(mixbins));
@@ -344,7 +359,11 @@ static unsigned g_off_frames; /* cuadros parados con VOICE_OFF esperando */
 static void run_frames(MCPXAPUState *d, uint64_t now)
 {
     /* más de 100 ms atrasado (un salto del reloj): no se recupera todo */
+    if (now > g_next_frame_ns) {
+        g_stats.lag_ns = now - g_next_frame_ns;
+    }
     if (now > g_next_frame_ns && now - g_next_frame_ns > 100000000ull) {
+        g_stats.skipped += (now - 100000000ull - g_next_frame_ns) / GP_FRAME_NS;
         __atomic_store_n(&g_next_frame_ns, now - 100000000ull, __ATOMIC_RELAXED);
     }
     while (g_next_frame_ns <= now && !g_quit) {

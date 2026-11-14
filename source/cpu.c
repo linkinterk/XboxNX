@@ -1553,6 +1553,7 @@ typedef struct Block {
     uint32_t execs;       /* veces que corrió (para el perfil) */
     uint64_t slow;        /* JIT: instrucciones que llaman a su función de C (bit i) */
     uint64_t helper;      /* JIT: las que llaman a una función de C directa (sin step) */
+    uint8_t cap;          /* v0.18.68: lugares para instrucciones (montón propio) */
     Insn in[];
 } Block;
 
@@ -2001,6 +2002,17 @@ static void x_emms(Cpu *c, const Insn *in)
     c->fp.mmx = false;
 }
 
+/* v0.18.68: la llamada al kernel (int 0x3F + ordinal de 16 bits) como
+ * instrucción propia: las que contesta kfast (la hora) ya no salen del JIT. */
+static void x_kcall(Cpu *c, const Insn *in)
+{
+    c->kcall_ordinal = in->imm;
+    if (c->kfast && c->kfast(c, in->imm)) {
+        return; /* contestada: el EIP es el de vuelta */
+    }
+    c->stop = CPU_KCALL;
+}
+
 /* Etapa 5: las de cadena (movs stos lods cmps scas, con o sin rep) sin
  * pasar por step(): antes cada una se volvía a decodificar entera. */
 static void x_str(Cpu *c, const Insn *in)
@@ -2226,7 +2238,13 @@ static bool decode(Rd *r, uint32_t page_va, Insn *in)
     in->fs = fs;
     in->base = in->index = NOREG;
     unsigned pfx = (o16 ? INTERP_P66 : 0) | (rep_ == 0xF3 ? INTERP_PF3 : 0) | (rep_ == 0xF2 ? INTERP_PF2 : 0);
-    if ((op >= 0xA4 && op <= 0xA7) || (op >= 0xAA && op <= 0xAF)) { /* cadenas */
+    if (op == 0xCD && !rep_ && !o16) { /* v0.18.68: int 0x3F, la llamada al kernel */
+        if (rd8(r) != 0x3F) {
+            return false;
+        }
+        in->imm = rdn(r, 2);
+        in->fn = x_kcall;
+    } else if ((op >= 0xA4 && op <= 0xA7) || (op >= 0xAA && op <= 0xAF)) { /* cadenas */
         in->aop = op;
         in->sz = (uint8_t)((op & 1) ? osz : 1);
         in->imm = rep_;
@@ -2452,10 +2470,73 @@ static bool decode(Rd *r, uint32_t page_va, Insn *in)
 
 static bool ends_block(InsnFn f)
 {
-    return f == x_jcc || f == x_jmp || f == x_call || f == x_ret || f == x_call_e || f == x_jmp_e;
+    return f == x_jcc || f == x_jmp || f == x_call || f == x_ret || f == x_call_e || f == x_jmp_e || f == x_kcall;
 }
 
+/* El reloj de la CPU del host (para medir dónde se va el tiempo). */
+static inline uint64_t cpu_tick(void)
+{
+#if defined(__SWITCH__)
+    uint64_t v; /* en Horizon solo cntpct_el0 se puede leer (como armGetSystemTick) */
+    __asm__ volatile("mrs %0, cntpct_el0" : "=r"(v));
+    return v;
+#elif defined(__aarch64__)
+    uint64_t v;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+#elif defined(__x86_64__) || defined(__i386__)
+    return __builtin_ia32_rdtsc();
+#else
+    return 0;
+#endif
+}
+#define cpu_tick_ cpu_tick
+
 static uint64_t g_decodes; /* bloques decodificados (para la pantalla) */
+/* v0.18.68: el tiempo de decodificar (todas, no una de cada 64) y la más lenta */
+static uint64_t g_dec_ticks, g_dec_max;
+
+/* v0.18.68: los bloques en trozos de 4 MB propios (malloc tiene un cerrojo
+ * que comparten los hilos de la GPU y del sonido, y con miles de bloques
+ * pedidos uno a uno se fragmentaba). Un bloque que se vuelve a decodificar
+ * con más instrucciones de las que caben toma otro lugar (el viejo se
+ * pierde hasta cpu_free: casi nunca pasa). */
+typedef struct BlkChunk {
+    struct BlkChunk *next;
+    size_t used, size;
+} BlkChunk;
+static BlkChunk *g_bchunk;
+
+static void *blk_alloc(size_t sz)
+{
+    sz = (sz + 15) & ~(size_t)15;
+    if (!g_bchunk || g_bchunk->used + sz > g_bchunk->size) {
+        size_t cs = (size_t)4 << 20;
+        if (sz + 64 > cs) {
+            cs = sz + 64;
+        }
+        BlkChunk *k = malloc(cs);
+        if (!k) {
+            return NULL;
+        }
+        k->next = g_bchunk;
+        k->used = (sizeof(BlkChunk) + 15) & ~(size_t)15;
+        k->size = cs;
+        g_bchunk = k;
+    }
+    void *p = (uint8_t *)g_bchunk + g_bchunk->used;
+    g_bchunk->used += sz;
+    return p;
+}
+
+static void blk_free_all(void)
+{
+    while (g_bchunk) {
+        BlkChunk *n = g_bchunk->next;
+        free(g_bchunk);
+        g_bchunk = n;
+    }
+}
 /* etapa 5: bloques en la tabla, y los que antes se habrían echado unos a
  * otros (misma casilla, otro EIP: se decodificaban y traducían otra vez) */
 static uint64_t g_nblocks, g_chained;
@@ -2543,6 +2624,7 @@ static Block *get_block(Cpu *c, uint32_t eip)
         }
     }
     /* decodificar */
+    uint64_t dt0 = cpu_tick_();
     Insn tmp[BLK_MAX];
     Rd r = {c->vm->ram + ((size_t)pp << 12), eip & 0xFFFu, false};
     uint32_t page_va = eip & ~0xFFFu;
@@ -2561,9 +2643,18 @@ static Block *get_block(Cpu *c, uint32_t eip)
         }
     }
     /* n == 0: la primera ya no tiene función (queda guardado: el intérprete) */
-    Block *nb = realloc(old, sizeof(Block) + n * sizeof(Insn));
-    if (!nb) {
-        return NULL;
+    Block *nb;
+    if (old && old->cap >= n) {
+        nb = old;
+    } else {
+        nb = blk_alloc(sizeof(Block) + n * sizeof(Insn));
+        if (!nb) {
+            return NULL;
+        }
+        if (old) {
+            memcpy(nb, old, sizeof(Block)); /* con su next */
+        }
+        nb->cap = (uint8_t)n;
     }
     if (old) {
         s->b = nb; /* old era el primero de la lista (next se copió con él) */
@@ -2586,6 +2677,13 @@ static Block *get_block(Cpu *c, uint32_t eip)
         vm_mark_code(c->vm, pp, eip & 0xFFFu, nb_end_off(tmp, n));
     }
     g_decodes++;
+    {
+        uint64_t dd = cpu_tick_() - dt0;
+        g_dec_ticks += dd;
+        if (dd > g_dec_max) {
+            g_dec_max = dd;
+        }
+    }
     nb->jit = NULL;
     nb->jit_chain = NULL;
     nb->jcnt = 0;
@@ -2615,6 +2713,8 @@ void cpu_jit_stats(CpuJitStats *s)
     s->flushes = g_jit.epoch ? g_jit.epoch - 1 : 0;
 #endif
     s->decodes = g_decodes;
+    s->dec_ticks = g_dec_ticks;
+    s->dec_max = g_dec_max;
     s->blocks = g_nblocks;
     s->chained = g_chained;
     s->compile_ticks = g_compile_ticks;
@@ -2812,23 +2912,6 @@ void cpu_jit_range(uintptr_t *rx, size_t *size)
 }
 
 /* Hasta max instrucciones por bloques; las demás, una a una en step(). */
-/* El reloj de la CPU del host (para medir dónde se va el tiempo). */
-static inline uint64_t cpu_tick(void)
-{
-#if defined(__SWITCH__)
-    uint64_t v; /* en Horizon solo cntpct_el0 se puede leer (como armGetSystemTick) */
-    __asm__ volatile("mrs %0, cntpct_el0" : "=r"(v));
-    return v;
-#elif defined(__aarch64__)
-    uint64_t v;
-    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
-    return v;
-#elif defined(__x86_64__) || defined(__i386__)
-    return __builtin_ia32_rdtsc();
-#else
-    return 0;
-#endif
-}
 
 
 static const volatile uint8_t g_no_yield;
@@ -3035,13 +3118,11 @@ void cpu_free(Cpu *c)
     BlockSlot *tab = c->blocks;
     if (tab) {
         for (unsigned i = 0; i < BLK_HASH; i++) {
-            for (Block *b = tab[i].b, *nx; b; b = nx) {
-                nx = b->next;
-                free(b);
-            }
+            tab[i].b = NULL;
         }
         free(tab);
     }
+    blk_free_all();
     c->blocks = NULL;
     g_nblocks = g_chained = 0;
 }

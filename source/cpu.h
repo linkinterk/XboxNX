@@ -129,6 +129,7 @@ typedef struct CpuJitStats {
     size_t used, size;
     uint32_t flushes;
     uint64_t decodes;  /* bloques decodificados (con o sin JIT) */
+    uint64_t dec_ticks, dec_max; /* v0.18.68: su tiempo (todas) y la más lenta, en ticks */
     uint64_t blocks;   /* bloques guardados en la tabla */
     uint64_t chained;  /* de ellos, los que comparten casilla (antes se echaban) */
     uint64_t compile_ticks, ticks_per_s; /* tiempo traduciendo */

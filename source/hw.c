@@ -574,6 +574,13 @@ static void get_report(Kernel *k, uint32_t v)
 /* Un método del push buffer. Devuelve PB_GO o el motivo de parar. */
 static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
 {
+    /* v0.18.68: qué manda el juego tras apagar la prueba de visibilidad (el
+     * informe nunca llega por GET_REPORT: ¿por dónde lo pide?) */
+    if (g_hw.st.after_n < 8) {
+        g_hw.st.after_off[g_hw.st.after_n][0] = (uint32_t)subch << 16 | m;
+        g_hw.st.after_off[g_hw.st.after_n][1] = v;
+        g_hw.st.after_n++;
+    }
     if (m == 0) { /* SET_OBJECT */
         uint32_t inst = ramht_find(v);
         g_hw.obj_inst[subch] = inst;
@@ -611,6 +618,10 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         g_hw.st.m17c[(m >> 2) & 15]++;
         if (m == 0x17CC && v) {
             g_hw.st.zpass_on++;
+        }
+        if (m == 0x17CC && !v) {
+            g_hw.st.zpass_off++;
+            g_hw.st.after_n = 0; /* los 8 siguientes */
         }
     }
     draw_method(m, v);

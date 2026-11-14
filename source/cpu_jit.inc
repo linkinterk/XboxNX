@@ -1114,6 +1114,11 @@ static bool emit_insn(Em *e, const Block *b, unsigned i, const Vm *vm)
     unsigned prev_kind = e->lf_kind;
     e->nzcv_prev = e->nzcv;
     e->nzcv = 0;
+    if (f == x_kcall) { /* v0.18.68: la hora sin salir del JIT */
+        e->lf_kind = 0;
+        emit_kcall(e, b, i, vm);
+        return false; /* el EIP lo puso kfast (o paró) */
+    }
     if (f == x_nop || f == x_lea || f == x_mov_ge || f == x_mov_eg || f == x_mov_ei || f == x_movx || f == x_push_r ||
         f == x_push_i || f == x_pop_r || is_mmx_op(f) || f == x_movq_load || f == x_movq_store || f == x_movd_load ||
         f == x_movd_store || f == x_mmx_shift_i || f == x_jcc || f == x_setcc || f == x_cmov) {
@@ -1360,10 +1365,11 @@ static bool jit_compile(Cpu *c, Block *b)
         /* la entrada: x19 = c, x20 = ram, x21 = tabla de páginas, x22 = code[],
          * x23 = presupuesto que queda, x24 = instrucciones de los bloques encadenados */
         g_jit.enter_rx = em_rx(&s0);
-        E(&s0, 0xA9BC7BFDu); /* stp x29, x30, [sp, #-64]! */
+        E(&s0, 0xA9BB7BFDu); /* stp x29, x30, [sp, #-80]! */
         E(&s0, 0xA90153F3u); /* stp x19, x20, [sp, #16] */
         E(&s0, 0xA9025BF5u); /* stp x21, x22, [sp, #32] */
         E(&s0, 0xA90363F7u); /* stp x23, x24, [sp, #48] */
+        E(&s0, 0xA9046BF9u); /* stp x25, x26, [sp, #64] */
         E(&s0, 0xAA0203EAu); /* mov x10, x2 (w2 es eax) */
         movx_r(&s0, XC, X0);
         movx_r(&s0, 23, X1);
@@ -1373,6 +1379,8 @@ static bool jit_compile(Cpu *c, Block *b)
         ldrx(&s0, XRAM, W9, (uint32_t)offsetof(Vm, ram));
         ldrx(&s0, XPT, W9, (uint32_t)offsetof(Vm, pt));
         ldrx(&s0, XCODE, W9, (uint32_t)offsetof(Vm, code));
+        ldrx(&s0, 26, W9, (uint32_t)offsetof(Vm, gen)); /* v0.18.68: x26 = gen[], x25 = &yield */
+        ldrx(&s0, 25, XC, OFF(yield));
         E(&s0, 0xD1400694u); /* sub x20, x20, #1, lsl #12: la tabla de páginas guarda página + 1 */
         E(&s0, 0xD10006D6u); /* sub x22, x22, #1 */
         E(&s0, 0xD61F0000u | 10u << 5); /* br x10 */
@@ -1381,10 +1389,11 @@ static bool jit_compile(Cpu *c, Block *b)
         regs_spill(&s0);
         strw(&s0, XZR, XC, OFF(jit_cur)); /* fuera del JIT */
         E(&s0, 0x0B180000u); /* add w0, w0, w24 */
+        E(&s0, 0xA9446BF9u); /* ldp x25, x26, [sp, #64] */
         E(&s0, 0xA94363F7u); /* ldp x23, x24, [sp, #48] */
         E(&s0, 0xA9425BF5u); /* ldp x21, x22, [sp, #32] */
         E(&s0, 0xA94153F3u); /* ldp x19, x20, [sp, #16] */
-        E(&s0, 0xA8C47BFDu); /* ldp x29, x30, [sp], #64 */
+        E(&s0, 0xA8C57BFDu); /* ldp x29, x30, [sp], #80 */
         E(&s0, 0xD65F03C0u); /* ret */
         /* v0.18.61, el resolvedor: w9 = EIP (ya puesto en c->eip), x14 = la
          * casilla (vista ejecutable; 0: ninguna) */
@@ -1501,22 +1510,39 @@ static bool jit_compile(Cpu *c, Block *b)
         /* entrada desde otro bloque */
         uint32_t *chain = e.p;
         e.page = b->eip >> 12;
-        movw(&e, W9, b->eip >> 12);
-        ldrw_lsl2(&e, W10, XPT, W9);
-        movw(&e, W11, b->ppage + 1);
-        cmpw(&e, W10, W11);
+        /* v0.18.68: con desplazamientos inmediatos cuando caben (x21 = pt[],
+         * x26 = gen[], x25 = &yield) */
+        uint32_t vp = b->eip >> 12;
+        if (vp < 4096) {
+            E(&e, 0xB9400000u | vp << 10 | (uint32_t)XPT << 5 | W10); /* ldr w10, [x21, #vp*4] */
+        } else {
+            movw(&e, W9, vp);
+            ldrw_lsl2(&e, W10, XPT, W9);
+        }
+        if (b->ppage + 1 < 4096) {
+            cmpwi(&e, W10, b->ppage + 1);
+        } else {
+            movw(&e, W11, b->ppage + 1);
+            cmpw(&e, W10, W11);
+        }
         slow_bcond(&e, &bx, COND_NE);                /* la página ya es otra */
-        movx(&e, W9, (uint64_t)(uintptr_t)&c->vm->gen[b->ppage]);
-        ldrw(&e, W10, W9, 0);
-        movw(&e, W11, b->gen);
-        cmpw(&e, W10, W11);
+        if (b->ppage < 4096) {
+            E(&e, 0xB9400000u | b->ppage << 10 | 26u << 5 | W10); /* ldr w10, [x26, #ppage*4] */
+        } else {
+            movw(&e, W9, b->ppage);
+            ldrw_lsl2(&e, W10, 26, W9);
+        }
+        if (b->gen < 4096) {
+            cmpwi(&e, W10, b->gen);
+        } else {
+            movw(&e, W11, b->gen);
+            cmpw(&e, W10, W11);
+        }
         slow_bcond(&e, &bx, COND_NE);                /* el código cambió */
         uint32_t *fast = e.p; /* v0.18.62: desde la misma página se entra aquí */
-        E(&e, 0xF100001Fu | b->n << 10 | 23u << 5); /* cmp x23, #n */
+        E(&e, 0xF1000000u | b->n << 10 | 23u << 5 | 23u); /* subs x23, x23, #n */
         slow_bcond(&e, &bx, 3);                      /* b.lo: no alcanza */
-        E(&e, 0xD1000000u | b->n << 10 | 23u << 5 | 23u); /* sub x23, x23, #n */
-        ldrx(&e, W9, XC, OFF(yield));
-        ldrb_i(&e, W9, W9, 0);
+        E(&e, 0x39400000u | 25u << 5 | W9);          /* ldrb w9, [x25] */
         slow_add(&e, &bx, fwd_cb(&e, J_CBNZ, W9));   /* una interrupción */
         /* etapa 5: en vez de contar (leer, sumar, escribir), dice qué bloque
          * corre; un hilo aparte (sampler.c) lo muestrea */

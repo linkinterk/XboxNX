@@ -56,6 +56,37 @@ static void add_all(uint32_t eip)
     }
 }
 
+/* v0.18.68: los n bloques con más muestras desde el principio (para
+ * resumen.txt); devuelve cuántos y el total de muestras en bloques. */
+unsigned sampler_top(unsigned n, uint32_t *eip, uint32_t *cnt, uint64_t *total)
+{
+    unsigned k = 0;
+    uint64_t t = 0;
+    for (unsigned i = 0; i < ASIZE; i++) {
+        const Slot *s = &g_all[i];
+        if (!s->eip) {
+            continue;
+        }
+        t += s->n;
+        unsigned j = k < n ? k++ : n;
+        if (j == n && (n == 0 || s->n <= cnt[n - 1])) {
+            continue;
+        }
+        if (j == n) {
+            j = n - 1;
+        }
+        while (j > 0 && cnt[j - 1] < s->n) {
+            eip[j] = eip[j - 1];
+            cnt[j] = cnt[j - 1];
+            j--;
+        }
+        eip[j] = s->eip;
+        cnt[j] = s->n;
+    }
+    *total = t;
+    return k;
+}
+
 uint32_t sampler_hits(uint32_t eip)
 {
     unsigned h = (eip * 2654435761u) >> 17;

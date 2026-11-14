@@ -152,9 +152,9 @@ static uint64_t fnv(uint64_t h, const void *p, size_t n)
 
 /* ------------------------------------------------------------ estado */
 
-#define MAX_SURF 24
-#define MAX_ZETA 12
-#define MAX_FBO 32
+#define MAX_SURF 48 /* v0.18.68: antes 24 (Halo 2 echaba superficies y las leía a la RAM esperando) */
+#define MAX_ZETA 16
+#define MAX_FBO 64
 #define MAX_TEX 384
 #define RING_SIZE (16u << 20) /* el anillo de los vértices (vbo2) */
 #define IRING_SIZE (4u << 20) /* el de los índices */
@@ -1822,7 +1822,7 @@ static void surf_flush(int i)
     uint64_t t0 = now_ns();
     size_t bytes = (size_t)s->pitch * (size_t)s->h;
     G.st.sflushes++;
-    G.st.sfl_why[g_sfl_why & 3]++;
+    G.st.sfl_why[g_sfl_why <= 4 ? g_sfl_why : 3]++;
     int zprev = g_zone;
     g_zone = Z_READ; /* en el perfil: "leer cuadro", no lo que la pidió */
     /* etapa 5: también aquí por el compute (glReadPixels tardaba ~35 ms en la
@@ -1916,6 +1916,10 @@ static int surf_get(uint32_t pa, uint32_t pitch, int h, unsigned fmt, bool swz)
             s->used = G.frame;
             return i;
         }
+        G.st.sfl_chg_pa = pa;
+        G.st.sfl_chg_old = (s->pitch / 4) << 16 | (uint32_t)s->h | (s->swz ? 0x8000u : 0);
+        G.st.sfl_chg_new = (pitch / 4) << 16 | (uint32_t)h | (swz ? 0x8000u : 0);
+        g_sfl_why = 3;
         surf_free(i); /* otro tamaño: a la RAM y de nuevo */
     }
     int best = -1;
@@ -1929,7 +1933,9 @@ static int surf_get(uint32_t pa, uint32_t pitch, int h, unsigned fmt, bool swz)
         }
     }
     if (G.surf[best].tex) {
+        g_sfl_why = 4; /* sin lugar: se echa la menos usada */
         surf_free(best);
+        g_sfl_why = 3;
     }
     Surf *s = &G.surf[best];
     s->pa = pa;
