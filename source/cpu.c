@@ -554,11 +554,76 @@ static uint32_t shift(Cpu *c, int op, uint32_t a, unsigned cnt, int sz)
 
 /* ---- instrucciones de cadena ---- */
 
+/* Etapa 5: rep movs / rep stos hacia adelante, de a páginas enteras con
+ * memcpy/memset (antes, un elemento a la vez con su traducción: en Cairo
+ * "rep movsd" del juego era ~8% del hilo principal). false: lo que falte, por
+ * el camino de siempre (páginas sin RAM, un elemento partido entre páginas). */
+static bool string_fast(Cpu *c, uint8_t op, int sz, uint32_t src_base)
+{
+    bool movs = op == 0xA4 || op == 0xA5;
+    uint32_t val = c->r[R_EAX] & mask_of(sz);
+    while (c->r[R_ECX]) {
+        uint32_t di = c->r[R_EDI];
+        uint8_t *dh = hp(c, di);
+        if (!dh) {
+            return false;
+        }
+        uint64_t want = (uint64_t)c->r[R_ECX] * (uint64_t)sz;
+        uint32_t chunk = VM_PAGE - (di & (VM_PAGE - 1));
+        if (want < chunk) {
+            chunk = (uint32_t)want;
+        }
+        const uint8_t *sh = NULL;
+        if (movs) {
+            uint32_t si = src_base + c->r[R_ESI];
+            sh = hp(c, si);
+            if (!sh) {
+                return false;
+            }
+            uint32_t rs = VM_PAGE - (si & (VM_PAGE - 1));
+            if (rs < chunk) {
+                chunk = rs;
+            }
+        }
+        chunk -= chunk % (uint32_t)sz;
+        if (!chunk) {
+            return false; /* un elemento entre dos páginas */
+        }
+        if (movs) {
+            if (dh > sh && dh < sh + chunk) {
+                /* se pisa hacia adelante (truco de relleno): como el x86, en orden */
+                for (uint32_t k = 0; k < chunk; k += (uint32_t)sz) {
+                    uint32_t t;
+                    memcpy(&t, sh + k, (size_t)sz); /* el elemento entero, y luego se escribe */
+                    memcpy(dh + k, &t, (size_t)sz);
+                }
+            } else {
+                memmove(dh, sh, chunk);
+            }
+            c->r[R_ESI] += chunk;
+        } else if (sz == 1) {
+            memset(dh, (int)val, chunk);
+        } else {
+            for (uint32_t k = 0; k < chunk; k += (uint32_t)sz) {
+                memcpy(dh + k, &val, (size_t)sz);
+            }
+        }
+        vm_touch_range(c->vm, (uint32_t)((size_t)(dh - c->vm->ram) >> 12), di & 0xFFFu, chunk);
+        c->r[R_EDI] += chunk;
+        c->r[R_ECX] -= chunk / (uint32_t)sz;
+    }
+    return true;
+}
+
 static void string_op(Cpu *c, const Dec *d, uint8_t op, int sz)
 {
     int32_t step = (FL(c) & F_DF) ? -sz : sz;
     bool rep = d->rep != 0;
     uint32_t src_base = d->fs ? c->fs_base : 0;
+    if (rep && step > 0 && (op == 0xA4 || op == 0xA5 || op == 0xAA || op == 0xAB) &&
+        string_fast(c, op, sz, src_base)) {
+        return;
+    }
     for (;;) {
         if (rep && c->r[R_ECX] == 0) {
             break;

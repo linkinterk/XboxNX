@@ -909,7 +909,7 @@ static void draw_xbox_screen(const UiState *s)
         /* el dibujo por software: el último dibujo con lo que dio */
         const SwStats *sw = sw_stats();
         const __typeof__(sw->last) *L = &sw->last;
-        char e[600];
+        char e[720];
         int ly = 40;
         snprintf(e, sizeof(e), "Software: %llu triángulos, %llu píxeles · sin shader %u · sin destino %u (motivo %u: fmt %X pitch %X clip %X %X) · shader con error %u · se muestra %08X",
                  (unsigned long long)sw->triangles, (unsigned long long)sw->pixels, sw->skipped_ff, sw->no_target,
@@ -1010,12 +1010,24 @@ static void draw_xbox_screen(const UiState *s)
         /* el perfil por bloques: sampler.c, en perfil.txt */
         {
             const GpuStats *gs = gpu_stats();
-            snprintf(e, sizeof(e), "GPU %s · %u dibujos (vértices en GPU %u · %u shaders%s, %s: compilar %.1f s · %u de otras veces, %u ya listos · %u dibujos esperaron) · %u por software · %u subidas (%.0f MB) · %u copias · en gpu_draw %.1f s (vértices %.1f s, texturas %.1f s, llamada %.1f s), leer cuadros %.1f s (glReadPixels %.1f s; %s, BGRA %u µs, RGBA %u µs), visibilidad %u (%.1f s; pruebas %u, informes %u, sin DMA %u, por otro subcanal %u clase %X) · %s",
+            snprintf(e, sizeof(e), "GPU %s · %u dibujos (vértices en GPU %u · %u shaders%s, %s: compilar %.1f s · %u de otras veces, %u ya listos · %u dibujos esperaron) · %u por software · %u subidas (%.0f MB) · %u copias · en gpu_draw %.1f s (vértices %.1f s, texturas %.1f s, llamada %.1f s), leer cuadros %.1f s (glReadPixels %.1f s; %s, BGRA %u µs, RGBA %u µs), superficies %u, borrados %u color %u Z (%u cambiaron de FBO, %u nuevos), visibilidad %u (%.1f s; pruebas %u, informes %u, sin DMA %u, por otro subcanal %u clase %X) · %s",
                      gpu_enabled() ? "activa" : gpu_ready() ? "apagada (L3)" : "no", gs->draws, gs->vs_draws, gs->vs_progs,
                      gs->vs_bad ? " · fallos" : "", gs->sso ? "por etapas" : "enteros", gs->ns_link / 1e9, gs->vs_known,
                      gs->vs_pre, gs->vs_deferred, gs->fallbacks, gs->uploads, gs->upload_bytes / 1048576.0, gs->flushes,
-                     gs->ns_draw / 1e9, gs->ns_vbuf / 1e9, gs->ns_tex / 1e9, gs->ns_call / 1e9, gs->ns_read / 1e9, gs->ns_rp / 1e9, gs->rp_mode == 2 ? "usa RGBA" : gs->rp_mode == 1 ? "usa BGRA" : "probando", gs->rp_us[0], gs->rp_us[1], gs->queries, gs->ns_query / 1e9, hw_stats()->zpass_tests, hw_stats()->reports, hw_stats()->reports_noinst, hw_stats()->reports_other, hw_stats()->other_class, gpu_info());
+                     gs->ns_draw / 1e9, gs->ns_vbuf / 1e9, gs->ns_tex / 1e9, gs->ns_call / 1e9, gs->ns_read / 1e9, gs->ns_rp / 1e9, gs->rp_mode == 2 ? "usa RGBA" : gs->rp_mode == 1 ? "usa BGRA" : "probando", gs->rp_us[0], gs->rp_us[1], gs->surfaces, gs->clears_c, gs->clears_z, gs->clear_bind, gs->clear_new, gs->queries, gs->ns_query / 1e9, hw_stats()->zpass_tests, hw_stats()->reports, hw_stats()->reports_noinst, hw_stats()->reports_other, hw_stats()->other_class, gpu_info());
             ovl_text(ly, gpu_enabled() ? C_GREEN : C_WARN, e);
+            {
+                /* visibilidad: qué métodos 0x17C0..0x17FC mandó el juego */
+                char v[200];
+                int o = snprintf(v, sizeof(v), "Visibilidad, métodos 17C0-17FC:");
+                for (int i = 0; i < 16 && o < (int)sizeof(v) - 16; i++) {
+                    if (hw_stats()->m17c[i]) {
+                        o += snprintf(v + o, sizeof(v) - (size_t)o, " %X×%u", 0x17C0 + i * 4, hw_stats()->m17c[i]);
+                    }
+                }
+                snprintf(v + o, sizeof(v) - (size_t)o, " (encender %u)", hw_stats()->zpass_on);
+                diag_add(v);
+            }
         }
         ly += 22;
         ovl_text(ly, sound_on() ? C_GREEN : C_WARN, sound_info());

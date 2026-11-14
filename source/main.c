@@ -34,7 +34,7 @@
 #include "apu/apu.h"
 #include <time.h>
 
-#define APP_VER   "0.18.54"
+#define APP_VER   "0.18.55"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 

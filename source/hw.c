@@ -592,6 +592,12 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         }
         return PB_GO;
     }
+    if ((m & ~0x3Fu) == 0x17C0u) {
+        g_hw.st.m17c[(m >> 2) & 15]++;
+        if (m == 0x17CC && v) {
+            g_hw.st.zpass_on++;
+        }
+    }
     draw_method(m, v);
     cap_method(m, v);
     sw_method(m, v);

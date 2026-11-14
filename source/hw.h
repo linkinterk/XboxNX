@@ -56,7 +56,9 @@ typedef struct HwStats {
     unsigned clears;        /* CLEAR_SURFACE hechos */
     unsigned reports, zpass_tests, reports_noinst;
     unsigned reports_other;  /* GET_REPORT por un subcanal que no era Kelvin (antes se perdían) */
-    unsigned other_class;    /* la última clase (no Kelvin) por la que llegó un método de Kelvin */ /* GET_REPORT recibidos, pruebas de visibilidad (CLEAR_REPORT_VALUE), informes sin DMA */
+    unsigned other_class;
+    unsigned m17c[16];       /* métodos de Kelvin 0x17C0..0x17FC (visibilidad): cuántas veces llegó cada uno */
+    unsigned zpass_on;       /* SET_ZPASS_PIXEL_COUNT_ENABLE con 1 */    /* la última clase (no Kelvin) por la que llegó un método de Kelvin */ /* GET_REPORT recibidos, pruebas de visibilidad (CLEAR_REPORT_VALUE), informes sin DMA */
     unsigned av_modes;      /* llamadas a AvSetDisplayMode */
     HwDraws last;           /* el último cuadro */
     uint64_t total_draws;

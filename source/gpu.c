@@ -2258,26 +2258,72 @@ static bool gpu_draw_(const GpuDraw *d)
     return true;
 }
 
+/* Etapa 5: borrar sin tirar la caché de estado. Antes cada borrado ponía el
+ * FBO de la superficie sola y SC.valid = false, y el dibujo siguiente volvía a
+ * mandar todo el estado GL (en Cairo "borrar" + "GL destino" eran ~25% del
+ * hilo principal). Ahora, si el FBO puesto ya tiene esa superficie (o ese Z),
+ * se borra ahí, y solo se anota lo que cambió (scissor, máscaras). */
+static bool fbo_has(GLuint fbo, int si, int zi)
+{
+    if (fbo == 0xFFFFFFFFu || !fbo) {
+        return false;
+    }
+    if (si >= 0 && zi < 0 && G.surf[si].fbo == fbo) {
+        return true;
+    }
+    for (int f = 0; f < MAX_FBO; f++) {
+        if (G.fbo[f].fbo == fbo) {
+            return (si < 0 || G.fbo[f].surf == si) && (zi < 0 || G.fbo[f].zeta == zi);
+        }
+    }
+    return false;
+}
+
+static void clear_rect(int x0, int y0, int x1, int y1)
+{
+    sc_cap(GL_SCISSOR_TEST, 1, true);
+    int scv[4] = {x0, y0, x1 - x0, y1 - y0};
+    if (memcmp(SC.sc, scv, sizeof(scv))) {
+        glScissor(scv[0], scv[1], scv[2], scv[3]);
+        memcpy(SC.sc, scv, sizeof(scv));
+    }
+}
+
 bool gpu_clear_color(uint32_t pa, uint32_t pitch, int h, int x0, int y0, int x1, int y1, uint32_t argb, unsigned mask)
 {
     if (!G.on || !G.ram || pitch < 4 || h <= 0) {
         return false;
     }
     int si = surf_find(pa);
-    if (si < 0 || G.surf[si].pitch != pitch || G.surf[si].h < h) {
+    if (si >= 0 && G.surf[si].pitch == pitch) {
+        /* ya existe: se borra lo que tiene (antes, si el rectángulo era más
+         * alto, se rehacía la superficie entera: a la RAM y de vuelta) */
+        if (y1 > G.surf[si].h) {
+            y1 = G.surf[si].h;
+        }
+        if (y0 >= y1) {
+            return true;
+        }
+    } else {
         si = surf_get(pa, pitch, h, si >= 0 ? G.surf[si].fmt : 8);
+        G.st.clear_new++;
     }
     Surf *s = &G.surf[si];
-    glBindFramebuffer(GL_FRAMEBUFFER, s->fbo);
-    SC.valid = false; /* la caché de estado de gpu_draw ya no vale */
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(x0, y0, x1 - x0, y1 - y0);
+    sc_check();
+    if (!fbo_has(SC.fbo, si, -1)) {
+        glBindFramebuffer(GL_FRAMEBUFFER, s->fbo);
+        SC.fbo = s->fbo;
+        G.st.clear_bind++;
+    }
+    clear_rect(x0, y0, x1, y1);
     glColorMask((mask & 4) != 0, (mask & 2) != 0, (mask & 1) != 0, (mask & 8) != 0);
+    SC.cmask = 0xFFFFFFFFu; /* el dibujo siguiente pone la suya */
     float c[4];
     argb_vec(argb, c);
     glClearColor(c[0], c[1], c[2], c[3]);
     glClear(GL_COLOR_BUFFER_BIT);
     s->dirty = true;
+    G.st.clears_c++;
     return true;
 }
 
@@ -2296,16 +2342,22 @@ bool gpu_clear_zeta(uint32_t pa, uint32_t zpitch, int h, int x0, int y0, int x1,
     if (zi < 0) {
         int w = (int)(zpitch / (zfmt == 1 ? 2 : 4));
         zi = zeta_get(pa, zpitch, w, h);
+        G.st.clear_new++;
     }
-    /* un FBO con cualquier superficie de color y este Z (o el suyo propio) */
+    /* un FBO con cualquier superficie de color y este Z (el puesto, si lo tiene) */
+    sc_check();
     GLuint fbo = 0;
-    for (int f = 0; f < MAX_FBO; f++) {
-        if (G.fbo[f].fbo && G.fbo[f].zeta == zi) {
-            fbo = G.fbo[f].fbo;
+    if (fbo_has(SC.fbo, -1, zi)) {
+        fbo = SC.fbo;
+    } else {
+        for (int f = 0; f < MAX_FBO; f++) {
+            if (G.fbo[f].fbo && G.fbo[f].zeta == zi) {
+                fbo = G.fbo[f].fbo;
+            }
         }
     }
+    Zeta *z = &G.zeta[zi];
     if (!fbo) { /* aún nadie dibuja con él: se borra al ponerle su primer FBO */
-        Zeta *z = &G.zeta[zi];
         z->pend = true;
         if (flags & 1) {
             z->pend_z = (zfmt == 1 ? (value & 0xFFFF) / 65535.0 : (value >> 8) / 16777215.0);
@@ -2315,13 +2367,18 @@ bool gpu_clear_zeta(uint32_t pa, uint32_t zpitch, int h, int x0, int y0, int x1,
         }
         return true;
     }
-    SC.valid = false;
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(x0, y0, x1 - x0, y1 - y0);
+    if (SC.fbo != fbo) {
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        SC.fbo = fbo;
+        G.st.clear_bind++;
+    }
+    clear_rect(x0, y0, x1, y1);
     GLbitfield bits = 0;
     if (flags & 1) {
-        glDepthMask(GL_TRUE);
+        if (SC.dmask != 1) {
+            glDepthMask(GL_TRUE);
+            SC.dmask = 1;
+        }
         double zmax = zfmt == 1 ? 65535.0 : 16777215.0;
         glClearDepth((zfmt == 1 ? (value & 0xFFFF) : (value >> 8)) / zmax);
         bits |= GL_DEPTH_BUFFER_BIT;
@@ -2331,6 +2388,7 @@ bool gpu_clear_zeta(uint32_t pa, uint32_t zpitch, int h, int x0, int y0, int x1,
         bits |= GL_STENCIL_BUFFER_BIT;
     }
     glClear(bits);
+    G.st.clears_z++;
     return true;
 }
 
