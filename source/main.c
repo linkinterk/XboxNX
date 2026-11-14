@@ -35,7 +35,7 @@
 #include "apu/apu.h"
 #include <time.h>
 
-#define APP_VER   "0.18.57"
+#define APP_VER   "0.18.58"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -345,13 +345,18 @@ static void cierre_anterior(void)
 static void present_body(void)
 {
     u64 t0 = armGetSystemTick();
-    ui_draw(&g_ui);
     {
+        /* etapa 5: se dibuja directo en el búfer de libnx (antes en una copia
+         * aparte y luego 3,7 MB más de memcpy por dibujo, por la caché L2 que
+         * el núcleo 2 comparte con el juego) */
         u32 stride;
         u8 *dst = framebufferBegin(&g_fb, &stride);
-        for (int y = 0; y < UI_H; y++) {
-            memcpy(dst + (size_t)y * stride, &g_shadow[y * UI_W], UI_W * 4);
+        if (dst) {
+            gfx_target((uint32_t *)(void *)dst, UI_W, UI_H, (int)(stride / 4));
+        } else {
+            gfx_target(g_shadow, UI_W, UI_H, UI_W);
         }
+        ui_draw(&g_ui);
         framebufferEnd(&g_fb);
     }
     g_ui.ui_ms = (unsigned)(armTicksToNs(armGetSystemTick() - t0) / 1000000);

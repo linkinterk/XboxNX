@@ -17,6 +17,7 @@
 
 typedef struct XDisc {
     FILE *f;
+    int fd;                /* el de f: se lee directo, sin stdio */
     uint64_t part_off;     /* donde empieza la partición del juego */
     uint32_t root_sector;
     uint32_t root_size;

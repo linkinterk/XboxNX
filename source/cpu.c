@@ -2714,9 +2714,14 @@ static CpuStop run_blocks(Cpu *c, uint64_t max)
         if (c->yield && *c->yield) {
             return CPU_LIMIT; /* el hardware pidió una interrupción */
         }
+        uint64_t dec0 = g_decodes;
         Block *b = get_block(c, c->eip);
         if (smp) {
-            c->st_t_get += cpu_tick() - t_iter;
+            uint64_t dt = cpu_tick() - t_iter;
+            c->st_t_get += dt;
+            if (g_decodes != dec0) {
+                c->st_t_dec += dt;
+            }
         }
         if (!b || !b->n) {
             uint64_t t0 = smp ? cpu_tick() : 0;

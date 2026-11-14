@@ -2308,6 +2308,9 @@ static void voice_work_release_voice_locks(MCPXAPUState *d)
     }
 }
 
+/* XboxNX: cuadros en que las voces no cumplían las suposiciones de abajo */
+unsigned vp_odd_schedules;
+
 /* Fewer voices than this a frame: all the frame thread's, no helper woken
  * (a wake and a merge cost more than the voices). */
 #define VOICES_INLINE 8
@@ -2315,10 +2318,30 @@ static void voice_work_release_voice_locks(MCPXAPUState *d)
 static void voice_work_schedule(MCPXAPUState *d, uint8_t *c)
 {
     VoiceWorkDispatch *vwd = &d->vp.voice_work_dispatch;
-    const int shares = vwd->queue_len < VOICES_INLINE ? 1 : vwd->num_workers;
+    int shares = vwd->queue_len < VOICES_INLINE ? 1 : vwd->num_workers;
     int next_worker_to_schedule = 0;
     bool group = false;
     uint32_t dirty = 0;
+
+    /* XboxNX: las suposiciones de abajo (de xemu) eran asserts; en la Switch
+     * Halo 2 llegó a romper la tercera en Cairo y el assert cerraba el
+     * emulador entero. Si alguna no se cumple, todas las voces de este cuadro
+     * van a un solo trabajador, en el orden de la lista: siempre correcto,
+     * solo sin repartir. */
+    if (shares > 1) {
+        uint32_t dt = 0;
+        for (int i = 0; i < vwd->queue_len; i++) {
+            uint32_t src, dst, clr;
+            get_voice_bin_src_dst(d, c, vwd->queue[i].voice, &src, &dst, &clr);
+            if ((src && (src != MULTIPASS_BIN_MASK || clr != MULTIPASS_BIN_MASK)) ||
+                (!src && !(dst & MULTIPASS_BIN_MASK) && (dt & MULTIPASS_BIN_MASK))) {
+                shares = 1;
+                vp_odd_schedules++;
+                break;
+            }
+            dt = (dt & ~clr) | dst;
+        }
+    }
 
     for (int i = 0; i < vwd->queue_len; i++) {
         uint32_t src, dst, clr;
@@ -2329,17 +2352,10 @@ static void voice_work_schedule(MCPXAPUState *d, uint8_t *c)
         // multipass sources suggests the hardware may not be so strict. We'll
         // defer making this more robust for now.
         //
-        // We currently assume that:
-        //
+        // We currently assume that (XboxNX: comprobado arriba, sin assert):
         // - MP bin is constant
-        assert(!src || (src == MULTIPASS_BIN_MASK));
-        //
         // - MP voice always clears MP bin
-        assert(!src || (clr == MULTIPASS_BIN_MASK));
-        //
         // - MP source voices are ordered consecutively in voice lists
-        assert(src || (dst & MULTIPASS_BIN_MASK) ||
-               !(dirty & MULTIPASS_BIN_MASK));
 
         if ((dst & MULTIPASS_BIN_MASK) & ~dirty) {
             group = true;

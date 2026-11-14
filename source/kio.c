@@ -961,23 +961,62 @@ static int partition_root(const KFile *f)
     return d >= 0 && !*rel ? d : -1;
 }
 
-/* Lee n bytes del archivo en off hacia la memoria del Xbox en va. */
+/* n bytes en off del descriptor, sin mover su posición (la que stdio tiene
+ * guardada sigue valiendo). */
+static bool fd_pread(int fd, void *buf, size_t n, uint64_t off)
+{
+    off_t cur = lseek(fd, 0, SEEK_CUR);
+    if (cur == (off_t)-1 || lseek(fd, (off_t)off, SEEK_SET) == (off_t)-1) {
+        return false;
+    }
+    uint8_t *p = buf;
+    bool ok = true;
+    while (n) {
+        ssize_t r = read(fd, p, n);
+        if (r <= 0) {
+            ok = false;
+            break;
+        }
+        p += r;
+        n -= (size_t)r;
+    }
+    lseek(fd, cur, SEEK_SET);
+    return ok;
+}
+
+/* Lee n bytes del archivo en off hacia la memoria del Xbox en va.
+ * Etapa 5: directo a la RAM del Xbox, en una lectura por tramo de páginas
+ * seguidas (antes: trozos de 64 KB por stdio y una copia más; en la Switch
+ * NtReadFile tardaba 20-37 ms por lectura al cargar un nivel). */
 static bool read_into(Kernel *k, KFile *f, uint64_t off, uint32_t va, uint32_t n)
 {
-    while (n) {
-        uint32_t chunk = n < sizeof(g_buf) ? n : (uint32_t)sizeof(g_buf);
-        bool ok;
-        if (f->kind == F_DISC) {
-            ok = xdisc_read(k->disc, &f->disc, off, g_buf, chunk);
-        } else {
-            ok = f->fp && fseeko(f->fp, (off_t)off, SEEK_SET) == 0 && fread(g_buf, 1, chunk, f->fp) == chunk;
-        }
-        if (!ok || !vm_write(k->vm, va, g_buf, chunk)) {
+    if (f->kind != F_DISC) {
+        if (!f->fp) {
             return false;
         }
-        off += chunk;
-        va += chunk;
-        n -= chunk;
+        fflush(f->fp); /* lo escrito y aún en el búfer de stdio, al archivo */
+    }
+    while (n) {
+        uint8_t *h = vm_host(k->vm, va);
+        if (!h) {
+            return false;
+        }
+        uint32_t run = VM_PAGE - (va % VM_PAGE);
+        if (run > n) {
+            run = n;
+        }
+        while (run < n && run < (4u << 20) && vm_host(k->vm, va + run) == h + run) {
+            run += n - run < VM_PAGE ? n - run : VM_PAGE;
+        }
+        bool ok = f->kind == F_DISC ? xdisc_read(k->disc, &f->disc, off, h, run)
+                                    : fd_pread(fileno(f->fp), h, run, off);
+        vm_wrote(k->vm, va, run);
+        if (!ok) {
+            return false;
+        }
+        off += run;
+        va += run;
+        n -= run;
     }
     return true;
 }

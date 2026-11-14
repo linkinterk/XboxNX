@@ -89,13 +89,48 @@ bool apu_cond_timedwait_ms(pthread_cond_t *c, pthread_mutex_t *m, int ms)
     return apu_cond_timedwait_us(c, m, (int64_t)ms * 1000);
 }
 
+#ifdef __SWITCH__
+#include <switch.h>
+/* XboxNX: un pthread de libnx nace con prioridad 0x3B (la más baja de la
+ * app) y con preferencia por el núcleo 0, el del intérprete, donde casi nunca
+ * le tocaba: el hilo del audio (núcleo 1) lo esperaba cada cuadro del GP
+ * (1500 por segundo). Los ayudantes de las voces van al núcleo 2 con
+ * prioridad 0x2B (por encima del hilo de la GPU, como el muestreo). */
+typedef struct {
+    void *(*fn)(void *);
+    void *arg;
+} ApuTramp;
+
+static void *apu_tramp(void *p)
+{
+    ApuTramp t = *(ApuTramp *)p;
+    free(p);
+    svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, 1u << 2);
+    svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2B);
+    return t.fn(t.arg);
+}
+#endif
+
 void apu_thread_start(pthread_t *t, const char *name, void *(*fn)(void *), void *arg, bool joinable)
 {
     (void)name;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 1u << 20);
+#ifdef __SWITCH__
+    ApuTramp *tr = malloc(sizeof(*tr));
+    if (tr) {
+        tr->fn = fn;
+        tr->arg = arg;
+        if (pthread_create(t, &attr, apu_tramp, tr) != 0) {
+            free(tr);
+        }
+    } else {
+        pthread_create(t, &attr, fn, arg);
+    }
+#else
     pthread_create(t, &attr, fn, arg);
+#endif
     pthread_attr_destroy(&attr);
     if (!joinable) {
         pthread_detach(*t);

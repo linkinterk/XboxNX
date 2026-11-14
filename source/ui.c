@@ -995,11 +995,12 @@ static void draw_xbox_screen(const UiState *s)
             double in = all > 0 ? 100.0 * (double)cc->st_t_int / all : 0;
             double sp = all > 0 ? 100.0 * (double)cc->st_t_step / all : 0;
             double gb = all > 0 ? 100.0 * (double)cc->st_t_get / all : 0;
+            double gd = all > 0 ? 100.0 * (double)cc->st_t_dec / all : 0;
             double nb = (double)(cc->st_disp ? cc->st_disp : 1);
             double ns_blk = js.ticks_per_s && cc->st_disp ? (double)cc->st_t_all * 64.0 / nb * 1e9 / (double)js.ticks_per_s : 0;
             snprintf(e, sizeof(e),
-                     "Tiempo CPU: traducido %.0f%%, bloques sin traducir %.0f%%, intérprete suelto %.0f%%, buscar bloque %.0f%%, resto %.0f%% · %.0f ns por vuelta · %.1fM vueltas (%.0f%% JIT), %.1fM sueltas · C: %.2f lentas y %.2f de respaldo por bloque · %.1fM llamadas a cpu_run · traducir %.1f s",
-                     jit, in, sp, gb, 100.0 - jit - in - sp - gb, ns_blk, nb / 1e6,
+                     "Tiempo CPU: traducido %.0f%%, bloques sin traducir %.0f%%, intérprete suelto %.0f%%, buscar bloque %.0f%% (decodificar %.1f%%), resto %.0f%% · %.0f ns por vuelta · %.1fM vueltas (%.0f%% JIT), %.1fM sueltas · C: %.2f lentas y %.2f de respaldo por bloque · %.1fM llamadas a cpu_run · traducir %.1f s",
+                     jit, in, sp, gb, gd, 100.0 - jit - in - sp - gb, ns_blk, nb / 1e6,
                      100.0 * (double)cc->st_jit / nb, cc->st_steps / 1e6,
                      cc->st_jit ? (double)cc->st_ccall / (double)cc->st_jit : 0.0,
                      cc->st_jit ? (double)cc->st_cfb / (double)cc->st_jit : 0.0, cc->st_runs / 1e6,
@@ -1014,7 +1015,7 @@ static void draw_xbox_screen(const UiState *s)
                      gpu_enabled() ? "activa" : gpu_ready() ? "apagada (L3)" : "no", gs->draws, gs->vs_draws, gs->vs_progs,
                      gs->vs_bad ? " · fallos" : "", gs->sso ? "por etapas" : "enteros", gs->ns_link / 1e9, gs->vs_known,
                      gs->vs_pre, gs->vs_deferred, gs->fallbacks, gs->uploads, gs->upload_bytes / 1048576.0, gs->flushes,
-                     gs->ns_draw / 1e9, gs->ns_vbuf / 1e9, gs->ns_tex / 1e9, gs->ns_call / 1e9, gs->ns_read / 1e9, gs->ns_rp / 1e9, gs->rp_mode == 2 ? "usa RGBA" : gs->rp_mode == 1 ? "usa BGRA" : "probando", gs->rp_us[0], gs->rp_us[1], gs->surfaces, gs->clears_c, gs->clears_z, gs->clear_bind, gs->clear_new, gs->queries, gs->ns_query / 1e9, hw_stats()->zpass_tests, hw_stats()->reports, hw_stats()->reports_noinst, hw_stats()->reports_other, hw_stats()->other_class, gpu_info());
+                     gs->ns_draw / 1e9, gs->ns_vbuf / 1e9, gs->ns_tex / 1e9, gs->ns_call / 1e9, gs->ns_read / 1e9, gs->ns_rp / 1e9, gs->rp_cs == 1 ? "por compute shader" : gs->rp_cs == 2 ? "el compute no coincidió" : gs->rp_cs == 3 ? "sin compute" : gs->rp_mode == 2 ? "usa RGBA" : gs->rp_mode == 1 ? "usa BGRA" : "probando", gs->rp_us[0], gs->rp_us[1], gs->surfaces, gs->clears_c, gs->clears_z, gs->clear_bind, gs->clear_new, gs->queries, gs->ns_query / 1e9, hw_stats()->zpass_tests, hw_stats()->reports, hw_stats()->reports_noinst, hw_stats()->reports_other, hw_stats()->other_class, gpu_info());
             ovl_text(ly, gpu_enabled() ? C_GREEN : C_WARN, e);
             if (gs->mt) {
                 char m[260];
@@ -1505,7 +1506,9 @@ static void draw_stages(const UiState *s)
 
 void ui_draw(const UiState *s)
 {
-    gfx_clear(C_BG);
+    if (!(s->screen == UI_RUN && s->run_screen)) {
+        gfx_clear(C_BG); /* la pantalla del Xbox se borra sola (en negro) */
+    }
     switch (s->screen) {
     case UI_LOADING: draw_loading(s); break;
     case UI_LIBRARY:

@@ -285,6 +285,22 @@ bool vm_write(Vm *vm, uint32_t va, const void *buf, size_t len)
     return true;
 }
 
+void vm_wrote(Vm *vm, uint32_t va, size_t len)
+{
+    while (len) {
+        uint8_t *h = vm_host(vm, va);
+        size_t n = VM_PAGE - (va % VM_PAGE);
+        if (n > len) {
+            n = len;
+        }
+        if (h) {
+            vm_touch_range(vm, (uint32_t)((h - vm->ram) / VM_PAGE), (uint32_t)(va % VM_PAGE), (uint32_t)n);
+        }
+        va += (uint32_t)n;
+        len -= n;
+    }
+}
+
 uint32_t vm_rd32(const Vm *vm, uint32_t va)
 {
     uint8_t b[4] = {0};

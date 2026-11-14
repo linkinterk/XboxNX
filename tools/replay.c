@@ -187,6 +187,9 @@ int main(int argc, char **argv)
     }
     fprintf(stderr, "visibilidad: %u píxeles pasaron Z\n", (unsigned)sw_zpass_result());
     if (getenv("ASYNC")) { /* el camino de la Switch: al PBO y a la RAM después */
+        if (getenv("ZERO")) { /* que lo que sale sea lo leído de la GPU (sin GPU_MT) */
+            memset(g_ram + dst, 0, (size_t)pitch * (size_t)h);
+        }
         gpu_flush_surface_async(dst);
         gpu_readback_poll();
     }

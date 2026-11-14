@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 static const char k_magic[] = "MICROSOFT*XBOX*MEDIA";
 /* XISO extraída, luego volcados completos XGD1 / XGD2 / XGD3. */
@@ -29,26 +30,41 @@ static uint32_t rd32(const uint8_t *p)
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-static bool read_at(FILE *f, void *buf, size_t len, uint64_t off)
+/* Etapa 5: directo al descriptor, en una sola lectura (antes stdio la partía
+ * en trozos de 64 KB: en la SD de la Switch cada trozo es una llamada al
+ * sistema de archivos, y los mapas de Halo 2 cargaban a ~8 MB/s). */
+static bool read_at(const XDisc *d, void *buf, size_t len, uint64_t off)
 {
-    if (fseeko(f, (off_t)off, SEEK_SET) != 0) {
+    int fd = d->f ? d->fd : -1;
+    if (fd < 0 || lseek(fd, (off_t)off, SEEK_SET) == (off_t)-1) {
         return false;
     }
-    return fread(buf, 1, len, f) == len;
+    uint8_t *p = buf;
+    while (len) {
+        ssize_t r = read(fd, p, len);
+        if (r <= 0) {
+            return false;
+        }
+        p += r;
+        len -= (size_t)r;
+    }
+    return true;
 }
 
 bool xdisc_open(XDisc *d, const char *path)
 {
     memset(d, 0, sizeof(*d));
+    d->fd = -1;
     d->f = fopen(path, "rb");
     if (!d->f) {
         return false;
     }
-    setvbuf(d->f, NULL, _IOFBF, 64 * 1024);
+    setvbuf(d->f, NULL, _IONBF, 0); /* solo se lee por el descriptor */
+    d->fd = fileno(d->f);
     for (size_t i = 0; i < sizeof(k_part_offsets) / sizeof(k_part_offsets[0]); i++) {
         uint8_t vd[XDISC_SECTOR];
         uint64_t off = k_part_offsets[i];
-        if (!read_at(d->f, vd, sizeof(vd), off + 32ull * XDISC_SECTOR)) {
+        if (!read_at(d, vd, sizeof(vd), off + 32ull * XDISC_SECTOR)) {
             continue;
         }
         if (memcmp(vd, k_magic, 20) == 0 && memcmp(vd + 0x7EC, k_magic, 20) == 0) {
@@ -60,6 +76,7 @@ bool xdisc_open(XDisc *d, const char *path)
     }
     fclose(d->f);
     d->f = NULL;
+    d->fd = -1;
     return false;
 }
 
@@ -69,6 +86,7 @@ void xdisc_close(XDisc *d)
         fclose(d->f);
     }
     d->f = NULL;
+    d->fd = -1;
 }
 
 XDiscFile xdisc_root(const XDisc *d)
@@ -133,7 +151,7 @@ static uint8_t *read_dir(const XDisc *d, const XDiscFile *dir)
     if (!buf) {
         return NULL;
     }
-    if (!read_at(d->f, buf, dir->size, d->part_off + (uint64_t)dir->sector * XDISC_SECTOR)) {
+    if (!read_at(d, buf, dir->size, d->part_off + (uint64_t)dir->sector * XDISC_SECTOR)) {
         free(buf);
         return NULL;
     }
@@ -175,7 +193,7 @@ bool xdisc_read(const XDisc *d, const XDiscFile *f, uint64_t off, void *buf, siz
     if (off > f->size || len > f->size - off) {
         return false;
     }
-    return read_at(d->f, buf, len, d->part_off + (uint64_t)f->sector * XDISC_SECTOR + off);
+    return read_at(d, buf, len, d->part_off + (uint64_t)f->sector * XDISC_SECTOR + off);
 }
 
 static int walk(const uint8_t *dir, uint32_t size, uint32_t off, unsigned depth,

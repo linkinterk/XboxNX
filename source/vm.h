@@ -104,6 +104,9 @@ uint8_t *vm_host(const Vm *vm, uint32_t va);
 
 bool vm_read(const Vm *vm, uint32_t va, void *buf, size_t len);
 bool vm_write(Vm *vm, uint32_t va, const void *buf, size_t len);
+/* Se escribieron len bytes en va directo en la RAM (por vm_host, p. ej. una
+ * lectura de archivo): que el JIT se entere si era código. */
+void vm_wrote(Vm *vm, uint32_t va, size_t len);
 uint32_t vm_rd32(const Vm *vm, uint32_t va);
 bool vm_wr32(Vm *vm, uint32_t va, uint32_t v);
 

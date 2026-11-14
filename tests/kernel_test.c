@@ -451,6 +451,33 @@ static void io_tests(const char *iso)
     vm_read(&vm, BUF + 0x100, magic, 4);
     CHECK(!memcmp(magic, "oxNX", 4));
     calln("NtClose", 1, &h);
+    {
+        /* etapa 5: lectura grande directo a la RAM, cruzando páginas (unas
+         * seguidas en la RAM física y otras no) */
+        const uint32_t BIG = 0x00E00000u, NB = 5 * 4096 + 123;
+        CHECK(vm_alloc_at(&vm, BIG, 0x2000));
+        CHECK(vm_alloc_at(&vm, BIG + 0x2000, 0x4000));
+        static uint8_t pat[5 * 4096 + 123], back[5 * 4096 + 123];
+        for (uint32_t i = 0; i < NB; i++) {
+            pat[i] = (uint8_t)(i * 7 + (i >> 9));
+        }
+        uint32_t hb = create("\\Device\\Harddisk0\\Partition1\\tdata\\grande.bin", 0xC0000000u, 5, 0x60, &st);
+        CHECK(st == ST_SUCCESS);
+        vm_write(&vm, BIG, pat, NB);
+        uint32_t wb[8] = {hb, 0, 0, 0, IOSB, BIG, NB, 0};
+        CHECK(calln("NtWriteFile", 8, wb) == ST_SUCCESS && rd(IOSB + 4) == NB);
+        memset(back, 0, sizeof(back));
+        vm_write(&vm, BIG, back, NB);
+        wr(SCRATCH + 0x3C0, 0);
+        wr(SCRATCH + 0x3C4, 0);
+        uint32_t rb[8] = {hb, 0, 0, 0, IOSB, BIG + 5, NB - 5, SCRATCH + 0x3C0};
+        CHECK(calln("NtReadFile", 8, rb) == ST_SUCCESS && rd(IOSB + 4) == NB - 5);
+        vm_read(&vm, BIG + 5, back, NB - 5);
+        CHECK(!memcmp(back, pat, NB - 5));
+        calln("NtClose", 1, &hb);
+        uint32_t delb[1] = {oa("\\Device\\Harddisk0\\Partition1\\tdata\\grande.bin", 0)};
+        CHECK(calln("NtDeleteFile", 1, delb) == ST_SUCCESS);
+    }
     FILE *hf = fopen("build-test/hdd/Partition1/TDATA/prueba.bin", "rb");
     CHECK(hf != NULL);
     if (hf) {

@@ -124,6 +124,13 @@ static void (*p_glProgramUniform1iv)(GLuint, GLint, GLsizei, const GLint *);
 static void (*p_glProgramUniform1uiv)(GLuint, GLint, GLsizei, const GLuint *);
 static void (*p_glProgramUniform2fv)(GLuint, GLint, GLsizei, const GLfloat *);
 static void (*p_glProgramUniform4fv)(GLuint, GLint, GLsizei, const GLfloat *);
+/* Opcionales (GL 4.3): leer el cuadro terminado con un compute shader. */
+static void (*p_glDispatchCompute)(GLuint, GLuint, GLuint);
+static void (*p_glMemoryBarrier)(GLbitfield);
+static void (*p_glBindBufferBase)(GLenum, GLuint, GLuint);
+#define GL_COMPUTE_SHADER 0x91B9
+#define GL_SHADER_STORAGE_BUFFER 0x90D2
+#define GL_BUFFER_UPDATE_BARRIER_BIT 0x00000200
 #define GL_PROGRAM_SEPARABLE 0x8258
 #define GL_VERTEX_SHADER_BIT 0x00000001
 #define GL_FRAGMENT_SHADER_BIT 0x00000002
@@ -731,6 +738,9 @@ static bool init_inner(void *nwin)
     *(void **)&p_glProgramUniform1uiv = egl_proc("glProgramUniform1uiv");
     *(void **)&p_glProgramUniform2fv = egl_proc("glProgramUniform2fv");
     *(void **)&p_glProgramUniform4fv = egl_proc("glProgramUniform4fv");
+    *(void **)&p_glDispatchCompute = egl_proc("glDispatchCompute");
+    *(void **)&p_glMemoryBarrier = egl_proc("glMemoryBarrier");
+    *(void **)&p_glBindBufferBase = egl_proc("glBindBufferBase");
     G.sso = p_glGenProgramPipelines && p_glDeleteProgramPipelines && p_glBindProgramPipeline &&
             p_glUseProgramStages && p_glProgramParameteri && p_glProgramUniform1i && p_glProgramUniform1ui &&
             p_glProgramUniform1f && p_glProgramUniform1iv && p_glProgramUniform1uiv && p_glProgramUniform2fv &&
@@ -1425,7 +1435,124 @@ static struct {
     int mode;         /* -1: probando */
     unsigned tries[2];
     uint64_t t[2];
+    /* etapa 5: en la Switch glReadPixels tardaba 34-38 ms por cuadro aun con
+     * el PBO (el driver espera a la GPU y copia con la CPU). Un compute
+     * shader copia la textura al búfer en la GPU, ya en BGRA, sin esperar:
+     * el hilo de la GPU sigue con el cuadro siguiente. La primera vez se
+     * compara con glReadPixels; si no da lo mismo, no se usa. */
+    GLuint cs, ssbo;
+    size_t scap;
+    int cs_state;     /* 0: sin probar, 1: se usa, -1: no hay o no dio lo mismo */
+    bool via_cs;      /* lo que viene en camino está en el búfer del compute */
 } RB = {.mode = -1};
+
+static const char k_cs_read[] =
+    "#version 430\n"
+    "layout(local_size_x = 16, local_size_y = 8) in;\n"
+    "layout(binding = 7) uniform sampler2D src;\n"
+    "layout(std430, binding = 0) writeonly buffer Out { uint px[]; };\n"
+    "void main() {\n"
+    "    ivec2 sz = textureSize(src, 0);\n"
+    "    ivec2 p = ivec2(gl_GlobalInvocationID.xy);\n"
+    "    if (p.x >= sz.x || p.y >= sz.y) return;\n"
+    "    px[p.y * sz.x + p.x] = packUnorm4x8(texelFetch(src, p, 0).bgra);\n"
+    "}\n";
+
+static bool cs_make(void)
+{
+    if (!p_glDispatchCompute || !p_glMemoryBarrier || !p_glBindBufferBase) {
+        return false;
+    }
+#ifndef __SWITCH__
+    if (getenv("XBOXNX_NO_CS")) { /* replay: comparar con el camino de antes */
+        return false;
+    }
+#endif
+    GLuint sh = glCreateShader(GL_COMPUTE_SHADER);
+    if (!sh) {
+        return false;
+    }
+    const char *src = k_cs_read;
+    glShaderSource(sh, 1, &src, NULL);
+    glCompileShader(sh);
+    GLint ok = 0;
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        glDeleteShader(sh);
+        return false;
+    }
+    GLuint pr = glCreateProgram();
+    glAttachShader(pr, sh);
+    glLinkProgram(pr);
+    glDeleteShader(sh);
+    glGetProgramiv(pr, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        glDeleteProgram(pr);
+        return false;
+    }
+    RB.cs = pr;
+    return true;
+}
+
+/* La superficie s al búfer del compute (en la GPU, sin esperar). */
+static bool cs_dispatch(const Surf *s, size_t bytes)
+{
+    if (!RB.cs && !cs_make()) {
+        RB.cs_state = -1;
+        return false;
+    }
+    if (!RB.ssbo) {
+        glGenBuffers(1, &RB.ssbo);
+    }
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, RB.ssbo);
+    if (RB.scap < bytes) {
+        glBufferData(GL_SHADER_STORAGE_BUFFER, (GLsizeiptr)bytes, NULL, GL_STREAM_READ);
+        RB.scap = bytes;
+    }
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    p_glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, RB.ssbo);
+    tex_unit(7);
+    tex_bind(GL_TEXTURE_2D, s->tex);
+    glUseProgram(RB.cs);
+    p_glDispatchCompute((GLuint)(s->w + 15) / 16, (GLuint)(s->h + 7) / 8, 1);
+    p_glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT); /* para leerlo con glMapBufferRange */
+    tex_bind(GL_TEXTURE_2D, 0); /* que no quede puesta mientras se dibuja en ella */
+    glUseProgram(0);
+    SC.valid = false; /* el programa puesto cambió */
+    return true;
+}
+
+/* La primera vez: el compute y glReadPixels, ¿dan lo mismo? Deja la
+ * superficie en la RAM (con lo de glReadPixels, que siempre vale). */
+static void cs_check(Surf *s, size_t bytes)
+{
+    uint8_t *ref = malloc(bytes);
+    if (!ref) {
+        RB.cs_state = -1;
+        return;
+    }
+    bool sent = cs_dispatch(s, bytes);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, s->fbo);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    glReadPixels(0, 0, s->w, s->h, GL_BGRA, GL_UNSIGNED_BYTE, ref);
+    bool same = false;
+    if (sent) {
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, RB.ssbo);
+        const void *p = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, (GLsizeiptr)bytes, GL_MAP_READ_BIT);
+        same = p && memcmp(p, ref, bytes) == 0;
+        if (p) {
+            glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+        }
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    }
+    RB.cs_state = same ? 1 : -1;
+    G.st.rp_cs = same ? 1 : sent ? 2 : 3;
+    memcpy(G.ram + s->pa, ref, bytes);
+    free(ref);
+    s->dirty = false;
+    G.st.flushes++;
+}
 
 static void rb_finish_(bool wait);
 
@@ -1449,10 +1576,11 @@ static void rb_finish_(bool wait)
     }
     glDeleteSync(RB.fence);
     RB.on = false;
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, RB.pbo);
-    const void *p = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, (GLsizeiptr)RB.bytes, GL_MAP_READ_BIT);
+    GLenum tgt = RB.via_cs ? GL_SHADER_STORAGE_BUFFER : GL_PIXEL_PACK_BUFFER;
+    glBindBuffer(tgt, RB.via_cs ? RB.ssbo : RB.pbo);
+    const void *p = glMapBufferRange(tgt, 0, (GLsizeiptr)RB.bytes, GL_MAP_READ_BIT);
     if (p && G.ram && (uint64_t)RB.pa + RB.bytes <= G.ram_size) {
-        if (RB.swz) { /* RGBA -> BGRA (como la RAM del Xbox) */
+        if (RB.swz && !RB.via_cs) { /* RGBA -> BGRA (como la RAM del Xbox) */
             const uint32_t *src = p;
             uint32_t *dst = (uint32_t *)(void *)(G.ram + RB.pa);
             for (uint32_t k = 0, n = RB.bytes / 4; k < n; k++) {
@@ -1464,9 +1592,9 @@ static void rb_finish_(bool wait)
         }
     }
     if (p) {
-        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+        glUnmapBuffer(tgt);
     }
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glBindBuffer(tgt, 0);
 }
 
 /* Lo que la GPU ya terminó, a la RAM, sin esperar (antes de mostrar la pantalla). */
@@ -1491,6 +1619,32 @@ static void surf_flush_async(int i)
         return;
     }
     size_t bytes = (size_t)s->pitch * (size_t)s->h;
+#ifndef __SWITCH__
+    if (RB.cs_state == 0 && getenv("XBOXNX_CS_TRUST") && (RB.cs || cs_make())) {
+        RB.cs_state = 1; /* replay: probar el camino de siempre, sin la comparación */
+    }
+#endif
+    if (RB.cs_state == 0) {
+        cs_check(s, bytes);
+        if (!s->dirty) {
+            return; /* ya está en la RAM */
+        }
+    }
+    if (RB.cs_state > 0) {
+        uint64_t t0 = now_ns();
+        cs_dispatch(s, bytes);
+        G.st.ns_rp += now_ns() - t0;
+        RB.fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        RB.on = RB.fence != NULL;
+        RB.via_cs = true;
+        RB.swz = false;
+        RB.pa = s->pa;
+        RB.bytes = (uint32_t)bytes;
+        s->dirty = false;
+        G.st.flushes++;
+        return;
+    }
+    RB.via_cs = false;
     if (!RB.pbo) {
         glGenBuffers(1, &RB.pbo);
     }
@@ -2781,6 +2935,7 @@ static void q_exec(const QHdr *h)
     case C_FLIP: {
         uint32_t pa;
         memcpy(&pa, body, 4);
+        g_zone = Z_FLIP; /* en el perfil del hilo: "flip", no "otro" */
         impl_flush_surface_async(pa);
         break;
     }
