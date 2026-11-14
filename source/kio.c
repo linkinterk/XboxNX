@@ -78,6 +78,7 @@ static struct {
     unsigned head, n;
     uint64_t bytes;
     bool busy;       /* el hilo tiene una entre manos */
+    bool quit;       /* al salir de la app */
     unsigned errors;
 } g_aio;
 
@@ -88,6 +89,10 @@ static void aio_loop(void)
         while (!g_aio.n) {
             g_aio.busy = false;
             ac_all(&g_aio.done);
+            if (g_aio.quit) {
+                am_unlock(&g_aio.m);
+                return;
+            }
             ac_wait(&g_aio.more, &g_aio.m);
         }
         AioReq r = g_aio.q[g_aio.head];
@@ -2035,6 +2040,26 @@ AIO_SYNC(IoDismountVolumeByName)
 AIO_SYNC(ExReadWriteRefurbInfo)
 
 void kio_sync(void) { aio_drain(); }
+
+/* Al salir de la app: escribir lo pendiente y terminar el hilo (vivo, el
+ * cargador no puede soltar la memoria: error al volver al hbmenu). */
+void kio_exit(void)
+{
+    if (!g_aio.on) {
+        return;
+    }
+    aio_drain();
+    am_lock(&g_aio.m);
+    g_aio.quit = true;
+    ac_all(&g_aio.more);
+    am_unlock(&g_aio.m);
+#ifdef __SWITCH__
+    threadWaitForExit(&g_aio_thr);
+    threadClose(&g_aio_thr);
+#endif
+    g_aio.on = false;
+    g_aio.quit = false;
+}
 
 void kio_set_media(Kernel *k, const XDisc *disc, const char *hdd_root)
 {

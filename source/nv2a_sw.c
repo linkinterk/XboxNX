@@ -379,7 +379,7 @@ typedef struct Tex {
 static struct {
     uint32_t *x, *y;
     uint32_t w, h;
-} g_swz[4];
+} g_swz[5]; /* [4]: el de gpu_decode (el hilo de la GPU) */
 
 static void swz_tables(int s, uint32_t w, uint32_t h, uint32_t **xm, uint32_t **ym)
 {
@@ -1565,9 +1565,19 @@ static bool decode_fast(const Tex *t, uint32_t *out)
     return true;
 }
 
-static void gpu_decode(int stage, int face, uint32_t *out)
+/* Para la GPU (a veces desde su hilo): con la copia de la textura del dibujo y
+ * sus propias tablas swizzle (las de las etapas las cambia este hilo). */
+static void gpu_decode(const void *ctx, int face, uint32_t *out)
 {
-    Tex t = g_tex[stage];
+    Tex t;
+    memcpy(&t, ctx, sizeof(t));
+    if (t.xm) {
+        swz_tables(4, t.w, t.h, &t.xm, &t.ym);
+        if (!t.xm || !t.ym) {
+            memset(out, 0, (size_t)t.w * t.h * 4);
+            return;
+        }
+    }
     t.base += (uint32_t)face * t.face_bytes;
     if (t.fmt == 0x0C || t.fmt == 0x0E || t.fmt == 0x0F) {
         decode_dxt(&t, out);
@@ -1798,7 +1808,8 @@ static bool gpu_try(const Target *t, const OutVert *ov)
         g->pal = x->pal;
         g->pal_bytes = x->pal ? x->pal_n * 4 : 0;
         g->decode = gpu_decode;
-        g->stage = s;
+        _Static_assert(sizeof(Tex) <= sizeof(g->ctx), "Tex en GpuTex.ctx");
+        memcpy(g->ctx, x, sizeof(Tex));
     }
     return gpu_draw(&d);
 }

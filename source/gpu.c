@@ -1843,7 +1843,7 @@ static GLuint tex_get(const GpuTex *t, float scale[2])
             glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
             glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
             for (int f = 0; f < (t->cube ? 6 : 1); f++) {
-                t->decode(t->stage, f, G.scratch);
+                t->decode(t->ctx, f, G.scratch);
                 glTexImage2D(t->cube ? GL_TEXTURE_CUBE_MAP_POSITIVE_X + (GLenum)f : GL_TEXTURE_2D, 0, GL_RGBA8,
                              (GLsizei)t->w, (GLsizei)t->h, 0, GL_BGRA, GL_UNSIGNED_BYTE, G.scratch);
                 G.st.upload_bytes += need * 4;

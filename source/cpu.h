@@ -109,6 +109,8 @@ typedef struct Cpu {
 void cpu_init(Cpu *c, Vm *vm);
 /* Libera los bloques decodificados (antes de otro cpu_init). */
 void cpu_free(Cpu *c);
+/* Al salir de la app (con la CPU parada): suelta el búfer del JIT. */
+void cpu_jit_exit(void);
 /* Ejecuta hasta max instrucciones o hasta parar; devuelve el motivo. */
 CpuStop cpu_run(Cpu *c, uint64_t max);
 /* Un paso; para pruebas. */

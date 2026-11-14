@@ -260,6 +260,7 @@ void kio_set_media(Kernel *k, const struct XDisc *disc, const char *hdd_root);
 void kio_close(Kernel *k, uint32_t object);
 /* Esperar a que las escrituras en segundo plano estén en la SD. */
 void kio_sync(void);
+void kio_exit(void); /* al salir de la app: termina el hilo de escritura */
 void kio_dump(struct Kernel *k, void *file); /* los archivos abiertos (FILE *) */
 /* El evento del objeto archivo (para esperar sobre su handle). */
 #define K_FO_EVENT 0x38u

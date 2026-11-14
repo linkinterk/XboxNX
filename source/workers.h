@@ -12,5 +12,7 @@ typedef void (*WorkFn)(void *arg, int part, int nparts);
 void workers_init(void);
 int workers_count(void); /* partes en total (1 si no hay hilos) */
 void workers_run(WorkFn fn, void *arg);
+/* Al salir de la app: los hilos terminan (si quedan vivos, error al volver al hbmenu). */
+void workers_exit(void);
 
 #endif

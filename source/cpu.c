@@ -2853,6 +2853,23 @@ CpuStop cpu_run(Cpu *c, uint64_t max)
     return CPU_LIMIT;
 }
 
+/* Al salir de la app: soltar la memoria del JIT. Sin esto, al volver al
+ * hbmenu el cargador encontraba memoria de código todavía mapeada. */
+void cpu_jit_exit(void)
+{
+#ifdef HAVE_JIT
+    if (g_jit.ok) {
+        jit_table_clear();
+#ifdef __SWITCH__
+        jitClose(&g_jit.j);
+#else
+        munmap(g_jit.rw, g_jit.size);
+#endif
+    }
+    memset(&g_jit, 0, sizeof(g_jit));
+#endif
+}
+
 void cpu_free(Cpu *c)
 {
 #ifdef HAVE_JIT

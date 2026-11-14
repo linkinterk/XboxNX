@@ -43,6 +43,7 @@ static unsigned g_gen;      /* cada trabajo nuevo */
 static int g_pending;       /* ayudantes que no terminaron */
 static WorkFn g_fn;
 static void *g_arg;
+static bool g_quit;         /* al salir de la app: los ayudantes terminan */
 
 static void helper(void *p)
 {
@@ -50,8 +51,12 @@ static void helper(void *p)
     unsigned seen = 0;
     for (;;) {
         wm_lock(&g_m);
-        while (g_gen == seen) {
+        while (g_gen == seen && !g_quit) {
             wc_wait(&g_go, &g_m);
+        }
+        if (g_quit) {
+            wm_unlock(&g_m);
+            return;
         }
         seen = g_gen;
         WorkFn fn = g_fn;
@@ -110,6 +115,30 @@ void workers_init(void)
 }
 
 int workers_count(void) { return g_helpers + 1; }
+
+/* Al salir de la app: si un hilo nuestro sigue vivo, el cargador (hbl) no
+ * puede soltar la memoria del programa y la Switch muestra un error
+ * (2001-0106) al volver al hbmenu. */
+void workers_exit(void)
+{
+    if (!g_helpers) {
+        return;
+    }
+    wm_lock(&g_m);
+    g_quit = true;
+    wc_all(&g_go);
+    wm_unlock(&g_m);
+    for (int i = 0; i < g_helpers; i++) {
+#ifdef __SWITCH__
+        threadWaitForExit(&g_thr[i]);
+        threadClose(&g_thr[i]);
+#else
+        pthread_join(g_thr[i], NULL);
+#endif
+    }
+    g_helpers = 0;
+    g_quit = false;
+}
 
 void workers_run(WorkFn fn, void *arg)
 {

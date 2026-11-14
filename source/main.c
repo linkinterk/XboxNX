@@ -31,10 +31,11 @@
 #include "ui.h"
 #include "usb/usb.h"
 #include "prof.h"
+#include "workers.h"
 #include "apu/apu.h"
 #include <time.h>
 
-#define APP_VER   "0.18.55"
+#define APP_VER   "0.18.56"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -938,7 +939,9 @@ int main(int argc, char **argv)
     crash_step("parar el audio del Xbox");
     apu_exit();
     crash_step("escribir lo pendiente en la SD");
-    kio_sync(); /* lo que falte escribir en la SD */
+    kio_exit(); /* lo que falte escribir en la SD, y su hilo termina */
+    crash_step("parar los hilos de ayuda");
+    workers_exit();
     crash_step("parar el sonido");
     sound_exit();
     clocks_restore();
@@ -946,6 +949,9 @@ int main(int argc, char **argv)
      * hacía por su cuenta al terminar el programa, ya sin la RAM) */
     crash_step("cerrar la GPU");
     gpu_exit();
+    crash_step("soltar el JIT");
+    cpu_free(&g_run.cpu);
+    cpu_jit_exit();
     crash_step("soltar la RAM del Xbox");
     vm_free(&g_vm);
     crash_step("cerrar el juego");

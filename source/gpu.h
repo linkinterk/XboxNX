@@ -33,9 +33,11 @@ typedef struct GpuTex {
     uint32_t bytes;
     const uint8_t *pal;     /* paleta (P8) para el hash */
     uint32_t pal_bytes;
-    /* decodificar la cara face (0..5) a w*h ARGB (0xAARRGGBB) */
-    void (*decode)(int stage, int face, uint32_t *out);
-    int stage;
+    /* decodificar la cara face (0..5) a w*h ARGB (0xAARRGGBB); ctx: una copia
+     * de lo que necesita (el dibujo puede correr en el hilo de la GPU, cuando
+     * el estado de nv2a_sw ya es otro) */
+    void (*decode)(const void *ctx, int face, uint32_t *out);
+    uint64_t ctx[14];
 } GpuTex;
 
 typedef struct GpuDraw {
