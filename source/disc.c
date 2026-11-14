@@ -17,6 +17,7 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -194,6 +195,16 @@ bool xdisc_read(const XDisc *d, const XDiscFile *f, uint64_t off, void *buf, siz
         return false;
     }
     return read_at(d, buf, len, d->part_off + (uint64_t)f->sector * XDISC_SECTOR + off);
+}
+
+uint64_t xdisc_abs(const XDisc *d, const XDiscFile *f) { return d->part_off + (uint64_t)f->sector * XDISC_SECTOR; }
+
+bool xdisc_read_abs(const XDisc *d, uint64_t abs, void *buf, size_t len) { return read_at(d, buf, len, abs); }
+
+uint64_t xdisc_image_size(const XDisc *d)
+{
+    struct stat st;
+    return d->f && fstat(d->fd, &st) == 0 && st.st_size > 0 ? (uint64_t)st.st_size : 0;
 }
 
 static int walk(const uint8_t *dir, uint32_t size, uint32_t off, unsigned depth,

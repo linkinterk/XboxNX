@@ -261,6 +261,8 @@ void kio_close(Kernel *k, uint32_t object);
 /* Esperar a que las escrituras en segundo plano estén en la SD. */
 void kio_sync(void);
 void kio_exit(void); /* al salir de la app: termina el hilo de escritura */
+/* v0.18.69: la caché de lecturas (bytes en la RAM, servidos de ella y de la SD) */
+void kio_cache_stats(uint64_t *ram, uint64_t *hit, uint64_t *miss);
 void kio_dump(struct Kernel *k, void *file); /* los archivos abiertos (FILE *) */
 /* El evento del objeto archivo (para esperar sobre su handle). */
 #define K_FO_EVENT 0x38u

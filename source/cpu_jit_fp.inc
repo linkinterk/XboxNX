@@ -2144,11 +2144,67 @@ static bool emit_extra(Em *e, const Block *b, unsigned i, const Vm *vm)
         strb(e, W13, XC, r8off(4));
         uint32_t *done = fwd_b(e);
         patch(e, lazy);
+        /* v0.18.69: con los flags perezosos de add/sub/lógica/inc/dec, AH
+         * sale de lf_* sin calcularlos (como flags_sync); los demás, C */
+        cmpwi(e, W12, 5);
+        uint32_t *slowc = fwd_bcond(e, COND_HI);
+        ldrw(e, W13, XC, OFF(lf_res));
+        ldrb_i(e, 14, XC, OFF(lf_sz));
+        lslw_i(e, 14, 14, 3);
+        subwi(e, W15, 14, 1);
+        E(e, 0x1ACF25A9u); /* lsr w9, w13, w15: SF */
+        E(e, 0x12000129u); /* and w9, w9, #1 */
+        lslw_i(e, W9, W9, 7);
+        cmpwi(e, W13, 0);
+        cset(e, W10, COND_EQ);
+        E(e, 0x2A0A1929u); /* orr w9, w9, w10, lsl #6: ZF */
+        E(e, 0x12001DAAu); /* and w10, w13, #0xff */
+        E(e, 0x4A4A114Au); /* eor w10, w10, w10, lsr #4 */
+        E(e, 0x4A400000u | (uint32_t)W10 << 16 | 2u << 10 | (uint32_t)W10 << 5 | W10);
+        E(e, 0x4A400000u | (uint32_t)W10 << 16 | 1u << 10 | (uint32_t)W10 << 5 | W10);
+        E(e, 0x1200014Au); /* and w10, w10, #1 */
+        E(e, 0x5200014Au); /* eor w10, w10, #1 */
+        E(e, 0x2A0A0929u); /* orr w9, w9, w10, lsl #2: PF */
+        E(e, 0x321F0129u); /* orr w9, w9, #2 */
+        cmpwi(e, W12, LF_LOGIC);
+        uint32_t *logic = fwd_bcond(e, COND_EQ); /* AF = CF = 0 */
+        ldrw(e, W10, XC, OFF(lf_a));
+        ldrw(e, W11, XC, OFF(lf_b));
+        E(e, 0x4A0B014Fu); /* eor w15, w10, w11 */
+        E(e, 0x4A0D01EFu); /* eor w15, w15, w13 */
+        E(e, 0x121C01EFu); /* and w15, w15, #0x10: AF */
+        rrr(e, ORRW, W9, W9, W15);
+        ldrb_i(e, X0, XC, OFF(lf_cin));
+        cmpwi(e, W12, LF_INC);
+        uint32_t *incdec = fwd_bcond(e, 2); /* b.hs: CF = cin */
+        cmpwi(e, W12, LF_SUB);
+        uint32_t *sub = fwd_bcond(e, COND_EQ);
+        E(e, 0x8B0B014Fu); /* add x15, x10, x11 */
+        E(e, 0x8B0001EFu); /* add x15, x15, x0 */
+        E(e, 0x9ACE25EFu); /* lsr x15, x15, x14: el acarreo sobre el tamaño */
+        E(e, 0x120001EFu); /* and w15, w15, #1 */
+        rrr(e, ORRW, W9, W9, W15);
+        uint32_t *st1 = fwd_b(e);
+        patch(e, sub);
+        E(e, 0xCB0B014Fu); /* sub x15, x10, x11 */
+        E(e, 0xCB0001EFu); /* sub x15, x15, x0 */
+        E(e, 0xD37FFDEFu); /* lsr x15, x15, #63: a < b + cin */
+        rrr(e, ORRW, W9, W9, W15);
+        uint32_t *st2 = fwd_b(e);
+        patch(e, incdec);
+        E(e, 0x2A000129u); /* orr w9, w9, w0 */
+        patch(e, logic);
+        patch(e, st1);
+        patch(e, st2);
+        strb(e, W9, XC, r8off(4));
+        uint32_t *done2 = fwd_b(e);
+        patch(e, slowc);
         mark_helper(e, b, i);
         call_c(e, (uintptr_t)jit_op1, (int)i, false);
         helper_result(e, i, &s);
         slow_tail(e, b, i, vm, &s);
         patch(e, done);
+        patch(e, done2);
         return true;
     }
     if (!is0f && (op == 0x60 || op == 0x61 || op == 0x9C || op == 0x9E || op == 0xD7 || op == 0xF5 ||

@@ -601,11 +601,16 @@ static KFile *file_new(void)
     return NULL;
 }
 
+static void rc_drop_path(const char *host);
+
 static void file_drop(Kernel *k, KFile *f)
 {
     if (f->fp) {
         aio_drain();
         fclose(f->fp);
+    }
+    if (f->del && f->kind == F_HOST) {
+        rc_drop_path(f->host);
     }
     if (f->del && f->kind == F_HOST) {
         bool other = false;
@@ -1020,17 +1025,347 @@ static bool fd_pread(int fd, void *buf, size_t n, uint64_t off)
     return ok;
 }
 
+/* ---- v0.18.69: caché de lecturas en la RAM de la Switch ----
+ * Halo 2 lee sin parar sus archivos de caché del disco duro (texturas,
+ * sonido y geometría entran y salen de sus 64 MB): en la Switch cada lectura
+ * de la SD tardaba 2-5 ms con todo el emulador esperando (hasta un cuarto
+ * del tiempo). Los bloques de 64 KB leídos, y los escritos enteros (la copia
+ * del mapa que luego se lee), quedan en la RAM hasta RC_BUDGET, los más
+ * viejos salen primero. Escribir tira o reemplaza los bloques que toca;
+ * truncar, renombrar, borrar o formatear tiran los del archivo (o todos). */
+#define RC_BS (64u << 10)
+#define RC_HASH 16384u
+#define RC_FILES 64
+#ifdef __SWITCH__
+#define RC_BUDGET (768ull << 20)
+#else
+#define RC_BUDGET (8ull << 20) /* en la PC, chica: así las pruebas también echan bloques */
+#endif
+
+typedef struct RcBlock {
+    struct RcBlock *hnext, *newer, *older;
+    uint32_t file; /* 0: la imagen del disco (offset absoluto); 1..: g_rc.path[] */
+    uint32_t len;  /* bytes válidos desde el principio del bloque */
+    uint64_t blk;
+    uint8_t data[];
+} RcBlock;
+
+static struct {
+    RcBlock *hash[RC_HASH];
+    RcBlock *newest, *oldest;
+    uint64_t bytes;
+    char *path[RC_FILES];
+    unsigned next_slot;
+    const XDisc *disc;
+    uint64_t disc_size;
+    uint64_t hit, miss; /* bytes servidos de la RAM y de la SD */
+    uint64_t ahead;      /* bytes leídos de más por ir en orden */
+    uint64_t last_end[RC_FILES];
+    uint8_t *tmp;
+    size_t tmp_cap;
+} g_rc;
+
+static unsigned rc_hash(uint32_t file, uint64_t blk)
+{
+    return (unsigned)(((blk * 0x9E3779B97F4A7C15ull) >> 37) ^ (file * 0x85EBCA6Bu)) & (RC_HASH - 1);
+}
+
+static RcBlock *rc_find(uint32_t file, uint64_t blk)
+{
+    for (RcBlock *b = g_rc.hash[rc_hash(file, blk)]; b; b = b->hnext) {
+        if (b->blk == blk && b->file == file) {
+            return b;
+        }
+    }
+    return NULL;
+}
+
+static void rc_unlink(RcBlock *b)
+{
+    RcBlock **pp = &g_rc.hash[rc_hash(b->file, b->blk)];
+    while (*pp && *pp != b) {
+        pp = &(*pp)->hnext;
+    }
+    if (*pp) {
+        *pp = b->hnext;
+    }
+    if (b->newer) {
+        b->newer->older = b->older;
+    } else {
+        g_rc.newest = b->older;
+    }
+    if (b->older) {
+        b->older->newer = b->newer;
+    } else {
+        g_rc.oldest = b->newer;
+    }
+    g_rc.bytes -= RC_BS;
+    free(b);
+}
+
+static void rc_front(RcBlock *b)
+{
+    if (g_rc.newest == b) {
+        return;
+    }
+    /* sacarlo */
+    b->newer->older = b->older; /* no es el más nuevo: tiene uno más nuevo */
+    if (b->older) {
+        b->older->newer = b->newer;
+    } else {
+        g_rc.oldest = b->newer;
+    }
+    /* al frente */
+    b->newer = NULL;
+    b->older = g_rc.newest;
+    g_rc.newest->newer = b;
+    g_rc.newest = b;
+}
+
+static RcBlock *rc_new(uint32_t file, uint64_t blk)
+{
+    while (g_rc.bytes + RC_BS > RC_BUDGET && g_rc.oldest) {
+        rc_unlink(g_rc.oldest);
+    }
+    RcBlock *b = malloc(sizeof(RcBlock) + RC_BS);
+    if (!b) {
+        /* sin memoria (la GPU también usa el montón): soltar un cuarto */
+        for (uint64_t drop = g_rc.bytes / 4; drop >= RC_BS && g_rc.oldest; drop -= RC_BS) {
+            rc_unlink(g_rc.oldest);
+        }
+        return NULL;
+    }
+    b->file = file;
+    b->blk = blk;
+    b->len = 0;
+    unsigned h = rc_hash(file, blk);
+    b->hnext = g_rc.hash[h];
+    g_rc.hash[h] = b;
+    b->newer = NULL;
+    b->older = g_rc.newest;
+    if (g_rc.newest) {
+        g_rc.newest->newer = b;
+    } else {
+        g_rc.oldest = b;
+    }
+    g_rc.newest = b;
+    g_rc.bytes += RC_BS;
+    return b;
+}
+
+/* Tira los bloques de un archivo (file < RC_FILES) o de todos los del disco duro (RC_FILES). */
+static void rc_drop(uint32_t file)
+{
+    for (RcBlock *b = g_rc.oldest; b;) {
+        RcBlock *n = b->newer;
+        if (file == RC_FILES ? b->file != 0 : b->file == file) {
+            rc_unlink(b);
+        }
+        b = n;
+    }
+}
+
+static void rc_drop_host(void) { rc_drop(RC_FILES); }
+
+static void rc_clear(void)
+{
+    while (g_rc.oldest) {
+        rc_unlink(g_rc.oldest);
+    }
+    for (unsigned i = 0; i < RC_FILES; i++) {
+        free(g_rc.path[i]);
+        g_rc.path[i] = NULL;
+    }
+    free(g_rc.tmp);
+    g_rc.tmp = NULL;
+    g_rc.tmp_cap = 0;
+    g_rc.disc = NULL;
+}
+
+/* El número de un archivo del disco duro (0: ninguno). */
+static uint32_t rc_slot(const char *host, bool create)
+{
+    for (unsigned i = 1; i < RC_FILES; i++) {
+        if (g_rc.path[i] && !strcasecmp(g_rc.path[i], host)) {
+            return i;
+        }
+    }
+    if (!create) {
+        return 0;
+    }
+    unsigned s = 1 + g_rc.next_slot++ % (RC_FILES - 1);
+    if (g_rc.path[s]) {
+        rc_drop(s);
+        free(g_rc.path[s]);
+    }
+    g_rc.last_end[s] = 0;
+    g_rc.path[s] = strdup(host);
+    return g_rc.path[s] ? s : 0;
+}
+
+static void rc_drop_path(const char *host)
+{
+    uint32_t s = rc_slot(host, false);
+    if (s) {
+        rc_drop(s);
+    }
+}
+
+/* Se escribieron len bytes en off del archivo: los bloques enteros pasan a
+ * la caché con lo escrito; los que se tocan a medias se tiran. */
+static void rc_wrote(const char *host, uint64_t off, const uint8_t *data, uint32_t len)
+{
+    uint32_t s = rc_slot(host, true);
+    if (!s || !len) {
+        if (!s) {
+            rc_drop_host();
+        }
+        return;
+    }
+    uint64_t end = off + len;
+    for (uint64_t b = off / RC_BS; b * RC_BS < end; b++) {
+        uint64_t bs = b * RC_BS;
+        RcBlock *x = rc_find(s, b);
+        if (bs >= off && bs + RC_BS <= end) {
+            if (!x) {
+                x = rc_new(s, b);
+            } else {
+                rc_front(x);
+            }
+            if (x) {
+                memcpy(x->data, data + (bs - off), RC_BS);
+                x->len = RC_BS;
+            }
+        } else if (x) {
+            rc_unlink(x);
+        }
+    }
+}
+
+typedef bool (*RcSrc)(const void *ctx, uint64_t off, void *buf, size_t len);
+
+static bool rc_src_disc(const void *ctx, uint64_t off, void *buf, size_t len) { return xdisc_read_abs(ctx, off, buf, len); }
+
+static bool rc_src_host(const void *ctx, uint64_t off, void *buf, size_t len)
+{
+    return fd_pread(*(const int *)ctx, buf, len, off);
+}
+
+/* [off, off + n) de la fuente (que mide size) a la RAM del Xbox en va, por la caché. */
+static bool rc_read(Kernel *k, uint32_t file, uint64_t size, RcSrc src, const void *ctx, uint64_t off, uint32_t va,
+                    uint32_t n)
+{
+    uint64_t end = off + n;
+    if (end > size) {
+        return false;
+    }
+    /* leyendo en orden (donde terminó la anterior): se trae algo más adelante */
+    bool seq = file < RC_FILES && g_rc.last_end[file] == off && off;
+    g_rc.last_end[file < RC_FILES ? file : 0] = end;
+    while (off < end) {
+        uint64_t b = off / RC_BS, bs = b * RC_BS;
+        uint32_t lo = (uint32_t)(off - bs);
+        uint32_t hi = (uint32_t)((end < bs + RC_BS ? end : bs + RC_BS) - bs);
+        RcBlock *x = rc_find(file, b);
+        if (x && x->len >= hi) {
+            if (!vm_write(k->vm, va, x->data + lo, hi - lo)) {
+                return false;
+            }
+            rc_front(x);
+            g_rc.hit += hi - lo;
+            va += hi - lo;
+            off = bs + hi;
+            continue;
+        }
+        if (x) {
+            rc_unlink(x); /* corto: el archivo creció */
+        }
+        /* los que faltan seguidos, de una lectura (hasta 4 MB) */
+        uint64_t e = b + 1;
+        while (e * RC_BS < end && e - b < 64 && !rc_find(file, e)) {
+            e++;
+        }
+        if (seq && e * RC_BS >= end) { /* hasta 256 KB más, si no están */
+            uint64_t want = (end + (256u << 10) + RC_BS - 1) / RC_BS;
+            while (e < want && e * RC_BS < size && e - b < 64 && !rc_find(file, e)) {
+                e++;
+            }
+        }
+        uint64_t re = e * RC_BS < size ? e * RC_BS : size;
+        if (re > end) {
+            g_rc.ahead += re - (end > bs ? end : bs);
+        }
+        size_t rl = (size_t)(re - bs);
+        if (g_rc.tmp_cap < rl) {
+            free(g_rc.tmp);
+            g_rc.tmp = malloc(rl);
+            g_rc.tmp_cap = g_rc.tmp ? rl : 0;
+            if (!g_rc.tmp) {
+                return false;
+            }
+        }
+        if (!src(ctx, bs, g_rc.tmp, rl)) {
+            return false;
+        }
+        for (uint64_t y = b; y < e; y++) {
+            uint64_t ys = y * RC_BS;
+            if (ys >= re) {
+                break;
+            }
+            RcBlock *nb = rc_new(file, y);
+            if (!nb) {
+                break;
+            }
+            nb->len = (uint32_t)(re - ys < RC_BS ? re - ys : RC_BS);
+            memcpy(nb->data, g_rc.tmp + (ys - bs), nb->len);
+        }
+        uint64_t ce = end < re ? end : re;
+        if (!vm_write(k->vm, va, g_rc.tmp + (off - bs), (size_t)(ce - off))) {
+            return false;
+        }
+        g_rc.miss += ce - off;
+        va += (uint32_t)(ce - off);
+        off = ce;
+    }
+    return true;
+}
+
+void kio_cache_stats(uint64_t *ram, uint64_t *hit, uint64_t *miss)
+{
+    *ram = g_rc.bytes;
+    *hit = g_rc.hit;
+    *miss = g_rc.miss + g_rc.ahead; /* lo que se leyó de la SD */
+}
+
 /* Lee n bytes del archivo en off hacia la memoria del Xbox en va.
  * Etapa 5: directo a la RAM del Xbox, en una lectura por tramo de páginas
  * seguidas (antes: trozos de 64 KB por stdio y una copia más; en la Switch
- * NtReadFile tardaba 20-37 ms por lectura al cargar un nivel). */
-static bool read_into(Kernel *k, KFile *f, uint64_t off, uint32_t va, uint32_t n)
+ * NtReadFile tardaba 20-37 ms por lectura al cargar un nivel).
+ * v0.18.69: por la caché de lecturas (rc_read), si se puede. */
+static bool read_into(Kernel *k, KFile *f, uint64_t off, uint32_t va, uint32_t n, uint64_t size)
 {
     if (f->kind != F_DISC) {
         if (!f->fp) {
             return false;
         }
         fflush(f->fp); /* lo escrito y aún en el búfer de stdio, al archivo */
+    }
+    if (n && f->kind == F_DISC && k->disc) {
+        if (g_rc.disc != k->disc) {
+            rc_drop(0);
+            g_rc.disc = k->disc;
+            g_rc.disc_size = xdisc_image_size(k->disc);
+        }
+        uint64_t abs = xdisc_abs(k->disc, &f->disc);
+        if (g_rc.disc_size && off + n <= f->disc.size && abs + off + n <= g_rc.disc_size) {
+            return rc_read(k, 0, g_rc.disc_size, rc_src_disc, k->disc, abs + off, va, n);
+        }
+    } else if (n && f->kind == F_HOST && f->host[0] && size >= off + n) {
+        uint32_t s = rc_slot(f->host, true);
+        int fd = fileno(f->fp);
+        if (s && fd >= 0) {
+            return rc_read(k, s, size, rc_src_host, &fd, off, va, n);
+        }
     }
     while (n) {
         uint8_t *h = vm_host(k->vm, va);
@@ -1102,7 +1437,7 @@ static uint64_t NtReadFile(KCall *c)
         st = ST_END_OF_FILE;
     } else {
         n = (uint32_t)(size - off < len ? size - off : len);
-        if (!read_into(k, f, off, c->a[5], n)) {
+        if (!read_into(k, f, off, c->a[5], n, size)) {
             st = ST_DEVICE_DATA_ERROR;
             n = 0;
         }
@@ -1145,7 +1480,7 @@ static uint64_t NtReadFileScatter(KCall *c)
         for (uint32_t done = 0, i = 0; done < n; i++) {
             uint32_t page = vm_rd32(k->vm, c->a[5] + 4 * i) & ~(VM_PAGE - 1);
             uint32_t chunk = n - done < VM_PAGE ? n - done : VM_PAGE;
-            if (!read_into(k, f, off + done, page, chunk)) {
+            if (!read_into(k, f, off + done, page, chunk, size)) {
                 st = ST_DEVICE_DATA_ERROR;
                 n = done;
                 break;
@@ -1173,6 +1508,7 @@ static uint64_t NtWriteFile(KCall *c)
     bool named;
     uint64_t off = io_offset(k, f, c->a[7], &named);
     if (f->kind == F_VOLUME) {
+        rc_drop_host();
         if (f->partition == 0) {
             for (uint32_t done = 0; done < len;) {
                 uint32_t chunk = len - done < sizeof(g_buf) ? len - done : (uint32_t)sizeof(g_buf);
@@ -1186,6 +1522,7 @@ static uint64_t NtWriteFile(KCall *c)
     }
     int raw = partition_root(f);
     if (raw >= 3) {
+        rc_drop_host();
         /* una partición de caché formateada en crudo (XMountUtilityDrive):
          * escribir el superbloque FATX la vacía */
         uint32_t first = len < sizeof(g_buf) ? len : (uint32_t)sizeof(g_buf);
@@ -1211,6 +1548,7 @@ static uint64_t NtWriteFile(KCall *c)
     uint32_t st = ST_SUCCESS, done = 0;
     uint8_t *copy = len ? malloc(len) : NULL;
     if (copy && vm_read(k->vm, c->a[5], copy, len)) {
+        rc_wrote(f->host, off, copy, len); /* la caché de lecturas ya ve lo escrito */
         if (aio_write(f->fp, host_id(f->host), off, copy, len)) { /* la escribe el hilo; el juego sigue */
             f->wrote = true;
             k->writes++;
@@ -1220,6 +1558,7 @@ static uint64_t NtWriteFile(KCall *c)
     }
     free(copy);
     aio_drain();
+    rc_drop_path(f->host);
     if (fseeko(f->fp, (off_t)off, SEEK_SET) != 0) {
         st = ST_DISK_FULL;
     }
@@ -2095,7 +2434,17 @@ static uint64_t IoNothing(KCall *c)
 /* Las operaciones con archivos (salvo escribir y leer del disco) esperan a
  * que las escrituras en segundo plano estén en la SD. */
 #define AIO_SYNC(fn) static uint64_t fn##_aio(KCall *c) { aio_drain(); return fn(c); }
-AIO_SYNC(NtCreateFile)
+/* v0.18.69: lo que cambia archivos del disco duro sin escribirlos (crear
+ * truncando, borrar, formatear) tira sus bloques de la caché de lecturas */
+#define AIO_SYNC_RC(fn) static uint64_t fn##_aio(KCall *c) { aio_drain(); rc_drop_host(); return fn(c); }
+static uint64_t NtCreateFile_aio(KCall *c)
+{
+    aio_drain();
+    if (c->a[7] != FILE_OPEN && c->a[7] != FILE_OPEN_IF) { /* crear, reemplazar o truncar */
+        rc_drop_host();
+    }
+    return NtCreateFile(c);
+}
 AIO_SYNC(NtOpenFile)
 AIO_SYNC(NtQueryInformationFile)
 /* Mover la posición (clase 14, antes de cada escritura de Halo 2) no
@@ -2105,17 +2454,27 @@ static uint64_t NtSetInformationFile_aio(KCall *c)
     if (c->a[4] != 14 && c->a[4] != 19 && c->a[4] != 4) { /* posición, reserva y tiempos: sin tocar el archivo */
         aio_drain();
     }
+    if (c->a[4] == 10) { /* renombrar: el nombre nuevo también */
+        rc_drop_host();
+    } else if (c->a[4] == 13 || c->a[4] == 19 || c->a[4] == 20) { /* borrar, reserva, fin de archivo */
+        KFile *f = file_of(c->k, c->a[0]);
+        if (f && f->kind == F_HOST) {
+            rc_drop_path(f->host);
+        } else {
+            rc_drop_host();
+        }
+    }
     return NtSetInformationFile(c);
 }
 AIO_SYNC(NtQueryVolumeInformationFile)
 AIO_SYNC(IoQueryVolumeInformation)
 AIO_SYNC(NtQueryDirectoryFile)
 AIO_SYNC(NtQueryFullAttributesFile)
-AIO_SYNC(NtDeleteFile)
+AIO_SYNC_RC(NtDeleteFile)
 AIO_SYNC(NtFlushBuffersFile)
-AIO_SYNC(NtControlFile)
-AIO_SYNC(IoSynchronousDeviceIoControlRequest)
-AIO_SYNC(IoDismountVolumeByName)
+AIO_SYNC_RC(NtControlFile)
+AIO_SYNC_RC(IoSynchronousDeviceIoControlRequest)
+AIO_SYNC_RC(IoDismountVolumeByName)
 AIO_SYNC(ExReadWriteRefurbInfo)
 
 void kio_sync(void) { aio_drain(); }
@@ -2124,6 +2483,7 @@ void kio_sync(void) { aio_drain(); }
  * cargador no puede soltar la memoria: error al volver al hbmenu). */
 void kio_exit(void)
 {
+    rc_clear();
     if (!g_aio.on) {
         return;
     }
@@ -2142,6 +2502,7 @@ void kio_exit(void)
 
 void kio_set_media(Kernel *k, const XDisc *disc, const char *hdd_root)
 {
+    rc_clear(); /* otro disco u otro disco duro */
     k->disc = disc;
     snprintf(k->hdd_root, sizeof(k->hdd_root), "%s", hdd_root);
     mkdirs(k->hdd_root);

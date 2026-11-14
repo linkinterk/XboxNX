@@ -40,6 +40,12 @@ bool xdisc_find(const XDisc *d, const char *path, XDiscFile *out);
 /* Lee len bytes en el offset off de un archivo. */
 bool xdisc_read(const XDisc *d, const XDiscFile *f, uint64_t off, void *buf, size_t len);
 
+/* v0.18.69 (la caché de lecturas): dónde empieza un archivo en la imagen,
+ * leer de la imagen por offset absoluto, y su tamaño (0: no se sabe). */
+uint64_t xdisc_abs(const XDisc *d, const XDiscFile *f);
+bool xdisc_read_abs(const XDisc *d, uint64_t abs, void *buf, size_t len);
+uint64_t xdisc_image_size(const XDisc *d);
+
 /* Recorre una carpeta (en orden del árbol). Devuelve cuántas entradas vio, o
  * -1 si no se pudo leer. */
 int xdisc_list(const XDisc *d, const XDiscFile *dir,

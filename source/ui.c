@@ -918,6 +918,11 @@ static void resumen_tick(const UiState *s, double fps, double spd)
     p_af = as->frames, p_abusy = as->ns_busy, p_askip = as->skipped;
     uint64_t dn = js.decodes - p_dn, dtk = js.dec_ticks - p_dt;
     p_dn = js.decodes, p_dt = js.dec_ticks;
+    static uint64_t p_rch, p_rcm;
+    uint64_t rc_ram, rc_hit, rc_miss;
+    kio_cache_stats(&rc_ram, &rc_hit, &rc_miss);
+    uint64_t rch = rc_hit - p_rch, rcm = rc_miss - p_rcm;
+    p_rch = rc_hit, p_rcm = rc_miss;
     double tps = js.ticks_per_s ? (double)js.ticks_per_s : 1e9;
     FILE *f = fopen(SUM_FILE, started ? "a" : "w");
     if (f) {
@@ -935,7 +940,7 @@ static void resumen_tick(const UiState *s, double fps, double spd)
                    "hilo GPU %.0f%% · leídas al momento %llu (%.0f ms; textura %llu software %llu todo %llu tamaño %llu sin lugar %llu) · "
                    "esperando a la GPU %.1f%% · lecturas %llu (%.1f ms c/u) · hora rápida %.0f/s · C desde el JIT %.0fk/s · "
                    "pantalla %u ms · decodificados %llu (%.1f us c/u) · sonido: %.0f cuadros/s, ocupado %.0f%%, atrasado %.0f ms, "
-                   "saltados %llu\n",
+                   "saltados %llu · caché de lecturas: %.0f MB de la RAM y %.0f MB de la SD (%.0f MB guardados)\n",
                 ts, n ? fps_sum / n : 0.0, fps_min < 1e8 ? fps_min : 0.0, n ? 100.0 * spd_sum / n : 0.0,
                 (s->prof[PROF_CPU] + 5) / 10, (s->prof[PROF_KERNEL] + 5) / 10, (s->prof[PROF_APU] + 5) / 10,
                 (s->prof[PROF_GPU] + 5) / 10, all ? 100.0 * (double)get / (double)all : 0.0,
@@ -945,7 +950,8 @@ static void resumen_tick(const UiState *s, double fps, double spd)
                 (unsigned long long)why[3], (unsigned long long)why[4], 100.0 * (double)wait / (dt * 1e9), (unsigned long long)rd,
                 rd ? rdns / 1e6 / (double)rd : 0.0, (double)kf / dt, (double)cc / dt / 1000.0, s->ui_ms,
                 (unsigned long long)dn, dn ? (double)dtk / tps * 1e6 / (double)dn : 0.0, (double)af / dt,
-                100.0 * (double)abusy / (dt * 1e9), as->lag_ns / 1e6, (unsigned long long)askip);
+                100.0 * (double)abusy / (dt * 1e9), as->lag_ns / 1e6, (unsigned long long)askip, rch / 1048576.0,
+                rcm / 1048576.0, rc_ram / 1048576.0);
         fclose(f);
     }
     fps_sum = spd_sum = 0, n = 0, fps_min = 1e9;

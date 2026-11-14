@@ -508,6 +508,144 @@ static void io_tests(const char *iso)
         uint32_t delb[1] = {oa("\\Device\\Harddisk0\\Partition1\\tdata\\grande.bin", 0)};
         CHECK(calln("NtDeleteFile", 1, delb) == ST_SUCCESS);
     }
+    {
+        /* v0.18.69: la caché de lecturas. Un archivo de 12 MB (más que la
+         * caché de la PC: se echan bloques) escrito en trozos de todos los
+         * tamaños, leído y reescrito al azar, truncado y alargado: siempre
+         * lo mismo que un búfer de referencia. Y lecturas del disco contra
+         * xdisc_read directo. */
+        const uint32_t WIN = 0x01000000u, WN = 1u << 20, FS = 12u << 20;
+        CHECK(vm_alloc_at(&vm, WIN, WN));
+        uint8_t *ref = calloc(FS + WN, 1), *tmp = malloc(WN);
+        uint32_t seed = 12345;
+#define RNDX() (seed = seed * 1103515245u + 12345u, seed >> 8)
+        for (uint32_t i = 0; i < FS; i++) {
+            ref[i] = (uint8_t)(RNDX() >> 3);
+        }
+        uint32_t hc = create("\\Device\\Harddisk0\\Partition1\\tdata\\cache.bin", 0xC0000000u, 5, 0x60, &st);
+        CHECK(st == ST_SUCCESS);
+        uint32_t fsize = 0;
+        for (uint32_t off = 0; off < FS;) {
+            uint32_t n = 1 + RNDX() % (3 * 65536 + 777);
+            if (off + n > FS) {
+                n = FS - off;
+            }
+            vm_write(&vm, WIN, ref + off, n);
+            wr(SCRATCH + 0x3C0, off);
+            wr(SCRATCH + 0x3C4, 0);
+            uint32_t wc[8] = {hc, 0, 0, 0, IOSB, WIN, n, SCRATCH + 0x3C0};
+            CHECK(calln("NtWriteFile", 8, wc) == ST_SUCCESS && rd(IOSB + 4) == n);
+            off += n;
+            fsize = off;
+        }
+        int bad = 0;
+        for (int it = 0; it < 900; it++) {
+            uint32_t kind = RNDX() % 10;
+            uint32_t off = RNDX() % (fsize + 1000), n = 1 + RNDX() % (kind < 2 ? WN : 140000);
+            if (n > WN) {
+                n = WN;
+            }
+            if (kind == 9) { /* escribir (a veces pasado el final: un hueco con ceros) */
+                if (off > fsize + 100000) {
+                    off = fsize + RNDX() % 100000;
+                }
+                if (off >= FS) {
+                    off = FS - 1;
+                }
+                for (uint32_t i = 0; i < n; i++) {
+                    ref[off + i] = (uint8_t)RNDX();
+                }
+                if (off + n > FS + WN) {
+                    n = FS + WN - off;
+                }
+                vm_write(&vm, WIN, ref + off, n);
+                wr(SCRATCH + 0x3C0, off);
+                wr(SCRATCH + 0x3C4, 0);
+                uint32_t wc[8] = {hc, 0, 0, 0, IOSB, WIN, n, SCRATCH + 0x3C0};
+                CHECK(calln("NtWriteFile", 8, wc) == ST_SUCCESS);
+                if (off + n > fsize) {
+                    fsize = off + n;
+                }
+                continue;
+            }
+            if (kind == 8 && it % 5 == 0) { /* truncar o alargar con ceros (fin de archivo) */
+                uint32_t ns = fsize / 2 + RNDX() % (fsize / 2 + 300000);
+                if (ns > FS) {
+                    ns = FS;
+                }
+                wr(BUF, ns);
+                wr(BUF + 4, 0);
+                uint32_t si[5] = {hc, IOSB, BUF, 8, 20};
+                CHECK(calln("NtSetInformationFile", 5, si) == ST_SUCCESS);
+                if (ns < fsize) {
+                    memset(ref + ns, 0, FS + WN - ns);
+                }
+                fsize = ns;
+                continue;
+            }
+            wr(SCRATCH + 0x3C0, off);
+            wr(SCRATCH + 0x3C4, 0);
+            memset(tmp, 0xEE, n);
+            vm_write(&vm, WIN, tmp, n);
+            uint32_t rc[8] = {hc, 0, 0, 0, IOSB, WIN, n, SCRATCH + 0x3C0};
+            uint32_t r0 = (uint32_t)calln("NtReadFile", 8, rc);
+            uint32_t want = off >= fsize ? 0 : (fsize - off < n ? fsize - off : n);
+            if (off >= fsize) {
+                bad += r0 != 0xC0000011u && !(n == 0);
+                continue;
+            }
+            vm_read(&vm, WIN, tmp, want);
+            if (r0 != ST_SUCCESS || rd(IOSB + 4) != want || memcmp(tmp, ref + off, want)) {
+                if (bad++ < 3) {
+                    printf("caché: lectura %d en %u de %u (tamaño %u) distinta\n", it, off, n, fsize);
+                }
+            }
+        }
+        CHECK(bad == 0);
+        /* en orden, de a 40000 bytes (lee por adelantado) */
+        for (uint32_t off = 0; off + 40000 <= fsize && off < (3u << 20); off += 40000) {
+            wr(SCRATCH + 0x3C0, off);
+            wr(SCRATCH + 0x3C4, 0);
+            uint32_t rc[8] = {hc, 0, 0, 0, IOSB, WIN, 40000, SCRATCH + 0x3C0};
+            CHECK(calln("NtReadFile", 8, rc) == ST_SUCCESS && rd(IOSB + 4) == 40000);
+            vm_read(&vm, WIN, tmp, 40000);
+            bad += memcmp(tmp, ref + off, 40000) != 0;
+        }
+        CHECK(bad == 0);
+        calln("NtClose", 1, &hc);
+        uint32_t delc[1] = {oa("\\Device\\Harddisk0\\Partition1\\tdata\\cache.bin", 0)};
+        CHECK(calln("NtDeleteFile", 1, delc) == ST_SUCCESS);
+        /* el disco: default.xbe en trozos al azar */
+        XDiscFile xf;
+        CHECK(xdisc_find(&disc, "default.xbe", &xf));
+        uint32_t hx = create("\\??\\D:\\default.xbe", 0x80100000u, 1, 0x60, &st);
+        CHECK(st == ST_SUCCESS);
+        int badd = 0;
+        for (int it = 0; it < 300 && xf.size; it++) {
+            uint32_t off = RNDX() % xf.size, n = 1 + RNDX() % 70000;
+            if (off + n > xf.size) {
+                n = xf.size - off;
+            }
+            wr(SCRATCH + 0x3C0, off);
+            wr(SCRATCH + 0x3C4, 0);
+            uint32_t rc[8] = {hx, 0, 0, 0, IOSB, WIN, n, SCRATCH + 0x3C0};
+            CHECK(calln("NtReadFile", 8, rc) == ST_SUCCESS && rd(IOSB + 4) == n);
+            vm_read(&vm, WIN, tmp, n);
+            uint8_t *dir = malloc(n);
+            badd += !xdisc_read(&disc, &xf, off, dir, n) || memcmp(dir, tmp, n);
+            free(dir);
+        }
+        CHECK(badd == 0);
+        calln("NtClose", 1, &hx);
+        uint64_t ram, hit, miss;
+        kio_cache_stats(&ram, &hit, &miss);
+        CHECK(hit > 0 && miss > 0 && ram <= (8u << 20));
+        printf("3c caché de lecturas: %.1f MB de la RAM, %.1f MB del archivo, %.1f MB guardados\n", hit / 1048576.0,
+               miss / 1048576.0, ram / 1048576.0);
+        free(ref);
+        free(tmp);
+#undef RNDX
+    }
     FILE *hf = fopen("build-test/hdd/Partition1/TDATA/prueba.bin", "rb");
     CHECK(hf != NULL);
     if (hf) {
