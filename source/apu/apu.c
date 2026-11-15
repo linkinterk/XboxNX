@@ -20,7 +20,12 @@ MCPXAPUState *g_state;
 uint8_t *g_apu_ram;
 uint32_t g_apu_ram_size;
 ApuConfig g_apu_config = {
-    .use_dsp = true, /* los cuadros del GP y del EP hasta el final */
+    /* v0.18.70: false, la mezcla del VP directa a la salida (como xemu de
+     * fábrica) y los DSP con 1000 ciclos por cuadro. Con true, el GP y el EP
+     * corrían cada cuadro hasta el final: en la Switch cada cuadro tardaba
+     * ~3 ms (hay 1500 por segundo), el hilo iba al 100%, saltaba 3 de cada
+     * 4 cuadros (sonido quebrado) y DirectSound esperaba cada voz apagada. */
+    .use_dsp = false,
     .hrtf = true,
     .volume_limit = 1.0f,
     .num_workers = 1, /* sin hilos: el VP en el hilo del juego */
@@ -54,7 +59,13 @@ void nc_log(const char *tag, const char *fmt, ...)
 void nc_irq_set(int line, bool level)
 {
     (void)line;
-    __atomic_store_n(&g_irq, level, __ATOMIC_RELAXED);
+    bool old = __atomic_exchange_n(&g_irq, level, __ATOMIC_RELAXED);
+    if (level && !old && g_k) {
+        /* v0.18.70: que la CPU atienda la interrupción ya (antes esperaba al
+         * final del turno, hasta 2 millones de instrucciones: DirectSound
+         * daba vueltas todo ese tiempo esperando el aviso de una voz) */
+        g_k->irq_kick = 1;
+    }
 }
 
 uint64_t nc_ke_now_ns(void) { return g_k ? __atomic_load_n(&g_k->now_ns, __ATOMIC_RELAXED) : 0; }
@@ -324,7 +335,9 @@ static void se_frame_(MCPXAPUState *d)
 {
     float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME];
     memset(mixbins, 0, sizeof(mixbins));
+    uint64_t tv = mono_ns();
     mcpx_apu_vp_frame(d, mixbins);
+    g_stats.ns_vp += mono_ns() - tv;
     if (g_thread_on) {
         /* el DSP (lo más pesado del cuadro) sin g_mx: el juego puede tocar
          * los registros mientras; sus ventanas del GP/EP toman d->lock */
@@ -514,6 +527,16 @@ bool apu_next_frame(uint64_t *ns)
 
 bool apu_irq(void) { return __atomic_load_n(&g_irq, __ATOMIC_RELAXED); }
 
+/* v0.18.70: el hilo de los cuadros todavía tiene cuadros por hacer (un bucle
+ * del juego que espera al APU no debe adelantar más el tiempo). */
+bool apu_busy(void)
+{
+    return g_thread_on && g_state &&
+           __atomic_load_n(&g_target_ns, __ATOMIC_RELAXED) >= __atomic_load_n(&g_next_frame_ns, __ATOMIC_RELAXED);
+}
+
+void apu_set_dsp(bool on) { g_apu_config.use_dsp = on; }
+
 const ApuStats *apu_stats(void)
 {
     g_stats.gp_running = g_state && (g_state->gp.regs[NV_PAPU_GPRST] & NV_PAPU_GPRST_GPDSPRST);
@@ -567,9 +590,9 @@ static bool apu_init_locked(Kernel *k)
     pthread_mutex_init(&d->irq_lock, NULL);
     apu_cond_init(&d->cond);
     mcpx_apu_dsp_init(d);
-    d->gp.realtime = true;
-    d->ep.realtime = true;
-    d->monitor.point = MCPX_APU_DEBUG_MON_GP_OR_EP;
+    d->gp.realtime = g_apu_config.use_dsp;
+    d->ep.realtime = g_apu_config.use_dsp;
+    d->monitor.point = g_apu_config.use_dsp ? MCPX_APU_DEBUG_MON_GP_OR_EP : MCPX_APU_DEBUG_MON_VP;
     d->monitor.device_buffer_bytes = 1;
     mcpx_apu_vp_init(d);
     memset(d->regs, 0, sizeof(d->regs));

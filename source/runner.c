@@ -10,6 +10,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "apu/apu.h"
+
 static bool kernel_fast(Cpu *c, unsigned ord);
 
 /* Pila del hilo de arranque */
@@ -214,6 +216,30 @@ static bool kernel_fast(Cpu *c, unsigned ord)
     uint64_t now = k->now_ns + (c->icount + 1 - c->clock_icount) * (c->ns_per_instr ? c->ns_per_instr : 1);
     uint32_t esp = c->r[R_ESP], back, pop;
     uint64_t ret;
+    if (ord == 128 || ord == 125 || ord == 126) {
+        /* v0.18.70: un bucle que solo pregunta la hora desde el mismo sitio
+         * (DirectSound de Halo 2 espera así, hasta medio segundo, el aviso de
+         * cada voz que apaga) es una espera: como en los bucles vacíos, el
+         * tiempo salta al siguiente evento (el próximo cuadro del APU) en
+         * vez de dar decenas de miles de vueltas. Si el hilo del sonido
+         * todavía tiene cuadros por hacer, no se adelanta más. */
+        uint32_t from = vm_rd32(c->vm, esp);
+        uint64_t ic = c->icount;
+        if (from == r->spin_back && ic - r->spin_ic < 160) {
+            if (++r->spin_n >= 12) {
+                r->spin_n = 0;
+                if (!k->in_isr && !k->in_dpc && !apu_busy()) {
+                    c->idle = true;
+                    k->irq_kick = 1; /* cpu_run vuelve en el próximo bloque */
+                    r->spin_skips++;
+                }
+            }
+        } else {
+            r->spin_back = from;
+            r->spin_n = 0;
+        }
+        r->spin_ic = ic;
+    }
     switch (ord) {
     case 128: { /* KeQuerySystemTime(*CurrentTime) */
         uint32_t p = vm_rd32(c->vm, esp + 4);
@@ -425,6 +451,10 @@ RunState runner_slice(Runner *r, uint64_t max)
         if (k->cur >= 0 && !k->in_dpc) {
             k->threads[k->cur].instructions += done;
         }
+        /* v0.18.70: el hilo del sonido sigue al tiempo del juego en cada
+         * vuelta (antes solo al replanificar: un hilo que calculaba o
+         * esperaba sin llamar al kernel lo dejaba parado hasta 16 ms) */
+        apu_tick(k);
         if (st == CPU_LIMIT) {
             if (k->irq_kick) {
                 /* una interrupción del hardware (la trampa del GPU): su ISR ya,

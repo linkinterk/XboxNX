@@ -916,6 +916,9 @@ static void resumen_tick(const UiState *s, double fps, double spd)
     const ApuStats *as = apu_stats();
     uint64_t af = as->frames - p_af, abusy = as->ns_busy - p_abusy, askip = as->skipped - p_askip;
     p_af = as->frames, p_abusy = as->ns_busy, p_askip = as->skipped;
+    static uint64_t p_avp, p_spin, p_idle;
+    uint64_t avp = as->ns_vp - p_avp, spin = r->spin_skips - p_spin, idle = r->idle_skips - p_idle;
+    p_avp = as->ns_vp, p_spin = r->spin_skips, p_idle = r->idle_skips;
     uint64_t dn = js.decodes - p_dn, dtk = js.dec_ticks - p_dt;
     p_dn = js.decodes, p_dt = js.dec_ticks;
     static uint64_t p_rch, p_rcm;
@@ -940,7 +943,8 @@ static void resumen_tick(const UiState *s, double fps, double spd)
                    "hilo GPU %.0f%% · leídas al momento %llu (%.0f ms; textura %llu software %llu todo %llu tamaño %llu sin lugar %llu) · "
                    "esperando a la GPU %.1f%% · lecturas %llu (%.1f ms c/u) · hora rápida %.0f/s · C desde el JIT %.0fk/s · "
                    "pantalla %u ms · decodificados %llu (%.1f us c/u) · sonido: %.0f cuadros/s, ocupado %.0f%%, atrasado %.0f ms, "
-                   "saltados %llu · caché de lecturas: %.0f MB de la RAM y %.0f MB de la SD (%.0f MB guardados)\n",
+                   "saltados %llu (voces %.0f%%) · caché de lecturas: %.0f MB de la RAM y %.0f MB de la SD (%.0f MB guardados) · "
+                   "esperas acortadas %llu (por la hora %llu)\n",
                 ts, n ? fps_sum / n : 0.0, fps_min < 1e8 ? fps_min : 0.0, n ? 100.0 * spd_sum / n : 0.0,
                 (s->prof[PROF_CPU] + 5) / 10, (s->prof[PROF_KERNEL] + 5) / 10, (s->prof[PROF_APU] + 5) / 10,
                 (s->prof[PROF_GPU] + 5) / 10, all ? 100.0 * (double)get / (double)all : 0.0,
@@ -950,8 +954,9 @@ static void resumen_tick(const UiState *s, double fps, double spd)
                 (unsigned long long)why[3], (unsigned long long)why[4], 100.0 * (double)wait / (dt * 1e9), (unsigned long long)rd,
                 rd ? rdns / 1e6 / (double)rd : 0.0, (double)kf / dt, (double)cc / dt / 1000.0, s->ui_ms,
                 (unsigned long long)dn, dn ? (double)dtk / tps * 1e6 / (double)dn : 0.0, (double)af / dt,
-                100.0 * (double)abusy / (dt * 1e9), as->lag_ns / 1e6, (unsigned long long)askip, rch / 1048576.0,
-                rcm / 1048576.0, rc_ram / 1048576.0);
+                100.0 * (double)abusy / (dt * 1e9), as->lag_ns / 1e6, (unsigned long long)askip,
+                100.0 * (double)avp / (dt * 1e9), rch / 1048576.0, rcm / 1048576.0, rc_ram / 1048576.0,
+                (unsigned long long)idle, (unsigned long long)spin);
         fclose(f);
     }
     fps_sum = spd_sum = 0, n = 0, fps_min = 1e9;
@@ -1029,6 +1034,9 @@ void ui_resumen_exit(Runner *r)
     }
     fprintf(f, "Al salir · gráficos: texturas con swizzle tomadas de lo dibujado %llu · ",
             (unsigned long long)gpu_stats()->swz_direct);
+    fprintf(f, "superficies de otro ancho en la misma dirección (ya sin leer) %llu · ", (unsigned long long)gs->surf_alias);
+    fprintf(f, "texturas con mipmaps %llu · anisotropía del driver %ux · dibujos de puntos o líneas %llu · ",
+            (unsigned long long)gs->mipmaps, gs->aniso_max, (unsigned long long)gs->points_lines);
     fprintf(f, "superficies cambiadas de tamaño %llu (ej. %08X de %ux%u%s a %ux%u%s), echadas por falta de lugar %llu · ",
             (unsigned long long)gs->sfl_why[3], (unsigned)gs->sfl_chg_pa, (unsigned)(gs->sfl_chg_old >> 16),
             (unsigned)(gs->sfl_chg_old & 0x7FFF), (gs->sfl_chg_old & 0x8000) ? " swz" : "",

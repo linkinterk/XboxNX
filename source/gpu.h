@@ -28,6 +28,9 @@ typedef struct GpuTex {
     uint32_t addr;          /* dirección física (para reconocer superficies) */
     uint32_t fmt, w, h;
     bool cube, linear, bilinear;
+    /* v0.18.70: el filtro de lejos con mipmaps (0 no; 1 el nivel más cercano,
+     * 2 mezclando niveles) y la anisotropía que pide el juego (1..4) */
+    uint8_t mip, aniso;
     unsigned au, av;        /* modos de dirección (1 wrap, 2 mirror, otros clamp) */
     const uint8_t *data;    /* para el hash del contenido */
     uint32_t bytes;
@@ -58,6 +61,18 @@ typedef struct GpuDraw {
     bool blend, dtest, dmask, cull, atest;
     uint32_t sfac, dfac, beq, bcolor, dfunc, cull_face, front_face, cmask, afunc, aref;
     uint32_t cctl, c_icw[8], a_icw[8], c_ocw[8], a_ocw[8], factor0[8], factor1[8], fcw0, fcw1, fog_color;
+    /* v0.18.70: lo que faltaba del estado del NV2A */
+    uint32_t fc0, fc1;          /* las constantes del combinador final (SET_SPECULAR_FOG_FACTOR) */
+    bool fog;                   /* niebla: el factor sale de oFog del vertex program */
+    uint32_t fog_mode;          /* 0x2601 lineal, 0x800 exp, 0x801 exp2 (0x802..0x804: con valor absoluto) */
+    float fog_p[3];
+    bool poff;                  /* desplazamiento de profundidad (calcomanías sobre paredes) */
+    float poff_factor, poff_bias;
+    bool stest, swrite;         /* esténcil (solo con Z24S8) */
+    bool spec, spec_a1;         /* el color especular (oD1) encendido, y con alfa 1 */
+    bool psprite;               /* puntos: la etapa 3 toma la coordenada dentro del punto */
+    float psize;                /* puntos: el tamaño (>0) o -1 si lo da oPts del programa */
+    uint32_t sfunc, sref, sfmask, smask, sop_fail, sop_zfail, sop_zpass;
     GpuTex tex[4];
     /* 4c: el vertex shader en el GPU. Si vs_in no es NULL, verts no se usa:
      * vs_in son las entradas de cada vértice (nverts x 16 x 4 floats), vs_mask
@@ -139,6 +154,7 @@ typedef struct GpuStats {
     /* v0.18.61: por qué (0 una textura sobre lo dibujado, 1 el dibujo por
      * software, 2 todo de una vez, 3 otro) y un ejemplo de la de textura */
     uint64_t sfl_why[5];  /* v0.18.68: [3] otro tamaño o formato en la misma dirección, [4] echada por falta de lugar */
+    uint64_t surf_alias; /* v0.18.70: superficies nuevas en una dirección donde ya había otra de otro ancho */
     uint32_t sfl_chg_pa, sfl_chg_old, sfl_chg_new; /* un ejemplo de [3]: pitch/4 << 16 | alto (y swizzle en el bit 15) */
     uint64_t swz_direct; /* v0.18.65: texturas con swizzle tomadas directo de una superficie */
     uint32_t sfl_tex_addr, sfl_tex_fmt, sfl_tex_wh, sfl_surf_pa, sfl_surf_wh, sfl_surf_pitch;
@@ -149,6 +165,9 @@ typedef struct GpuStats {
     unsigned queries; /* informes de visibilidad leídos */
     bool bin_ok;      /* el driver da binarios de programas (la caché de shaders en la SD funciona) */ /* 4c: dibujos con el vertex shader en el GPU, programas, los que no compilaron */
     uint64_t upload_bytes;
+    uint64_t mipmaps;    /* v0.18.70: texturas a las que se les hicieron los niveles reducidos */
+    uint64_t points_lines; /* v0.18.70: dibujos de puntos o líneas (antes no salían) */
+    unsigned aniso_max;  /* la anisotropía del driver (1: no hay) */
     uint64_t ns_draw, ns_tex, ns_read, ns_vbuf, ns_query, ns_call; /* etapa 5: tiempo en gpu_draw (todo), en decodificar+subir texturas y en leer cuadros a la RAM */
 } GpuStats;
 const GpuStats *gpu_stats(void);

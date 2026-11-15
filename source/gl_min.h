@@ -24,6 +24,23 @@ typedef ptrdiff_t GLintptr;
 typedef struct __GLsync *GLsync;
 typedef uint64_t GLuint64;
 
+/* v0.18.70: filtros con mipmaps, esténcil, desplazamiento de profundidad */
+#define GL_NEAREST_MIPMAP_NEAREST 0x2700
+#define GL_LINEAR_MIPMAP_NEAREST 0x2701
+#define GL_NEAREST_MIPMAP_LINEAR 0x2702
+#define GL_LINEAR_MIPMAP_LINEAR 0x2703
+#define GL_ZERO 0
+#define GL_KEEP 0x1E00
+#define GL_REPLACE 0x1E01
+#define GL_INCR 0x1E02
+#define GL_DECR 0x1E03
+#define GL_INVERT 0x150A
+#define GL_INCR_WRAP 0x8507
+#define GL_DECR_WRAP 0x8508
+#define GL_STENCIL_TEST 0x0B90
+#define GL_POLYGON_OFFSET_FILL 0x8037
+#define GL_NUM_EXTENSIONS 0x821D
+#define GL_EXTENSIONS 0x1F03
 #define GL_PIXEL_PACK_BUFFER 0x88EB
 #define GL_MAP_WRITE_BIT 0x0002
 #define GL_SAMPLES_PASSED 0x8914
@@ -45,6 +62,9 @@ typedef uint64_t GLuint64;
 #define GL_STENCIL_BUFFER_BIT 0x00000400
 #define GL_COLOR_BUFFER_BIT 0x00004000
 #define GL_POINTS 0x0000
+#define GL_LINES 0x0001
+#define GL_LINE_LOOP 0x0002
+#define GL_LINE_STRIP 0x0003
 #define GL_TRIANGLES 0x0004
 #define GL_TRIANGLE_STRIP 0x0005
 #define GL_TRIANGLE_FAN 0x0006

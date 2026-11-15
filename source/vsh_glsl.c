@@ -45,7 +45,7 @@ static const char k_head[] =
     "uniform vec4 u_vp;\n"
     /* LOC(n): la posición fija de cada salida (la define gpu.c al compilar) */
     "LOC(0) out vec4 v_c0; LOC(1) out vec4 v_c1; LOC(2) out vec4 v_t0; LOC(3) out vec4 v_t1;\n"
-    "LOC(4) out vec4 v_t2; LOC(5) out vec4 v_t3;\n"
+    "LOC(4) out vec4 v_t2; LOC(5) out vec4 v_t3; LOC(6) out float v_fog;\n"
     "const float FMAX = 3.40282347e38;\n"
     /* fix_inf_mult: un producto que se pasa a infinito queda en el máximo con
      * su signo (así un 0 * resultado posterior no da NaN). Con clamp: una sola
@@ -360,11 +360,13 @@ bool vsh_glsl(const Nv2aVshProgram *p, char *buf, size_t n, uint16_t *in_mask)
     }
     put(&o, "void main() {\n%s", body);
     /* las salidas como en transform() y la posición como en el shader de siempre */
-    put(&o, "  v_c0 = %s; v_c1 = o4; v_t0 = o9; v_t1 = o10; v_t2 = o11; v_t3 = o12;\n", d0x ? "o3" : "vec4(1.0)");
+    put(&o, "  v_c0 = %s; v_c1 = o4; v_t0 = o9; v_t1 = o10; v_t2 = o11; v_t3 = o12; v_fog = o5.x;\n",
+        d0x ? "o3" : "vec4(1.0)");
     put(&o, "  float w = o0.w;\n"
             "  if (!(abs(w) > 1e-20) || isinf(w)) w = 1.0;\n"
             "  vec3 n = vec3(o0.x * u_vp.x - 1.0, o0.y * u_vp.y - 1.0, o0.z * u_vp.z - 1.0);\n"
             "  gl_Position = vec4(n * w, w);\n"
+            "  gl_PointSize = u_vp.w > 0.0 ? u_vp.w : max(o6.x, 1.0);\n" /* v0.18.70 */
             "}\n");
     if (o.full) {
         return false;

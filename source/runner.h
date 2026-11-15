@@ -58,6 +58,10 @@ typedef struct Runner {
     uint32_t kf_who[8];      /* v0.18.62: quién pide la hora (dirección de vuelta), los más */
     uint64_t kf_n[8];
     uint32_t kf_who2[8];     /* v0.18.68: y quién llamó a esa función ([ebp+4]) */
+    uint32_t spin_back;      /* v0.18.70: la hora pedida en bucle desde el mismo sitio */
+    uint64_t spin_ic;
+    unsigned spin_n;
+    uint64_t spin_skips;     /* esperas de esas acortadas */
     uint64_t kf_n2[8];
     uint64_t ns;             /* tiempo de CPU del intérprete */
     uint64_t quantum_left;   /* instrucciones hasta cambiar de hilo */

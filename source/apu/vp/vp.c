@@ -1981,12 +1981,14 @@ static void voice_process(MCPXAPUState *d, uint8_t *c,
         }
     }
 
+    bool binaural = false; /* XboxNX: el HRTF ya dejó la voz en estéreo */
     if (v < MCPX_HW_MAX_3D_VOICES && g_apu_config.hrtf) {
         uint16_t hrtf_handle =
             voice_get_mask_nolock(d, c, v, NV_PAVS_VOICE_CFG_HRTF_TARGET,
                            NV_PAVS_VOICE_CFG_HRTF_TARGET_HANDLE);
         if (hrtf_handle != HRTF_NULL_HANDLE) {
             hrtf_filter_process(&d->vp.filters[v].hrtf, samples, samples);
+            binaural = true;
         }
     }
 
@@ -2048,17 +2050,40 @@ static void voice_process(MCPXAPUState *d, uint8_t *c,
         }
 
         float g = 0.0f;
+        /* XboxNX v0.18.70: una voz mono va a la izquierda o a la derecha
+         * según a qué mixbins manda (los delanteros y traseros de cada lado,
+         * y los XTLK de las voces 3D); lo demás (centro, graves, efectos) va
+         * a los dos. Antes toda voz mono sonaba en el centro. */
+        float gl = 0.0f, gr = 0.0f, gc = 0.0f;
         for (int b = 0; b < 8; b++) {
             if (bin[b] == mp_bin) {
                 continue;
             }
             float hr = 1 << d->vp.submix_headroom[bin[b]];
-            g = fmax(g, attenuate(vol[b]) / hr);
+            float a = attenuate(vol[b]) / hr;
+            g = fmax(g, a);
+            switch (bin[b]) {
+            case 0: case 4: case 7: case 9:
+                gl = fmaxf(gl, a);
+                break;
+            case 1: case 5: case 8: case 10:
+                gr = fmaxf(gr, a);
+                break;
+            default:
+                gc = fmaxf(gc, a);
+                break;
+            }
         }
-        g *= ea_value;
+        float g0 = g, g1 = g;
+        if (channels == 1 && !binaural && (gl > 0.0f || gr > 0.0f)) {
+            g0 = fmaxf(gl, gc);
+            g1 = fmaxf(gr, gc);
+        }
+        g0 *= ea_value;
+        g1 *= ea_value;
         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
-            sample_buf[i][0] += g*samples[i][0];
-            sample_buf[i][1] += g*samples[i][1];
+            sample_buf[i][0] += g0*samples[i][0];
+            sample_buf[i][1] += g1*samples[i][1];
         }
     }
 }

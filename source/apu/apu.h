@@ -12,6 +12,7 @@ struct Kernel;
 typedef struct ApuStats {
     uint64_t frames, ep_frames, writes;
     uint64_t ns_busy;   /* v0.18.68: tiempo haciendo cuadros (VP + DSP) */
+    uint64_t ns_vp;     /* v0.18.70: de eso, las voces */
     uint64_t skipped;   /* cuadros que no se hicieron por ir más de 100 ms atrasado */
     uint64_t lag_ns;    /* lo atrasado que iba la última vez (tiempo del juego) */
     unsigned logs;
@@ -32,6 +33,10 @@ void apu_write(struct Kernel *k, uint32_t off, int size, uint32_t v);
 void apu_tick(struct Kernel *k);
 bool apu_next_frame(uint64_t *ns);
 bool apu_irq(void);
+bool apu_busy(void);
+/* Los DSP completos (true: los efectos del juego, muy lento en la Switch) o
+ * la mezcla directa de las voces. Vale desde el próximo apu_init. */
+void apu_set_dsp(bool on);
 const ApuStats *apu_stats(void);
 void apu_set_output(ApuOutFn fn, void *ctx);
 

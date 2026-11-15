@@ -108,6 +108,16 @@ static void (*p_glGetProgramBinary)(GLuint, GLsizei, GLsizei *, GLenum *, void *
 static void (*p_glProgramBinary)(GLuint, GLenum, const void *, GLsizei);
 static void (*p_glProgramParameteri)(GLuint, GLenum, GLint);
 static void (*p_glGetIntegerv)(GLenum, GLint *);
+/* v0.18.70, opcionales (si falta alguna, esa mejora no se usa): mipmaps y
+ * anisotropía, esténcil y desplazamiento de profundidad */
+static void (*p_glGenerateMipmap)(GLenum);
+static void (*p_glTexParameterf)(GLenum, GLenum, GLfloat);
+static const GLubyte *(*p_glGetStringi)(GLenum, GLuint);
+static void (*p_glGetFloatv)(GLenum, GLfloat *);
+static void (*p_glStencilFunc)(GLenum, GLint, GLuint);
+static void (*p_glStencilOp)(GLenum, GLenum, GLenum);
+static void (*p_glStencilMask)(GLuint);
+static void (*p_glPolygonOffset)(GLfloat, GLfloat);
 /* Opcionales (GL 4.1): programas por etapa. El fragment shader (los combiners
  * interpretados, grande) se compila UNA vez y cada vertex program del juego
  * es un programa aparte que se junta con él en un "pipeline". Sin esto, cada
@@ -168,7 +178,11 @@ typedef struct Surf {
     unsigned used;     /* cuadro en que se usó */
     uint8_t params;    /* filtro y repetición puestos al usarla de textura (1 + clave) */
     bool swz;          /* v0.18.65: en la RAM va con swizzle (en la GPU, textura normal) */
+    bool alias;        /* v0.18.70: hay otra superficie en la misma dirección (otro tamaño o tipo) */
+    uint32_t seq;      /* v0.18.70: cuándo se dibujó en ella por última vez (la más nueva manda) */
 } Surf;
+
+static uint32_t g_surf_seq;
 
 /* v0.18.65: swizzle de las superficies (como las texturas del NV2A: los
  * bits de x e y intercalados; el lado mayor pone los que sobran arriba). */
@@ -285,8 +299,16 @@ typedef struct TexEnt {
     GLuint tex;
     unsigned checked, used;
     bool valid;
-    uint8_t params; /* filtro y repetición puestos (1 + clave; 0: ninguno) */
+    bool mips;       /* v0.18.70: ya tiene sus niveles reducidos (glGenerateMipmap) */
+    uint16_t params; /* filtro y repetición puestos (1 + clave; 0: ninguno) */
 } TexEnt;
+
+/* v0.18.70: la anisotropía que da el driver (1: ninguna) */
+static float g_aniso_max = 1.0f;
+#ifndef GL_TEXTURE_MAX_ANISOTROPY_EXT
+#define GL_TEXTURE_MAX_ANISOTROPY_EXT 0x84FE
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT 0x84FF
+#endif
 
 /* Un programa de GL: el de siempre (vértices ya transformados por la CPU) o
  * uno por cada vertex program del juego (4c, el vertex shader en el GPU).
@@ -299,6 +321,7 @@ typedef struct Prog {
     uint64_t key;   /* el hash del vertex program (0: el de siempre) */
     bool bad;       /* no compiló: lo hace la CPU */
     unsigned used;
+    GLint u_fogp, u_fc, u_misc;
     GLint u_vp, u_tmode, u_tcube, u_tscale, u_cctl, u_fcw0, u_fcw1, u_icw, u_ocw, u_aicw, u_aocw, u_f0, u_f1, u_fog,
         u_atest, u_afunc, u_aref, u_s2d[4], u_scb[4], u_c;
     uint8_t ulen[U_SLOTS];
@@ -375,22 +398,24 @@ static const char *k_vs =
     "layout(location=4) in vec4 a_t1;\n"
     "layout(location=5) in vec4 a_t2;\n"
     "layout(location=6) in vec4 a_t3;\n"
+    "layout(location=7) in float a_fog;\n"
     "uniform vec4 u_vp;\n" /* 2/W, 2/H, 2/zmax */
     "LOC(0) out vec4 v_c0; LOC(1) out vec4 v_c1; LOC(2) out vec4 v_t0; LOC(3) out vec4 v_t1;\n"
-    "LOC(4) out vec4 v_t2; LOC(5) out vec4 v_t3;\n"
+    "LOC(4) out vec4 v_t2; LOC(5) out vec4 v_t3; LOC(6) out float v_fog;\n"
     "void main() {\n"
     "  float w = a_pos.w;\n"
     "  if (!(abs(w) > 1e-20) || isinf(w)) w = 1.0;\n"
     "  vec3 n = vec3(a_pos.x * u_vp.x - 1.0, a_pos.y * u_vp.y - 1.0, a_pos.z * u_vp.z - 1.0);\n"
     "  gl_Position = vec4(n * w, w);\n"
-    "  v_c0 = a_c0; v_c1 = a_c1; v_t0 = a_t0; v_t1 = a_t1; v_t2 = a_t2; v_t3 = a_t3;\n"
+    "  gl_PointSize = max(abs(u_vp.w), 1.0);\n" /* v0.18.70: los puntos */
+    "  v_c0 = a_c0; v_c1 = a_c1; v_t0 = a_t0; v_t1 = a_t1; v_t2 = a_t2; v_t3 = a_t3; v_fog = a_fog;\n"
     "}\n";
 
 /* Los register combiners interpretados (lo mismo que combine() de nv2a_sw.c). */
 static const char *k_fs =
     "#version 330 core\n"
     "LOC(0) in vec4 v_c0; LOC(1) in vec4 v_c1; LOC(2) in vec4 v_t0; LOC(3) in vec4 v_t1;\n"
-    "LOC(4) in vec4 v_t2; LOC(5) in vec4 v_t3;\n"
+    "LOC(4) in vec4 v_t2; LOC(5) in vec4 v_t3; LOC(6) in float v_fog;\n"
     "out vec4 o_color;\n"
     "uniform sampler2D s2d0; uniform sampler2D s2d1; uniform sampler2D s2d2; uniform sampler2D s2d3;\n"
     "uniform samplerCube scb0; uniform samplerCube scb1; uniform samplerCube scb2; uniform samplerCube scb3;\n"
@@ -401,6 +426,9 @@ static const char *k_fs =
     "uniform uint u_icw[8]; uniform uint u_ocw[8]; uniform uint u_aicw[8]; uniform uint u_aocw[8];\n"
     "uniform vec4 u_f0[8]; uniform vec4 u_f1[8];\n"
     "uniform vec4 u_fog;\n"
+    "uniform vec4 u_fogp;\n" /* v0.18.70: parámetros de la niebla y su modo (0: sin niebla) */
+    "uniform vec4 u_fc[2];\n" /* las constantes del combinador final */
+    "uniform int u_misc[2];\n" /* v0.18.70: x: especular (0 apagado, 1 sí, 2 sí con alfa 1); y: sprite de puntos */
     "uniform int u_atest; uniform uint u_afunc; uniform float u_aref;\n"
     "vec4 R[16];\n"
     "float map_in(float x, uint m) {\n"
@@ -442,11 +470,21 @@ static const char *k_fs =
     "void main() {\n"
     "  for (int i = 0; i < 16; i++) R[i] = vec4(0.0);\n"
     "  R[4] = clamp(v_c0, 0.0, 1.0); R[5] = clamp(v_c1, 0.0, 1.0);\n"
-    "  R[3] = vec4(u_fog.rgb, 1.0);\n"
+    "  if (u_misc[0] == 0) R[5] = vec4(0.0, 0.0, 0.0, 1.0); else if (u_misc[0] == 2) R[5].a = 1.0;\n"
+    "  float fg = 1.0;\n"
+    "  if (u_fogp.w != 0.0) {\n"
+    "    float fd = isinf(v_fog) || isnan(v_fog) ? 0.0 : v_fog;\n"
+    "    if (u_fogp.w < 1.5) fg = u_fogp.x + fd * u_fogp.y - 1.0;\n"
+    "    else if (u_fogp.w < 2.5) fg = u_fogp.x + exp2(fd * u_fogp.y * 16.0) - 1.5;\n"
+    "    else fg = u_fogp.x + exp2(-fd * fd * u_fogp.y * u_fogp.y * 32.0) - 1.5;\n"
+    "    if (u_fogp.z != 0.0) fg = abs(fg);\n"
+    "    fg = clamp(fg, 0.0, 1.0);\n"
+    "  }\n"
+    "  R[3] = vec4(u_fog.rgb, fg);\n"
     "  if (u_tmode[0] != 0) R[8] = stage(u_tmode[0], u_tcube[0], u_tscale[0], v_t0, s2d0, scb0);\n"
     "  if (u_tmode[1] != 0) R[9] = stage(u_tmode[1], u_tcube[1], u_tscale[1], v_t1, s2d1, scb1);\n"
     "  if (u_tmode[2] != 0) R[10] = stage(u_tmode[2], u_tcube[2], u_tscale[2], v_t2, s2d2, scb2);\n"
-    "  if (u_tmode[3] != 0) R[11] = stage(u_tmode[3], u_tcube[3], u_tscale[3], v_t3, s2d3, scb3);\n"
+    "  if (u_tmode[3] != 0) R[11] = stage(u_tmode[3], u_tcube[3], u_tscale[3], u_misc[1] != 0 ? vec4(gl_PointCoord, 1.0, 1.0) : v_t3, s2d3, scb3);\n"
     "  R[12].a = R[8].a;\n"
     "  vec4 c;\n"
     "  uint n = u_cctl & 0xFFu;\n"
@@ -479,7 +517,11 @@ static const char *k_fs =
     "      if (aab_r != 0u) R[aab_r].a = aab;\n"
     "      if (asum_r != 0u) R[asum_r].a = asum;\n"
     "    }\n"
-    "    R[14].rgb = clamp(R[5].rgb, 0.0, 1.0) + clamp(R[12].rgb, 0.0, 1.0);\n"
+    "    R[1] = u_fc[0]; R[2] = u_fc[1];\n"
+    "    vec3 sv1 = clamp(R[5].rgb, 0.0, 1.0), sr0 = clamp(R[12].rgb, 0.0, 1.0);\n"
+    "    if ((u_fcw1 & 0x40u) != 0u) sv1 = vec3(1.0) - sv1;\n"
+    "    if ((u_fcw1 & 0x20u) != 0u) sr0 = vec3(1.0) - sr0;\n"
+    "    R[14].rgb = sv1 + sr0;\n"
     "    vec3 e = in3(u_fcw1 >> 24), f = in3((u_fcw1 >> 16) & 0xFFu);\n"
     "    R[15].rgb = e * f;\n"
     "    vec3 A = clamp(in3((u_fcw0 >> 24) & 0x3Fu), 0.0, 1.0);\n"
@@ -522,7 +564,7 @@ static GLuint compile(GLenum type, const char *src)
         G.sso ? "#version 330 core\n#extension GL_ARB_separate_shader_objects : enable\n"
                 "#define LOC(n) layout(location = n)\n"
               : "#version 330 core\n#define LOC(n)\n",
-        G.sso && type == GL_VERTEX_SHADER ? "out gl_PerVertex { vec4 gl_Position; };\n" : "", src};
+        G.sso && type == GL_VERTEX_SHADER ? "out gl_PerVertex { vec4 gl_Position; float gl_PointSize; };\n" : "", src};
     GLuint s = glCreateShader(type);
     glShaderSource(s, 3, parts, NULL);
     glCompileShader(s);
@@ -613,6 +655,7 @@ static void fs_locs(Prog *F, GLuint prog)
 #define U(f) F->f = glGetUniformLocation(prog, #f)
     U(u_tmode); U(u_tcube); U(u_tscale); U(u_cctl); U(u_fcw0); U(u_fcw1); U(u_icw); U(u_ocw);
     U(u_aicw); U(u_aocw); U(u_f0); U(u_f1); U(u_fog); U(u_atest); U(u_afunc); U(u_aref);
+    U(u_fogp); U(u_fc); U(u_misc);
 #undef U
     static const char *s2[4] = {"s2d0", "s2d1", "s2d2", "s2d3"}, *sc[4] = {"scb0", "scb1", "scb2", "scb3"};
     for (int i = 0; i < 4; i++) {
@@ -821,6 +864,14 @@ static bool init_inner(void *nwin)
     *(void **)&p_glProgramBinary = egl_proc("glProgramBinary");
     *(void **)&p_glProgramParameteri = egl_proc("glProgramParameteri");
     *(void **)&p_glGetIntegerv = egl_proc("glGetIntegerv");
+    *(void **)&p_glGenerateMipmap = egl_proc("glGenerateMipmap");
+    *(void **)&p_glTexParameterf = egl_proc("glTexParameterf");
+    *(void **)&p_glGetStringi = egl_proc("glGetStringi");
+    *(void **)&p_glGetFloatv = egl_proc("glGetFloatv");
+    *(void **)&p_glStencilFunc = egl_proc("glStencilFunc");
+    *(void **)&p_glStencilOp = egl_proc("glStencilOp");
+    *(void **)&p_glStencilMask = egl_proc("glStencilMask");
+    *(void **)&p_glPolygonOffset = egl_proc("glPolygonOffset");
     *(void **)&p_glGenProgramPipelines = egl_proc("glGenProgramPipelines");
     *(void **)&p_glDeleteProgramPipelines = egl_proc("glDeleteProgramPipelines");
     *(void **)&p_glBindProgramPipeline = egl_proc("glBindProgramPipeline");
@@ -856,7 +907,7 @@ static bool init_inner(void *nwin)
         h = fnv(h, r ? r : "", r ? strlen(r) : 0);
         h = fnv(h, v ? v : "", v ? strlen(v) : 0);
         h = fnv(h, k_fs, strlen(k_fs));
-        h = fnv(h, "vsh2", 4); /* subir si cambia vsh_glsl */
+        h = fnv(h, "vsh3", 4); /* subir si cambia vsh_glsl (v0.18.70: niebla y puntos) */
         G.drv_hash = h;
     }
     PASO("shaders");
@@ -913,12 +964,35 @@ static bool init_inner(void *nwin)
         glEnableVertexAttribArray((GLuint)i);
         glVertexAttribPointer((GLuint)i, 4, GL_FLOAT, GL_FALSE, stride, (const void *)(uintptr_t)(off[i] * 4));
     }
+    glEnable(0x8642); /* v0.18.70: GL_PROGRAM_POINT_SIZE (el tamaño de los puntos lo da el vertex shader) */
+    while (glGetError() != GL_NO_ERROR) {
+    }
+    glEnableVertexAttribArray(7); /* v0.18.70: la niebla (el float 28) */
+    glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, stride, (const void *)(uintptr_t)(28 * 4));
     glBindVertexArray(0);
     glGenVertexArrays(1, &G.vao2);
     glGenBuffers(1, &G.vbo2);
     G.vao2_mask = 0;
     snprintf(G.info, sizeof(G.info), "%s · %s", (const char *)glGetString(GL_RENDERER),
              (const char *)glGetString(GL_VERSION));
+    {
+        /* v0.18.70: ¿hay filtro anisotrópico? */
+        GLint ne = 0;
+        g_aniso_max = 1.0f;
+        if (p_glGetIntegerv && p_glGetStringi && p_glGetFloatv && p_glTexParameterf) {
+            p_glGetIntegerv(GL_NUM_EXTENSIONS, &ne);
+        }
+        for (GLint i = 0; i < ne; i++) {
+            const char *x = (const char *)p_glGetStringi(GL_EXTENSIONS, (GLuint)i);
+            if (x && (!strcmp(x, "GL_EXT_texture_filter_anisotropic") || !strcmp(x, "GL_ARB_texture_filter_anisotropic"))) {
+                GLfloat m = 1.0f;
+                p_glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &m);
+                g_aniso_max = m > 1.0f ? m : 1.0f;
+                break;
+            }
+        }
+        G.st.aniso_max = (unsigned)g_aniso_max;
+    }
     G.ready = true;
     G.on = true;
     return true;
@@ -940,6 +1014,10 @@ static struct {
     int dmask;
     unsigned cmask;
     float bcol[4];
+    /* v0.18.70 (caps: 32 desplazamiento de profundidad, 64 esténcil) */
+    float poff[2];
+    uint32_t st[7]; /* función, referencia, máscara de la prueba, máscara de escritura, 3 operaciones */
+    bool st_ok;
 } SC;
 
 static void sc_check(void)
@@ -952,6 +1030,8 @@ static void sc_check(void)
         SC.cmask = 0xFFFFFFFFu;
         SC.vp[2] = SC.sc[2] = -1;
         SC.bcol[0] = -1;
+        SC.poff[0] = SC.poff[1] = -1e30f;
+        SC.st_ok = false;
         SC.valid = true;
     }
 }
@@ -1469,14 +1549,16 @@ static bool quad_ibo(int which, uint32_t n)
     return true;
 }
 
+/* v0.18.70: en una dirección puede haber varias (ver surf_get): la última en la que se dibujó. */
 static int surf_find(uint32_t pa)
 {
+    int best = -1;
     for (int i = 0; i < MAX_SURF; i++) {
-        if (G.surf[i].tex && G.surf[i].pa == pa) {
-            return i;
+        if (G.surf[i].tex && G.surf[i].pa == pa && (best < 0 || G.surf[i].seq > G.surf[best].seq)) {
+            best = i;
         }
     }
-    return -1;
+    return best;
 }
 
 /* v0.18.65: en la misma dirección puede haber una lineal y otra con swizzle
@@ -1485,12 +1567,29 @@ static int surf_find(uint32_t pa)
  * otra la pasaba a la RAM esperando cada vez). */
 static int surf_find_t(uint32_t pa, bool swz)
 {
+    int best = -1;
     for (int i = 0; i < MAX_SURF; i++) {
-        if (G.surf[i].tex && G.surf[i].pa == pa && G.surf[i].swz == swz) {
-            return i;
+        if (G.surf[i].tex && G.surf[i].pa == pa && G.surf[i].swz == swz &&
+            (best < 0 || G.surf[i].seq > G.surf[best].seq)) {
+            best = i;
         }
     }
-    return -1;
+    return best;
+}
+
+/* Se dibujó en la superficie: la GPU tiene lo nuevo, y lo que tuvieran las
+ * otras de la misma dirección ya no vale (no hay que pasarlo a la RAM). */
+static void surf_wrote(Surf *s)
+{
+    s->dirty = true;
+    s->seq = ++g_surf_seq;
+    if (s->alias) {
+        for (int j = 0; j < MAX_SURF; j++) {
+            if (&G.surf[j] != s && G.surf[j].tex && G.surf[j].pa == s->pa) {
+                G.surf[j].dirty = false;
+            }
+        }
+    }
 }
 
 /* Etapa 5: qué textura tiene cada unidad (para no volver a ponerla en cada
@@ -1909,10 +2008,30 @@ static void surf_free(int i)
 static int surf_get(uint32_t pa, uint32_t pitch, int h, unsigned fmt, bool swz)
 {
     int w = (int)(pitch / 4);
-    int i = surf_find_t(pa, swz);
+    /* v0.18.70: Halo 2 usa la misma memoria para destinos de otro ancho
+     * (128x128, luego 160x120, y de vuelta): cada cambio pasaba la anterior a
+     * la RAM esperando a la GPU (~45 ms, hasta 200 veces cada 30 s) para
+     * subirla otra vez con el ancho nuevo, donde es basura. Ahora se guarda
+     * una por cada ancho (y alto, si va con swizzle) y cada una se busca por
+     * el suyo; la última en la que se dibujó es la que vale para la RAM
+     * (surf_wrote). Con el mismo ancho, más alta o de otro formato, como
+     * antes: a la RAM y de nuevo (ahí lo dibujado sí sigue valiendo). */
+    int i = -1;
+    bool others = false;
+    for (int j = 0; j < MAX_SURF; j++) {
+        const Surf *q = &G.surf[j];
+        if (!q->tex || q->pa != pa) {
+            continue;
+        }
+        if (q->swz == swz && q->pitch == pitch && (!swz || q->h == h)) {
+            i = j;
+        } else {
+            others = true;
+        }
+    }
     if (i >= 0) {
         Surf *s = &G.surf[i];
-        if (s->pitch == pitch && s->h >= h && s->fmt == fmt && s->swz == swz && (!swz || s->h == h)) {
+        if (s->h >= h && s->fmt == fmt) {
             s->used = G.frame;
             return i;
         }
@@ -1920,7 +2039,10 @@ static int surf_get(uint32_t pa, uint32_t pitch, int h, unsigned fmt, bool swz)
         G.st.sfl_chg_old = (s->pitch / 4) << 16 | (uint32_t)s->h | (s->swz ? 0x8000u : 0);
         G.st.sfl_chg_new = (pitch / 4) << 16 | (uint32_t)h | (swz ? 0x8000u : 0);
         g_sfl_why = 3;
-        surf_free(i); /* otro tamaño: a la RAM y de nuevo */
+        surf_free(i); /* más alta o de otro formato: a la RAM y de nuevo */
+    }
+    if (others) {
+        G.st.surf_alias++;
     }
     int best = -1;
     for (i = 0; i < MAX_SURF; i++) {
@@ -1945,6 +2067,14 @@ static int surf_get(uint32_t pa, uint32_t pitch, int h, unsigned fmt, bool swz)
     s->fmt = fmt;
     s->swz = swz;
     s->used = G.frame;
+    s->alias = false;
+    s->seq = 0;
+    for (int j = 0; j < MAX_SURF; j++) { /* las demás de la misma dirección (best todavía sin textura) */
+        if (G.surf[j].tex && G.surf[j].pa == pa) {
+            G.surf[j].alias = true;
+            s->alias = true;
+        }
+    }
     glGenTextures(1, &s->tex);
     tex_bind(GL_TEXTURE_2D, s->tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -2041,6 +2171,9 @@ static GLuint fbo_get(int si, int zi)
         z->pend = false;
         glDisable(GL_SCISSOR_TEST);
         glDepthMask(GL_TRUE);
+        if (p_glStencilMask) {
+            p_glStencilMask(0xFF);
+        }
         glClearDepth(z->pend_z);
         glClearStencil(z->pend_s);
         glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
@@ -2277,14 +2410,39 @@ static GLuint tex_get(const GpuTex *t, float scale[2])
             }
             e->hash = h;
             e->valid = true;
+            e->mips = false;
             G.st.uploads++;
             G.st.ns_tex += now_ns() - tt;
             g_zone = zt;
         }
     }
-    uint8_t key = (uint8_t)(1 + ((t->bilinear ? 1 : 0) | wkey(t->au) << 1 | wkey(t->av) << 3 | (t->cube ? 32 : 0)));
+    /* v0.18.70: los niveles reducidos de la textura (el juego pide filtrar
+     * con ellos casi todas: sin ellos, lo lejano se veía con granos y
+     * brillos que saltan). Los hace la GPU una vez por textura subida. */
+    unsigned mip = t->cube || !p_glGenerateMipmap ? 0u : t->mip;
+    if (mip && !e->mips) {
+        uint64_t tt = now_ns();
+        p_glGenerateMipmap(GL_TEXTURE_2D);
+        e->mips = true;
+        G.st.mipmaps++;
+        G.st.ns_tex += now_ns() - tt;
+    }
+    unsigned an = mip == 2 && g_aniso_max > 1.0f ? 1u : 0u;
+    uint16_t key = (uint16_t)(1 + ((t->bilinear ? 1 : 0) | wkey(t->au) << 1 | wkey(t->av) << 3 | (t->cube ? 32 : 0) |
+                                   mip << 6 | an << 8));
     if (e->params != key) { /* etapa 5: solo si cambió */
-        glTexParameteri(target, GL_TEXTURE_MIN_FILTER, t->bilinear ? GL_LINEAR : GL_NEAREST);
+        GLint minf = t->bilinear ? GL_LINEAR : GL_NEAREST;
+        if (mip == 2) {
+            minf = t->bilinear ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_LINEAR;
+        } else if (mip == 1) {
+            minf = t->bilinear ? GL_LINEAR_MIPMAP_NEAREST : GL_NEAREST_MIPMAP_NEAREST;
+        }
+        glTexParameteri(target, GL_TEXTURE_MIN_FILTER, minf);
+        if (g_aniso_max > 1.0f && !t->cube) {
+            /* suelos y paredes vistos de lado: hasta 4 muestras a lo largo */
+            float a = an ? (g_aniso_max < 4.0f ? g_aniso_max : 4.0f) : 1.0f;
+            p_glTexParameterf(target, GL_TEXTURE_MAX_ANISOTROPY_EXT, a);
+        }
         glTexParameteri(target, GL_TEXTURE_MAG_FILTER, t->bilinear ? GL_LINEAR : GL_NEAREST);
         if (t->cube) {
             glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -2377,14 +2535,47 @@ static uint32_t impl_query_collect(void)
 
 static void impl_query_reset(void) { g_qn = 0; }
 
+/* Las operaciones del esténcil del NV2A (las de D3D con los valores de GL). */
+static GLenum stencil_op(uint32_t v)
+{
+    switch (v) {
+    case 0x0000: return GL_ZERO;
+    case 0x1E01: return GL_REPLACE;
+    case 0x1E02: return GL_INCR;
+    case 0x1E03: return GL_DECR;
+    case 0x150A: return GL_INVERT;
+    case 0x8507: return GL_INCR_WRAP;
+    case 0x8508: return GL_DECR_WRAP;
+    default: return GL_KEEP; /* 0x1E00 */
+    }
+}
+
+/* El tipo de primitiva de GL (los quads ya vienen en triángulos con índices). */
+static GLenum prim_mode(unsigned p)
+{
+    switch (p) {
+    case 1: return GL_POINTS;
+    case 2: return GL_LINES;
+    case 3: return GL_LINE_LOOP;
+    case 4: return GL_LINE_STRIP;
+    case 6: return GL_TRIANGLE_STRIP;
+    case 7:
+    case 10: return GL_TRIANGLE_FAN;
+    default: return GL_TRIANGLES;
+    }
+}
+
 static bool gpu_draw_(const GpuDraw *d)
 {
     if (!G.on || !G.ram || d->fmt < 4 || d->fmt > 8 || d->w <= 0 || d->h <= 0) {
         G.st.fallbacks++;
         return false;
     }
-    if (d->prim < 5 || d->prim > 10 || d->nverts < 3) {
-        return true; /* puntos y líneas: todavía no (el software tampoco) */
+    if (d->prim < 1 || d->prim > 10 || d->nverts < (d->prim == 1 ? 1u : d->prim < 5 ? 2u : 3u)) {
+        return true;
+    }
+    if (d->prim < 5) {
+        G.st.points_lines++; /* v0.18.70: puntos y líneas (antes no se dibujaban) */
     }
     Prog *P = &G.progs[0];
     g_zone = Z_GL_PROG;
@@ -2479,6 +2670,33 @@ static bool gpu_draw_(const GpuDraw *d)
                     (d->cmask & 0x01000000u) != 0);
         SC.cmask = d->cmask;
     }
+    /* v0.18.70: el desplazamiento de profundidad (Halo 2 dibuja así las
+     * marcas sobre paredes y suelo, con -200 unidades: sin él quedaban a la
+     * misma profundidad que la pared y salían a medias o no salían) */
+    if (d->poff && zi >= 0 && p_glPolygonOffset) {
+        sc_cap(GL_POLYGON_OFFSET_FILL, 32, true);
+        if (SC.poff[0] != d->poff_factor || SC.poff[1] != d->poff_bias) {
+            p_glPolygonOffset(d->poff_factor, d->poff_bias);
+            SC.poff[0] = d->poff_factor, SC.poff[1] = d->poff_bias;
+        }
+    } else {
+        sc_cap(GL_POLYGON_OFFSET_FILL, 32, false);
+    }
+    /* y el esténcil (con Z24S8): marcar píxeles y dibujar solo en los marcados */
+    if (d->stest && zi >= 0 && d->zfmt == 2 && p_glStencilFunc && p_glStencilOp && p_glStencilMask) {
+        sc_cap(GL_STENCIL_TEST, 64, true);
+        uint32_t st[7] = {d->sfunc, d->sref & 0xFF, d->sfmask & 0xFF, d->swrite ? d->smask & 0xFF : 0,
+                          d->sop_fail, d->sop_zfail, d->sop_zpass};
+        if (!SC.st_ok || memcmp(SC.st, st, sizeof(st))) {
+            p_glStencilFunc(st[0] >= 0x200 && st[0] <= 0x207 ? st[0] : 0x207, (GLint)st[1], st[2]);
+            p_glStencilMask(st[3]);
+            p_glStencilOp(stencil_op(st[4]), stencil_op(st[5]), stencil_op(st[6]));
+            memcpy(SC.st, st, sizeof(st));
+            SC.st_ok = true;
+        }
+    } else {
+        sc_cap(GL_STENCIL_TEST, 64, false);
+    }
     /* texturas */
     if (SC.prog != P->prog) {
         prog_use(P);
@@ -2512,7 +2730,7 @@ static bool gpu_draw_(const GpuDraw *d)
     }
     g_zone = Z_GL_UNIF;
     /* uniforms (solo los que cambiaron) */
-    float vp[4] = {2.0f / (float)s->w, 2.0f / (float)s->h, d->zmax > 0 ? 2.0f / d->zmax : 1.0f, 0};
+    float vp[4] = {2.0f / (float)s->w, 2.0f / (float)s->h, d->zmax > 0 ? 2.0f / d->zmax : 1.0f, d->psize};
     Prog *F = G.sso ? &G.fsp : P; /* de quién son los uniforms del fragment shader */
     GLuint vp_ = P->prog, fp = F->prog;
     if (sc_u(P, 0, vp, sizeof(vp))) pu4fv(vp_, P->u_vp, 1, vp);
@@ -2539,6 +2757,30 @@ static bool gpu_draw_(const GpuDraw *d)
         float fog[4];
         argb_vec(d->fog_color, fog);
         pu4fv(fp, F->u_fog, 1, fog);
+    }
+    {
+        /* v0.18.70: la niebla (x, y: parámetros; z: con valor absoluto; w: 0
+         * sin niebla, 1 lineal, 2 exp, 3 exp2) y las constantes del final */
+        float fp4[4] = {d->fog_p[0], d->fog_p[1], 0, 0};
+        if (d->fog) {
+            uint32_t fm = d->fog_mode;
+            fp4[3] = fm == 0x800 || fm == 0x802 ? 2.0f : fm == 0x801 || fm == 0x803 ? 3.0f : 1.0f;
+            fp4[2] = fm == 0x802 || fm == 0x803 || fm == 0x804 ? 1.0f : 0.0f;
+        }
+        if (sc_u(F, 17, fp4, sizeof(fp4))) pu4fv(fp, F->u_fogp, 1, fp4);
+        uint32_t fcs[2] = {d->fc0, d->fc1};
+        if (sc_u(F, 18, fcs, sizeof(fcs))) {
+            float fc[8];
+            argb_vec(d->fc0, &fc[0]);
+            argb_vec(d->fc1, &fc[4]);
+            pu4fv(fp, F->u_fc, 2, fc);
+        }
+    }
+    {
+        int misc[2] = {d->spec ? (d->spec_a1 ? 2 : 1) : 0, d->prim == 1 && d->psprite};
+        if (sc_u(F, 19, misc, sizeof(misc)) && F->u_misc >= 0) {
+            pu1iv(fp, F->u_misc, 2, misc);
+        }
     }
     int at = d->atest;
     if (sc_u(F, 14, &at, 4)) pu1i(fp, F->u_atest, d->atest);
@@ -2616,9 +2858,9 @@ static bool gpu_draw_(const GpuDraw *d)
                 memcpy(ip, d->vs_idx, ib);
                 glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
                 G.iring_pos = pos + ib;
-                GLenum mode = d->prim == 6 ? GL_TRIANGLE_STRIP : (d->prim == 7 || d->prim == 10) ? GL_TRIANGLE_FAN : GL_TRIANGLES;
+                GLenum mode = prim_mode(d->prim);
                 glDrawElementsBaseVertex(mode, (GLsizei)d->vs_nidx, GL_UNSIGNED_INT, (const void *)(uintptr_t)pos, f0);
-                s->dirty = true;
+                surf_wrote(s);
                 G.st.draws++;
                 G.st.indexed++;
                 G.st.ns_call += now_ns() - tcall;
@@ -2629,15 +2871,19 @@ static bool gpu_draw_(const GpuDraw *d)
         /* sin anillo: como antes con glBufferData */
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, G.ibo);
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)ib, d->vs_idx, GL_STREAM_DRAW);
-        GLenum mode = d->prim == 6 ? GL_TRIANGLE_STRIP : (d->prim == 7 || d->prim == 10) ? GL_TRIANGLE_FAN : GL_TRIANGLES;
+        GLenum mode = prim_mode(d->prim);
         glDrawElementsBaseVertex(mode, (GLsizei)d->vs_nidx, GL_UNSIGNED_INT, 0, f0);
-        s->dirty = true;
+        surf_wrote(s);
         G.st.draws++;
         G.st.indexed++;
         G.st.ns_call += now_ns() - tcall;
         return true;
     }
     switch (d->prim) {
+    case 1: glDrawArrays(GL_POINTS, f0, (GLsizei)n); break;
+    case 2: glDrawArrays(GL_LINES, f0, (GLsizei)(n - n % 2)); break;
+    case 3: glDrawArrays(GL_LINE_LOOP, f0, (GLsizei)n); break;
+    case 4: glDrawArrays(GL_LINE_STRIP, f0, (GLsizei)n); break;
     case 5: glDrawArrays(GL_TRIANGLES, f0, (GLsizei)(n - n % 3)); break;
     case 6: glDrawArrays(GL_TRIANGLE_STRIP, f0, (GLsizei)n); break;
     case 7:
@@ -2679,7 +2925,7 @@ static bool gpu_draw_(const GpuDraw *d)
     }
     default: break;
     }
-    s->dirty = true; /* el VAO queda puesto para el dibujo siguiente */
+    surf_wrote(s); /* el VAO queda puesto para el dibujo siguiente */
     G.st.draws++;
     G.st.ns_call += now_ns() - tcall;
     return true;
@@ -2754,7 +3000,7 @@ static bool impl_clear_color(uint32_t pa, uint32_t pitch, int h, int x0, int y0,
     argb_vec(argb, c);
     glClearColor(c[0], c[1], c[2], c[3]);
     glClear(GL_COLOR_BUFFER_BIT);
-    s->dirty = true;
+    surf_wrote(s);
     G.st.clears_c++;
     return true;
 }
@@ -2816,6 +3062,10 @@ static bool impl_clear_zeta(uint32_t pa, uint32_t zpitch, int h, int x0, int y0,
         bits |= GL_DEPTH_BUFFER_BIT;
     }
     if (flags & 2) {
+        if (p_glStencilMask) {
+            p_glStencilMask(0xFF); /* v0.18.70: los dibujos ponen la suya */
+        }
+        SC.st_ok = false;
         glClearStencil((GLint)(value & 0xFF));
         bits |= GL_STENCIL_BUFFER_BIT;
     }

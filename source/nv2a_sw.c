@@ -67,6 +67,10 @@ static struct {
     /* combiners */
     uint32_t c_icw[8], a_icw[8], c_ocw[8], a_ocw[8], factor0[8], factor1[8], cctl, fcw0, fcw1;
     uint32_t fog_color;
+    /* v0.18.70 */
+    uint32_t fc0, fc1, fog_en, fog_mode, fog_p[3], poff, poff_factor, poff_bias, control0;
+    uint32_t st_en, st_mask, st_func, st_ref, st_fmask, st_fail, st_zfail, st_zpass;
+    uint32_t spec_en, light_ctl, pt_params, pt_smooth, pt_size;
     /* rasterización */
     bool blend, atest, dtest, dmask, cull;
     uint32_t sfac, dfac, beq, afunc, aref, dfunc, cull_face, front_face, cmask, bcolor;
@@ -830,8 +834,19 @@ static void combine(float R[16][4], float out[4])
         }
     }
     /* el combinador final: A*B + (1-A)*C + D, alfa G */
+    /* v0.18.70: sus constantes C0 y C1 son las de SET_SPECULAR_FOG_FACTOR
+     * (no las de la última etapa), y V1 + R0 puede llevar cada uno invertido */
+    unpack_argb(S.fc0, R[1]);
+    unpack_argb(S.fc1, R[2]);
     for (int i = 0; i < 3; i++) {
-        R[14][i] = clamp01(R[5][i]) + clamp01(R[12][i]); /* V1 + R0 */
+        float v1 = clamp01(R[5][i]), r0 = clamp01(R[12][i]);
+        if (S.fcw1 & 0x40) {
+            v1 = 1 - v1;
+        }
+        if (S.fcw1 & 0x20) {
+            r0 = 1 - r0;
+        }
+        R[14][i] = v1 + r0; /* V1 + R0 */
     }
     float e[3], f[3];
     comb_in(R, S.fcw1 >> 24, true, e);
@@ -987,6 +1002,11 @@ static void shade(const Target *t, int x, int y, const float l[3], const OutVert
     for (int i = 0; i < 4; i++) {
         R[4][i] = clamp01(l[0] * v[0]->col[0][i] + l[1] * v[1]->col[0][i] + l[2] * v[2]->col[0][i]);
         R[5][i] = clamp01(l[0] * v[0]->col[1][i] + l[1] * v[1]->col[1][i] + l[2] * v[2]->col[1][i]);
+    }
+    if (!S.spec_en) { /* v0.18.70: como en la GPU */
+        R[5][0] = R[5][1] = R[5][2] = 0, R[5][3] = 1;
+    } else if (!(S.light_ctl & (1u << 17))) {
+        R[5][3] = 1;
     }
     unpack_argb(S.fog_color, R[3]);
     R[3][3] = 1; /* sin niebla todavía */
@@ -1646,7 +1666,7 @@ static bool grow(void **p, size_t *cap, size_t need, size_t elem)
 static bool pk_build(GpuDraw *d)
 {
     unsigned prim = S.prim, n = g_nidx;
-    if (prim < 5 || prim > 10 || !n) {
+    if (prim < 1 || prim > 10 || !n) {
         return false;
     }
     uint32_t mn = 0xFFFFFFFFu, mx = 0;
@@ -1745,6 +1765,8 @@ static bool pk_build(GpuDraw *d)
             cnt = n;
             if (prim == 5) {
                 cnt -= cnt % 3;
+            } else if (prim == 2) {
+                cnt -= cnt % 2;
             }
         }
         d->vs_idx = g_tidx;
@@ -1796,6 +1818,24 @@ static bool gpu_try(const Target *t, const OutVert *ov)
     d.sfac = S.sfac, d.dfac = S.dfac, d.beq = S.beq, d.bcolor = S.bcolor, d.dfunc = S.dfunc;
     d.cull_face = S.cull_face, d.front_face = S.front_face, d.cmask = S.cmask, d.afunc = S.afunc, d.aref = S.aref;
     d.cctl = S.cctl, d.fcw0 = S.fcw0, d.fcw1 = S.fcw1, d.fog_color = S.fog_color;
+    d.fc0 = S.fc0, d.fc1 = S.fc1;
+    d.fog = S.fog_en != 0; /* el factor lo da oFog del vertex program */
+    d.fog_mode = S.fog_mode;
+    d.fog_p[0] = f32(S.fog_p[0]), d.fog_p[1] = f32(S.fog_p[1]), d.fog_p[2] = f32(S.fog_p[2]);
+    d.poff = S.poff != 0;
+    d.poff_factor = f32(S.poff_factor), d.poff_bias = f32(S.poff_bias);
+    d.stest = S.st_en != 0;
+    d.swrite = (S.control0 & 1) != 0;
+    d.sfunc = S.st_func, d.sref = S.st_ref, d.sfmask = S.st_fmask, d.smask = S.st_mask;
+    d.sop_fail = S.st_fail, d.sop_zfail = S.st_zfail, d.sop_zpass = S.st_zpass;
+    /* v0.18.70 (como xemu): sin SET_SPECULAR_ENABLE, oD1 vale (0,0,0,1); su
+     * alfa solo cuenta con ALPHA_FROM_MATERIAL_SPECULAR. Los puntos: su
+     * tamaño (SET_POINT_SIZE en octavos, u oPts con los parámetros) y el
+     * sprite (POINT_SMOOTH: la etapa 3 toma la coordenada dentro del punto) */
+    d.spec = S.spec_en != 0;
+    d.spec_a1 = !(S.light_ctl & (1u << 17));
+    d.psprite = S.pt_smooth != 0;
+    d.psize = S.pt_params ? -1.0f : (S.pt_size ? (float)S.pt_size / 8.0f : 1.0f);
     memcpy(d.c_icw, S.c_icw, sizeof(d.c_icw));
     memcpy(d.a_icw, S.a_icw, sizeof(d.a_icw));
     memcpy(d.c_ocw, S.c_ocw, sizeof(d.c_ocw));
@@ -1818,6 +1858,14 @@ static bool gpu_try(const Target *t, const OutVert *ov)
         g->cube = x->cube && g->mode == 3;
         g->linear = x->linear;
         g->bilinear = x->bilinear;
+        {
+            /* v0.18.70: el filtro de lejos (bits 16..23: 3 y 4 el nivel más
+             * cercano, 5 y 6 mezclando dos) si la textura trae niveles, y
+             * la anisotropía (bits 4..5 del control: 1 a 4) */
+            unsigned minf = (S.t_filter[s] >> 16) & 0xFF, levels = (S.t_fmt[s] >> 16) & 0xF;
+            g->mip = (uint8_t)(levels > 1 && !x->linear ? (minf >= 5 ? 2 : minf >= 3 ? 1 : 0) : 0);
+            g->aniso = (uint8_t)(1 + ((S.t_ctl0[s] >> 4) & 3));
+        }
         g->au = x->au, g->av = x->av;
         g->data = x->base;
         g->bytes = x->bytes;
@@ -2146,7 +2194,31 @@ static void sw_method_(uint32_t m, uint32_t v)
     case 0x0214: S.zeta_off = v; return;
     case 0x0288: S.fcw0 = v; return;
     case 0x028C: S.fcw1 = v; return;
+    case 0x0290: S.control0 = v; return;
+    case 0x0294: S.light_ctl = v; return;
+    case 0x03B8: S.spec_en = v & 1; return;
+    case 0x0318: S.pt_params = v & 1; return;
+    case 0x031C: S.pt_smooth = v & 1; return;
+    case 0x043C: S.pt_size = v; return;
+    case 0x029C: S.fog_mode = v; return;
+    case 0x02A4: S.fog_en = v & 1; return;
     case 0x02A8: S.fog_color = v; return;
+    case 0x032C: S.st_en = v & 1; return;
+    case 0x0338: S.poff = v & 1; return;
+    case 0x0360: S.st_mask = v; return;
+    case 0x0364: S.st_func = v; return;
+    case 0x0368: S.st_ref = v; return;
+    case 0x036C: S.st_fmask = v; return;
+    case 0x0370: S.st_fail = v; return;
+    case 0x0374: S.st_zfail = v; return;
+    case 0x0378: S.st_zpass = v; return;
+    case 0x0384: S.poff_factor = v; return;
+    case 0x0388: S.poff_bias = v; return;
+    case 0x09C0: S.fog_p[0] = v; return;
+    case 0x09C4: S.fog_p[1] = v; return;
+    case 0x09C8: S.fog_p[2] = v; return;
+    case 0x1E20: S.fc0 = v; return;
+    case 0x1E24: S.fc1 = v; return;
     case 0x0300: S.atest = v & 1; return;
     case 0x0304: S.blend = v & 1; return;
     case 0x0308: S.cull = v & 1; return;
