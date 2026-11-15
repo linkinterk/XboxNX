@@ -3923,6 +3923,9 @@ static struct {
     uint64_t done;    /* la última orden C_CALL terminada */
     uint64_t next_id;
     uint64_t frames_in, frames_done; /* v0.18.74: cuadros dejados en la cola y ya hechos por el hilo */
+    unsigned bad_tries;              /* v0.18.78: lecturas seguidas de una orden que no se ve bien */
+    unsigned discards, discards_seen; /* veces que se descartó lo pendiente (el hilo) / visto por el principal */
+    unsigned cresync, cresync_seen;   /* el hilo pide todas las constantes otra vez */
     int cons_wait, prod_wait;
     QMutex m;
     QCond more, space, synced;
@@ -3985,9 +3988,14 @@ static uint8_t *q_reserve(uint32_t len)
 
 static void q_commit(uint32_t len)
 {
-    Q.tail = Q.wpos + len;
-    __atomic_store_n(&Q.tail, Q.tail, __ATOMIC_RELEASE);
-    uint64_t used = Q.tail - __atomic_load_n(&Q.head, __ATOMIC_RELAXED);
+    /* v0.18.78: solo la escritura con RELEASE. Antes había además una
+     * escritura normal de Q.tail justo antes: en el ARM de la Switch esa
+     * escritura podía verse en el otro núcleo ANTES que los datos de la
+     * orden, y el hilo de la GPU leía una orden a medio escribir (los
+     * "dibujos perdidos" y el cierre en vs_upload con una dirección basura). */
+    uint64_t nt = Q.wpos + len;
+    __atomic_store_n(&Q.tail, nt, __ATOMIC_RELEASE);
+    uint64_t used = nt - __atomic_load_n(&Q.head, __ATOMIC_RELAXED);
     if (used > G.st.q_max) {
         G.st.q_max = used;
     }
@@ -4020,7 +4028,8 @@ static void q_call(void (*fn)(void *), void *arg)
     }
     uint64_t t0 = now_ns();
     qm_lock(&Q.m);
-    while (__atomic_load_n(&Q.done, __ATOMIC_ACQUIRE) < c.id) {
+    unsigned disc = __atomic_load_n(&Q.discards, __ATOMIC_ACQUIRE);
+    while (__atomic_load_n(&Q.done, __ATOMIC_ACQUIRE) < c.id && __atomic_load_n(&Q.discards, __ATOMIC_ACQUIRE) == disc) {
         qc_wait(&Q.synced, &Q.m, 2000000);
     }
     qm_unlock(&Q.m);
@@ -4057,6 +4066,28 @@ static void q_exec(const QHdr *h)
         memcpy(&c, body, sizeof(c));
         const uint8_t *b = (const uint8_t *)h;
         GpuDraw *d = &c.d;
+        {
+            /* v0.18.78: que cada tramo de datos quede dentro de la orden (si no,
+             * la orden está rota: se salta en vez de leer memoria cualquiera) */
+            unsigned k = (unsigned)__builtin_popcount(d->vs_mask);
+            k = k ? k : 1;
+            uint64_t ends[5] = {
+                c.o_verts ? c.o_verts + (uint64_t)d->nverts * GPU_VERT_FLOATS * 4 : 0,
+                c.o_in ? c.o_in + (uint64_t)d->nverts * 64 * 4 : 0,
+                c.o_pk ? c.o_pk + (uint64_t)d->vs_pk_n * k * 16 : 0,
+                c.o_idx ? c.o_idx + (uint64_t)d->vs_nidx * 4 : 0,
+                c.consts_new ? sizeof(QHdr) + q_al(sizeof(CDraw)) + (uint64_t)c.c_n * 16 : 0,
+            };
+            bool bad = false;
+            for (int i = 0; i < 5; i++) {
+                bad |= ends[i] > h->len;
+            }
+            if (bad) {
+                G.st.q_bad++;
+                __atomic_add_fetch(&Q.cresync, 1, __ATOMIC_SEQ_CST); /* las constantes, todas de nuevo */
+                break;
+            }
+        }
         d->verts = c.o_verts ? (const float *)(const void *)(b + c.o_verts) : NULL;
         d->vs_in = c.o_in ? (const float *)(const void *)(b + c.o_in) : NULL;
         d->vs_pk = c.o_pk ? (const float *)(const void *)(b + c.o_pk) : NULL;
@@ -4185,6 +4216,27 @@ static void q_loop(void)
             continue;
         }
         const QHdr *hd = (const QHdr *)(const void *)(Q.buf + (h & (Q_SIZE - 1)));
+        if (hd->len < sizeof(QHdr) || (hd->len & 15) || hd->len > t - h ||
+            (h & (Q_SIZE - 1)) + hd->len > Q_SIZE) {
+            /* una orden rota (no debería pasar): se vuelve a leer un momento
+             * por si todavía no se ve entera; si no, se descarta lo pendiente
+             * en vez de seguir leyendo basura (y el principal manda de nuevo
+             * todas las constantes; quien esperaba una respuesta, sigue) */
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            if (++Q.bad_tries < 1000) {
+                continue;
+            }
+            Q.bad_tries = 0;
+            G.st.q_bad++;
+            __atomic_store_n(&Q.head, t, __ATOMIC_SEQ_CST);
+            __atomic_add_fetch(&Q.discards, 1, __ATOMIC_SEQ_CST);
+            qm_lock(&Q.m);
+            qc_all(&Q.synced);
+            qc_signal(&Q.space);
+            qm_unlock(&Q.m);
+            continue;
+        }
+        Q.bad_tries = 0;
         t_busy = now_ns();
         g_zone_gpu = Z_NONE;
         q_exec(hd);
@@ -4323,6 +4375,15 @@ bool gpu_draw(const GpuDraw *d)
      * siempre unas pocas): antes iban las 192 (3 KB) en cada dibujo */
     unsigned c_first = 0, c_last = 0;
     bool cnew = false;
+    {
+        unsigned disc = __atomic_load_n(&Q.discards, __ATOMIC_ACQUIRE);
+        unsigned cr = __atomic_load_n(&Q.cresync, __ATOMIC_ACQUIRE);
+        if (disc != Q.discards_seen || cr != Q.cresync_seen) { /* el hilo descartó órdenes: las constantes, todas de nuevo */
+            Q.discards_seen = disc;
+            Q.cresync_seen = cr;
+            Q.last_c_ok = false;
+        }
+    }
     if (d->vs_consts) {
         if (!Q.last_c_ok) {
             cnew = true, c_first = 0, c_last = 191;

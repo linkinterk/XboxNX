@@ -178,6 +178,7 @@ typedef struct GpuStats {
     uint64_t mipmaps;    /* v0.18.70: texturas a las que se les hicieron los niveles reducidos */
     uint64_t points_lines; /* v0.18.70: dibujos de puntos o líneas (antes no salían) */
     unsigned aniso_max;  /* la anisotropía del driver (1: no hay) */
+    unsigned q_bad; /* v0.18.78: órdenes de la cola rotas (descartadas; no debería pasar) */
     unsigned fsx_built, fsx_cached, fsx_bad; /* v0.18.76: fragment shaders a la medida: compilados, de la SD, que no compilaron */
     uint64_t fsx_draws;                       /* dibujos con uno de esos */
     uint64_t ns_rwait, ns_rcopy; /* v0.18.76: al leer un cuadro, esperando a la GPU y copiando a la RAM */
