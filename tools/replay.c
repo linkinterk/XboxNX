@@ -208,8 +208,20 @@ int main(int argc, char **argv)
                     g->mt_draws, g->mt_lost, g->ns_busy / 1e6, g->ns_enq / 1e6, g->ns_qwait / 1e6, g->syncs, g->ns_sync / 1e6,
                     g->q_max / 1048576.0);
         }
+        fprintf(stderr, "a la medida: %u compilados, %u de la SD, %u sin compilar, %llu dibujos\n", g->fsx_built,
+                g->fsx_cached, g->fsx_bad, (unsigned long long)g->fsx_draws);
         fprintf(stderr, "compilar programas: %.1f ms (%s) · %u dibujos esperaron · %u guardados de antes, %u por adelantado\n",
                 (double)g->ns_link / 1e6, g->sso ? "por etapas" : "enteros", g->vs_deferred, g->vs_known, g->vs_pre);
+        { /* v0.18.76: el tiempo del chip por destino (en la PC es mesa, sirve para comparar) */
+            char pt[480];
+            gpu_end_frame();
+            gpu_flush_all();
+            gpu_prof_text(pt, sizeof(pt));
+            gpu_end_frame();
+            gpu_flush_all();
+            gpu_prof_text(pt, sizeof(pt));
+            fprintf(stderr, "%s\n", pt[0] ? pt : "chip de la GPU: sin marcas de tiempo");
+        }
     }
     FILE *o = fopen(argv[3], "wb");
     fprintf(o, "P6\n%d %d\n255\n", w, h);

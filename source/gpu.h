@@ -16,6 +16,7 @@
 #define XBOXNX_GPU_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* Floats por vértice ya transformado (el OutVert de nv2a_sw.c):
@@ -130,6 +131,10 @@ void gpu_invalidate(uint32_t pa, uint32_t len);
 void gpu_end_frame(void);
 /* Cuadros que el hilo de la GPU todavía no terminó (-1: sin el hilo). */
 int gpu_frames_behind(void);
+/* v0.18.76: el tiempo del chip de la GPU por destino desde la vez anterior (para el resumen). */
+void gpu_prof_text(char *out, size_t n);
+/* v0.18.76, para las pruebas: fragment shaders a la medida (0 no, 1 normal, 2 todos ya). */
+void gpu_fsx_set(int mode);
 
 /* La pantalla de la app con GL (1280x720 RGBA): true si se mostró. */
 bool gpu_present_ui(const uint32_t *rgba, int w, int h);
@@ -170,6 +175,9 @@ typedef struct GpuStats {
     uint64_t mipmaps;    /* v0.18.70: texturas a las que se les hicieron los niveles reducidos */
     uint64_t points_lines; /* v0.18.70: dibujos de puntos o líneas (antes no salían) */
     unsigned aniso_max;  /* la anisotropía del driver (1: no hay) */
+    unsigned fsx_built, fsx_cached, fsx_bad; /* v0.18.76: fragment shaders a la medida: compilados, de la SD, que no compilaron */
+    uint64_t fsx_draws;                       /* dibujos con uno de esos */
+    uint64_t ns_rwait, ns_rcopy; /* v0.18.76: al leer un cuadro, esperando a la GPU y copiando a la RAM */
     uint64_t ns_draw, ns_tex, ns_read, ns_vbuf, ns_query, ns_call; /* etapa 5: tiempo en gpu_draw (todo), en decodificar+subir texturas y en leer cuadros a la RAM */
 } GpuStats;
 const GpuStats *gpu_stats(void);

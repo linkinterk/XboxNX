@@ -5,6 +5,7 @@
 #ifndef XBOXNX_NO_GL /* las pruebas en la PC compilan sin GL: ver el final */
 
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -183,6 +184,147 @@ typedef struct Surf {
 } Surf;
 
 static uint32_t g_surf_seq;
+
+/* v0.18.76: cuánto tarda el chip de la GPU (no el hilo) con cada destino,
+ * con marcas de tiempo de la GPU (GL_TIMESTAMP) cada vez que cambia el
+ * destino. Lo de "leer cuadros" del resumen era casi todo esperar a la GPU:
+ * esto dice en qué se va ese tiempo. */
+#define GL_TIMESTAMP_ 0x8E28
+#define GL_QUERY_RESULT_AVAILABLE_ 0x8867
+static void (*p_glQueryCounter)(GLuint, GLenum);
+static void (*p_glGetQueryObjectui64v)(GLuint, GLenum, uint64_t *);
+#define GP_N 1024
+#define GP_TOP 24
+enum { GP_DRAW = 0, GP_SWZ = 1, GP_READ = 2, GP_IDLE = 3 };
+static struct {
+    bool on;
+    GLuint q[GP_N];
+    uint32_t pa[GP_N], wh[GP_N];
+    uint8_t kind[GP_N];
+    unsigned head, tail; /* marcas puestas [tail, head) */
+    bool have_tail;
+    uint64_t ts_tail;
+    uint32_t cur_pa, cur_wh;
+    int cur_kind;
+    bool marked; /* este cuadro tuvo trabajo */
+    struct { uint32_t pa, wh; uint8_t kind; uint64_t ns; } top[GP_TOP];
+    uint64_t busy_ns, idle_ns, frames;
+    char text[480];
+    int want; /* 1 la interfaz pide, 2 listo en text */
+} GP;
+
+static void gp_mark(uint32_t pa, int w, int h, int kind)
+{
+    if (!GP.on) {
+        return;
+    }
+    uint32_t wh = (uint32_t)w << 16 | (uint32_t)(h & 0xFFFF);
+    if (kind == GP.cur_kind && pa == GP.cur_pa && wh == GP.cur_wh) {
+        return;
+    }
+    if (GP.head - GP.tail >= GP_N) {
+        return; /* la GPU va muy atrasada: no se mide este cambio */
+    }
+    unsigned k = GP.head % GP_N;
+    p_glQueryCounter(GP.q[k], GL_TIMESTAMP_);
+    GP.pa[k] = pa, GP.wh[k] = wh, GP.kind[k] = (uint8_t)kind;
+    GP.head++;
+    GP.cur_pa = pa, GP.cur_wh = wh, GP.cur_kind = kind;
+    if (kind != GP_IDLE) {
+        GP.marked = true;
+    }
+}
+
+static void gp_add(uint32_t pa, uint32_t wh, uint8_t kind, uint64_t ns)
+{
+    if (kind == GP_IDLE) {
+        GP.idle_ns += ns;
+        return;
+    }
+    GP.busy_ns += ns;
+    int lo = 0;
+    for (int i = 0; i < GP_TOP; i++) {
+        if (GP.top[i].ns && GP.top[i].pa == pa && GP.top[i].wh == wh && GP.top[i].kind == kind) {
+            GP.top[i].ns += ns;
+            return;
+        }
+        if (GP.top[i].ns < GP.top[lo].ns) {
+            lo = i;
+        }
+    }
+    GP.top[lo].pa = pa, GP.top[lo].wh = wh, GP.top[lo].kind = kind, GP.top[lo].ns = ns;
+}
+
+/* Al final de cada cuadro: la marca de fin, y lo que la GPU ya terminó. */
+static void gp_frame(void)
+{
+    if (!GP.on) {
+        return;
+    }
+    if (GP.marked) {
+        GP.frames++;
+        GP.marked = false;
+    }
+    gp_mark(0, 0, 0, GP_IDLE);
+    while (GP.head - GP.tail >= 2) {
+        unsigned a = GP.tail % GP_N, b = (GP.tail + 1) % GP_N;
+        GLuint avail = 0;
+        glGetQueryObjectuiv(GP.q[b], GL_QUERY_RESULT_AVAILABLE_, &avail);
+        if (!avail) {
+            break;
+        }
+        if (!GP.have_tail) {
+            p_glGetQueryObjectui64v(GP.q[a], GL_QUERY_RESULT, &GP.ts_tail);
+        }
+        uint64_t t1 = 0;
+        p_glGetQueryObjectui64v(GP.q[b], GL_QUERY_RESULT, &t1);
+        if (t1 > GP.ts_tail && t1 - GP.ts_tail < 2000000000ull) {
+            gp_add(GP.pa[a], GP.wh[a], GP.kind[a], t1 - GP.ts_tail);
+        }
+        GP.ts_tail = t1;
+        GP.have_tail = true;
+        GP.tail++;
+    }
+    if (__atomic_load_n(&GP.want, __ATOMIC_ACQUIRE) == 1) {
+        char *o = GP.text;
+        size_t n = sizeof(GP.text), u = 0;
+        double fr = GP.frames ? (double)GP.frames : 1.0;
+        uint64_t all = GP.busy_ns + GP.idle_ns;
+        u += (size_t)snprintf(o + u, n - u, "chip de la GPU: %.1f ms por cuadro dibujado, ocupado %.0f%%",
+                              GP.busy_ns / 1e6 / fr, all ? 100.0 * (double)GP.busy_ns / (double)all : 0.0);
+        for (int r = 0; r < 6 && u < n; r++) {
+            int best = -1;
+            for (int i = 0; i < GP_TOP; i++) {
+                if (GP.top[i].ns && (best < 0 || GP.top[i].ns > GP.top[best].ns)) {
+                    best = i;
+                }
+            }
+            if (best < 0) {
+                break;
+            }
+            u += (size_t)snprintf(o + u, n - u, " · %s%08X %ux%u%s %.1f ms", GP.top[best].kind == GP_READ ? "leer " : "",
+                                  GP.top[best].pa, GP.top[best].wh >> 16, GP.top[best].wh & 0xFFFF,
+                                  GP.top[best].kind == GP_SWZ ? " swizzle" : "", GP.top[best].ns / 1e6 / fr);
+            GP.top[best].ns = 0;
+        }
+        memset(GP.top, 0, sizeof(GP.top));
+        GP.busy_ns = GP.idle_ns = GP.frames = 0;
+        __atomic_store_n(&GP.want, 2, __ATOMIC_RELEASE);
+    }
+}
+
+/* Para el resumen: el texto de la ventana anterior (vacío la primera vez). */
+void gpu_prof_text(char *out, size_t n)
+{
+    out[0] = 0;
+    int w = __atomic_load_n(&GP.want, __ATOMIC_ACQUIRE);
+    if (w == 2) {
+        snprintf(out, n, "%s", GP.text);
+    }
+    if (w != 1) {
+        __atomic_store_n(&GP.want, 1, __ATOMIC_RELEASE);
+    }
+}
 
 /* v0.18.65: swizzle de las superficies (como las texturas del NV2A: los
  * bits de x e y intercalados; el lado mayor pone los que sobran arriba). */
@@ -719,8 +861,12 @@ static bool pipe_make(Prog *P)
 }
 
 /* Soltar el programa de P (y su pipeline). */
+static void pipes_drop_vs(GLuint vs);
 static void prog_free(Prog *P)
 {
+    if (G.sso && P->prog) {
+        pipes_drop_vs(P->prog);
+    }
     if (P->pipe) {
         p_glDeleteProgramPipelines(1, &P->pipe);
     }
@@ -867,6 +1013,8 @@ static bool init_inner(void *nwin)
     *(void **)&p_glProgramParameteri = egl_proc("glProgramParameteri");
     *(void **)&p_glGetIntegerv = egl_proc("glGetIntegerv");
     *(void **)&p_glGenerateMipmap = egl_proc("glGenerateMipmap");
+    *(void **)&p_glQueryCounter = egl_proc("glQueryCounter");
+    *(void **)&p_glGetQueryObjectui64v = egl_proc("glGetQueryObjectui64v");
     *(void **)&p_glTexParameterf = egl_proc("glTexParameterf");
     *(void **)&p_glGetStringi = egl_proc("glGetStringi");
     *(void **)&p_glGetFloatv = egl_proc("glGetFloatv");
@@ -996,6 +1144,16 @@ static bool init_inner(void *nwin)
         G.st.aniso_max = (unsigned)g_aniso_max;
     }
     G.ready = true;
+    if (p_glQueryCounter && p_glGetQueryObjectui64v && !getenv("XBOXNX_SIN_PERFIL_GPU")) {
+        glGenQueries(GP_N, GP.q);
+        while (glGetError() != GL_NO_ERROR) {
+        }
+        p_glQueryCounter(GP.q[0], GL_TIMESTAMP_); /* ¿el driver lo tiene? (si no, que no ensucie glGetError) */
+        GP.on = glGetError() == GL_NO_ERROR;
+        while (glGetError() != GL_NO_ERROR) {
+        }
+        GP.cur_kind = -1;
+    }
     G.on = true;
     return true;
 }
@@ -1159,6 +1317,468 @@ static void cache_save(uint64_t key, GLuint p)
         }
     }
     free(buf);
+}
+
+/* ------------------------------------------------------------ fragment shaders a la medida */
+/* v0.18.76: el fragment shader común interpreta los register combiners con
+ * un arreglo R[16] leído con índices que salen de uniforms: la GPU de la
+ * Switch lo pone en memoria local (lenta) y cada píxel hace ~70 lecturas.
+ * Para cada combinación de combiners que use el juego se escribe uno con
+ * todo fijo (como xemu): cada píxel hace solo sus cuentas. Mientras se
+ * compila, se usa el común (se ve igual). */
+#define MAX_FSX 768
+typedef struct FsX {
+    uint64_t key;
+    Prog p;
+    bool bad;
+} FsX;
+static FsX *g_fsx;
+static unsigned g_fsx_n, g_fsx_frame, g_fsx_built; /* compilados en este cuadro */
+static bool g_fsx_off;
+static int g_fsx_limit = -1; /* nuevos por cuadro (-1: aún sin decidir) */
+
+/* Para las pruebas: 0 solo el común, 1 normal, 2 todos ya. */
+void gpu_fsx_set(int mode)
+{
+    g_fsx_off = mode == 0;
+    g_fsx_limit = mode == 2 ? 1 << 30 : 1;
+}
+typedef struct { GLuint vs, fs, pipe; } PipeEnt;
+#define PIPE_N 4096
+static PipeEnt *g_pipes;
+static unsigned g_pipes_n;
+
+typedef struct { char *b; size_t n, cap; } Sb;
+static void sbp(Sb *o, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void sbp(Sb *o, const char *fmt, ...)
+{
+    va_list ap;
+    for (;;) {
+        va_start(ap, fmt);
+        size_t room = o->cap - o->n;
+        int k = vsnprintf(o->b ? o->b + o->n : NULL, o->b ? room : 0, fmt, ap);
+        va_end(ap);
+        if (k < 0) {
+            return;
+        }
+        if (o->b && (size_t)k < room) {
+            o->n += (size_t)k;
+            return;
+        }
+        size_t nc = (o->cap + (size_t)k + 1) * 2;
+        char *nb = realloc(o->b, nc);
+        if (!nb) {
+            return;
+        }
+        o->b = nb, o->cap = nc;
+    }
+}
+
+static const char *const k_map[8] = {"max(%s, 0.0)", "(1.0 - clamp(%s, 0.0, 1.0))", "(2.0 * max(%s, 0.0) - 1.0)",
+                                     "(-2.0 * max(%s, 0.0) + 1.0)", "(max(%s, 0.0) - 0.5)", "(-max(%s, 0.0) + 0.5)",
+                                     "(%s)", "(-(%s))"};
+/* una entrada de un combiner, ya con el registro y la conversión fijos */
+static void fx_in(char *o, size_t n, uint32_t sel, bool rgb)
+{
+    char src[32];
+    unsigned r = sel & 15u;
+    bool a = ((sel >> 4) & 1u) != 0;
+    if (rgb) {
+        snprintf(src, sizeof(src), a ? "vec3(R%u.a)" : "R%u.rgb", r);
+    } else {
+        snprintf(src, sizeof(src), a ? "R%u.a" : "R%u.b", r);
+    }
+    snprintf(o, n, k_map[(sel >> 5) & 7u], src);
+}
+static void fx_op(char *o, size_t n, const char *x, uint32_t op)
+{
+    static const char *const f[8] = {"clamp(%s, -1.0, 1.0)", "clamp(%s - 0.5, -1.0, 1.0)", "clamp(%s * 2.0, -1.0, 1.0)",
+                                     "clamp((%s - 0.5) * 2.0, -1.0, 1.0)", "clamp(%s * 4.0, -1.0, 1.0)",
+                                     "clamp(%s, -1.0, 1.0)", "clamp(%s * 0.5, -1.0, 1.0)", "clamp(%s, -1.0, 1.0)"};
+    snprintf(o, n, f[op & 7u], x);
+}
+
+/* Lo que fija un fragment shader a la medida (todo menos los valores). */
+typedef struct {
+    uint32_t w[40];
+    unsigned n;
+} FsKey;
+static void fx_key(const GpuDraw *d, const GLint *tmode, const GLint *tcube, FsKey *k)
+{
+    unsigned n = d->cctl & 0xFFu;
+    if (n > 8) {
+        n = 8;
+    }
+    unsigned fogw = 0, fogabs = 0;
+    if (d->fog) {
+        uint32_t fm = d->fog_mode;
+        fogw = fm == 0x800 || fm == 0x802 ? 2u : fm == 0x801 || fm == 0x803 ? 3u : 1u;
+        fogabs = fm == 0x802 || fm == 0x803 || fm == 0x804;
+    }
+    uint32_t w0 = 0, w1 = 0;
+    for (int i = 0; i < 4; i++) {
+        /* el modo entero (hay 11, 12...: el común solo trata igual 1, 3 y 4) */
+        w0 |= (uint32_t)(tmode[i] & 31) << (5 * i);
+        w0 |= (uint32_t)(tcube[i] != 0) << (20 + i);
+    }
+    w1 |= n;
+    w1 |= ((d->cctl >> 12) & 1u) << 4 | ((d->cctl >> 8) & 1u) << 5;
+    w1 |= (uint32_t)(d->atest != 0) << 6;
+    w1 |= (uint32_t)(d->spec ? (d->spec_a1 ? 2 : 1) : 0) << 7;
+    w1 |= (uint32_t)(d->prim == 1 && d->psprite) << 9;
+    w1 |= fogw << 10 | fogabs << 12;
+    k->n = 0;
+    k->w[k->n++] = w0;
+    k->w[k->n++] = w1;
+    k->w[k->n++] = d->atest ? d->afunc : 0;
+    if (n) {
+        k->w[k->n++] = d->fcw0;
+        k->w[k->n++] = d->fcw1;
+        for (unsigned i = 0; i < n; i++) {
+            k->w[k->n++] = d->c_icw[i];
+            k->w[k->n++] = d->c_ocw[i];
+            k->w[k->n++] = d->a_icw[i];
+            k->w[k->n++] = d->a_ocw[i];
+        }
+    }
+}
+
+/* El GLSL de esa combinación (mismas cuentas que k_fs). */
+static char *fx_gen(const FsKey *k)
+{
+    Sb o = {0};
+    uint32_t w0 = k->w[0], w1 = k->w[1];
+    unsigned n = w1 & 15u;
+    bool per = (w1 >> 4) & 1u, msb = (w1 >> 5) & 1u, atest = (w1 >> 6) & 1u, psprite = (w1 >> 9) & 1u;
+    unsigned spec = (w1 >> 7) & 3u, fogw = (w1 >> 10) & 3u, fogabs = (w1 >> 12) & 1u;
+    sbp(&o, "#version 330 core\n"
+            "LOC(0) in vec4 v_c0; LOC(1) in vec4 v_c1; LOC(2) in vec4 v_t0; LOC(3) in vec4 v_t1;\n"
+            "LOC(4) in vec4 v_t2; LOC(5) in vec4 v_t3; LOC(6) in float v_fog;\n"
+            "out vec4 o_color;\n"
+            "uniform sampler2D s2d0; uniform sampler2D s2d1; uniform sampler2D s2d2; uniform sampler2D s2d3;\n"
+            "uniform samplerCube scb0; uniform samplerCube scb1; uniform samplerCube scb2; uniform samplerCube scb3;\n"
+            "uniform vec2 u_tscale[4]; uniform vec4 u_f0[8]; uniform vec4 u_f1[8];\n"
+            "uniform vec4 u_fog; uniform vec4 u_fogp; uniform vec4 u_fc[2]; uniform float u_aref;\n"
+            "void main() {\n");
+    for (int i = 0; i < 16; i++) {
+        sbp(&o, "  vec4 R%d = vec4(0.0);\n", i);
+    }
+    sbp(&o, "  R4 = clamp(v_c0, 0.0, 1.0); R5 = clamp(v_c1, 0.0, 1.0);\n");
+    if (spec == 0) {
+        sbp(&o, "  R5 = vec4(0.0, 0.0, 0.0, 1.0);\n");
+    } else if (spec == 2) {
+        sbp(&o, "  R5.a = 1.0;\n");
+    }
+    sbp(&o, "  float fg = 1.0;\n");
+    if (fogw) {
+        sbp(&o, "  { float fd = isinf(v_fog) || isnan(v_fog) ? 0.0 : v_fog;\n");
+        if (fogw == 1) {
+            sbp(&o, "    fg = u_fogp.x + fd * u_fogp.y - 1.0;\n");
+        } else if (fogw == 2) {
+            sbp(&o, "    fg = u_fogp.x + exp2(fd * u_fogp.y * 16.0) - 1.5;\n");
+        } else {
+            sbp(&o, "    fg = u_fogp.x + exp2(-fd * fd * u_fogp.y * u_fogp.y * 32.0) - 1.5;\n");
+        }
+        sbp(&o, "%s    fg = clamp(fg, 0.0, 1.0); }\n", fogabs ? "    fg = abs(fg);\n" : "");
+    }
+    sbp(&o, "  R3 = vec4(u_fog.rgb, fg);\n");
+    for (int i = 0; i < 4; i++) {
+        unsigned md = (w0 >> (5 * i)) & 31u, cube = (w0 >> (20 + i)) & 1u;
+        if (!md) {
+            continue;
+        }
+        char tc[48];
+        snprintf(tc, sizeof(tc), i == 3 && psprite ? "vec4(gl_PointCoord, 1.0, 1.0)" : "v_t%d", i);
+        if (md == 4) {
+            sbp(&o, "  R%d = clamp(%s, 0.0, 1.0);\n", 8 + i, tc);
+        } else if (md == 3 && cube) {
+            sbp(&o, "  R%d = texture(scb%d, (%s).xyz);\n", 8 + i, i, tc);
+        } else if (md == 1) {
+            sbp(&o, "  { vec4 tc = %s; vec2 uv = tc.xy; if (tc.w != 0.0 && tc.w != 1.0) uv /= tc.w;\n"
+                    "    R%d = texture(s2d%d, uv * u_tscale[%d]); }\n", tc, 8 + i, i, i);
+        } else {
+            sbp(&o, "  R%d = texture(s2d%d, (%s).xy * u_tscale[%d]);\n", 8 + i, i, tc, i);
+        }
+    }
+    sbp(&o, "  R12.a = R8.a;\n  vec4 c;\n");
+    char A[8][96], t[200], t2[200];
+    if (n) {
+        unsigned q = 5;
+        for (unsigned st = 0; st < n; st++, q += 4) {
+            uint32_t icw = k->w[q], ocw = k->w[q + 1], aicw = k->w[q + 2], aocw = k->w[q + 3];
+            unsigned kk = per ? st : 0;
+            sbp(&o, "  { R1 = u_f0[%u]; R2 = u_f1[%u];\n", kk, kk);
+            fx_in(A[0], 96, icw >> 24, true);
+            fx_in(A[1], 96, (icw >> 16) & 0xFFu, true);
+            fx_in(A[2], 96, (icw >> 8) & 0xFFu, true);
+            fx_in(A[3], 96, icw & 0xFFu, true);
+            fx_in(A[4], 96, aicw >> 24, false);
+            fx_in(A[5], 96, (aicw >> 16) & 0xFFu, false);
+            fx_in(A[6], 96, (aicw >> 8) & 0xFFu, false);
+            fx_in(A[7], 96, aicw & 0xFFu, false);
+            sbp(&o, "    vec3 a = %s, b = %s, cc = %s, d = %s;\n", A[0], A[1], A[2], A[3]);
+            sbp(&o, "    float aa = %s, ba = %s, ca = %s, da = %s;\n", A[4], A[5], A[6], A[7]);
+            bool abdot = (ocw >> 13) & 1u, cddot = (ocw >> 12) & 1u, mux = (ocw >> 14) & 1u, amux = (aocw >> 14) & 1u;
+            unsigned op = (ocw >> 15) & 7u, aop = (aocw >> 15) & 7u;
+            unsigned dcd = ocw & 15u, dab = (ocw >> 4) & 15u, dsum = (ocw >> 8) & 15u;
+            unsigned acd = aocw & 15u, aab = (aocw >> 4) & 15u, asum = (aocw >> 8) & 15u;
+            if ((mux && dsum) || (amux && asum)) {
+                sbp(&o, "    float r0a = R12.a; bool sel_cd = %s;\n", msb ? "r0a >= 0.5" : "((int(r0a * 255.0) & 1) != 0)");
+            }
+            sbp(&o, "    vec3 pab = %s; vec3 pcd = %s;\n", abdot ? "vec3(dot(a, b))" : "a * b", cddot ? "vec3(dot(cc, d))" : "cc * d");
+            if (dcd) {
+                fx_op(t, sizeof(t), "pcd", op);
+                sbp(&o, "    vec3 cd = %s;\n", t);
+            }
+            if (dab) {
+                fx_op(t, sizeof(t), "pab", op);
+                sbp(&o, "    vec3 ab = %s;\n", t);
+            }
+            if (dsum) {
+                fx_op(t, sizeof(t), mux ? "(sel_cd ? pcd : pab)" : "(pab + pcd)", op);
+                sbp(&o, "    vec3 sum = %s;\n", t);
+            }
+            if (acd) {
+                fx_op(t, sizeof(t), "(ca * da)", aop);
+                sbp(&o, "    float acd = %s;\n", t);
+            }
+            if (aab) {
+                fx_op(t, sizeof(t), "(aa * ba)", aop);
+                sbp(&o, "    float aab = %s;\n", t);
+            }
+            if (asum) {
+                fx_op(t, sizeof(t), amux ? "(sel_cd ? ca * da : aa * ba)" : "(aa * ba + ca * da)", aop);
+                sbp(&o, "    float asum = %s;\n", t);
+            }
+            if (dcd) {
+                sbp(&o, "    R%u.rgb = cd;\n", dcd);
+                if ((ocw >> 19) & 1u) {
+                    sbp(&o, "    R%u.a = cd.b;\n", dcd);
+                }
+            }
+            if (dab) {
+                sbp(&o, "    R%u.rgb = ab;\n", dab);
+                if ((ocw >> 18) & 1u) {
+                    sbp(&o, "    R%u.a = ab.b;\n", dab);
+                }
+            }
+            if (dsum) {
+                sbp(&o, "    R%u.rgb = sum;\n", dsum);
+            }
+            if (acd) {
+                sbp(&o, "    R%u.a = acd;\n", acd);
+            }
+            if (aab) {
+                sbp(&o, "    R%u.a = aab;\n", aab);
+            }
+            if (asum) {
+                sbp(&o, "    R%u.a = asum;\n", asum);
+            }
+            sbp(&o, "  }\n");
+        }
+        uint32_t fcw0 = k->w[3], fcw1 = k->w[4];
+        sbp(&o, "  R1 = u_fc[0]; R2 = u_fc[1];\n"
+                "  { vec3 sv1 = clamp(R5.rgb, 0.0, 1.0), sr0 = clamp(R12.rgb, 0.0, 1.0);\n");
+        if (fcw1 & 0x40u) {
+            sbp(&o, "    sv1 = vec3(1.0) - sv1;\n");
+        }
+        if (fcw1 & 0x20u) {
+            sbp(&o, "    sr0 = vec3(1.0) - sr0;\n");
+        }
+        sbp(&o, "    R14.rgb = sv1 + sr0; }\n");
+        fx_in(t, sizeof(t), fcw1 >> 24, true);
+        fx_in(t2, sizeof(t2), (fcw1 >> 16) & 0xFFu, true);
+        sbp(&o, "  { vec3 e = %s, f = %s; R15.rgb = e * f; }\n", t, t2);
+        fx_in(A[0], 96, (fcw0 >> 24) & 0x3Fu, true);
+        fx_in(A[1], 96, (fcw0 >> 16) & 0x3Fu, true);
+        fx_in(A[2], 96, (fcw0 >> 8) & 0x3Fu, true);
+        fx_in(A[3], 96, fcw0 & 0x3Fu, true);
+        fx_in(A[4], 96, (fcw1 >> 8) & 0x3Fu, false);
+        sbp(&o, "  { vec3 A = clamp(%s, 0.0, 1.0), B = clamp(%s, 0.0, 1.0);\n"
+                "    vec3 C = clamp(%s, 0.0, 1.0), D = clamp(%s, 0.0, 1.0);\n"
+                "    float G = %s;\n"
+                "    c = vec4(clamp(A * B + (vec3(1.0) - A) * C + D, 0.0, 1.0), clamp(G, 0.0, 1.0)); }\n",
+            A[0], A[1], A[2], A[3], A[4]);
+    } else {
+        sbp(&o, (w0 & 31u) ? "  c = R8 * R4;\n" : "  c = R4;\n");
+    }
+    if (atest) {
+        uint32_t f = k->w[2];
+        const char *cmp = f == 0x201 ? "<" : f == 0x202 ? "==" : f == 0x203 ? "<=" : f == 0x204 ? ">"
+                        : f == 0x205 ? "!=" : f == 0x206 ? ">=" : NULL;
+        if (f == 0x200) {
+            sbp(&o, "  discard;\n");
+        } else if (cmp) {
+            sbp(&o, "  if (!(floor(c.a * 255.0 + 0.5) %s u_aref)) discard;\n", cmp);
+        }
+    }
+    sbp(&o, "  o_color = c;\n}\n");
+    return o.b;
+}
+
+/* Se olvidan los pipelines con ese vertex shader (su nombre GL se puede repetir). */
+static void pipes_drop_vs(GLuint vs)
+{
+    SC.prog = 0xFFFFFFFFu; /* el pipeline puesto puede ser uno que se borra */
+    if (!g_pipes || !vs) {
+        return;
+    }
+    for (unsigned i = 0; i < PIPE_N; i++) {
+        if (g_pipes[i].pipe && g_pipes[i].vs == vs) {
+            p_glDeleteProgramPipelines(1, &g_pipes[i].pipe);
+            g_pipes[i].pipe = 0;
+            g_pipes[i].vs = 0xFFFFFFFFu; /* borrado: la búsqueda sigue de largo */
+            SC.prog = 0xFFFFFFFFu;
+        }
+    }
+}
+
+static void pipes_clear(void)
+{
+    for (unsigned i = 0; i < PIPE_N; i++) {
+        if (g_pipes[i].pipe) {
+            p_glDeleteProgramPipelines(1, &g_pipes[i].pipe);
+        }
+    }
+    memset(g_pipes, 0, PIPE_N * sizeof(*g_pipes));
+    g_pipes_n = 0;
+    SC.prog = 0xFFFFFFFFu;
+}
+
+/* El pipeline de este vertex shader con ese fragment shader (0: no se pudo). */
+static GLuint pipe_pair(GLuint vs, GLuint fs)
+{
+    if (!g_pipes) {
+        g_pipes = calloc(PIPE_N, sizeof(*g_pipes));
+        if (!g_pipes) {
+            return 0;
+        }
+    }
+    unsigned h = (unsigned)((vs * 2654435761u) ^ (fs * 40503u)) & (PIPE_N - 1);
+    for (unsigned j = 0; j < PIPE_N; j++, h = (h + 1) & (PIPE_N - 1)) {
+        PipeEnt *e = &g_pipes[h];
+        if (e->pipe && e->vs == vs && e->fs == fs) {
+            return e->pipe;
+        }
+        if (!e->pipe && e->vs != 0xFFFFFFFFu) {
+            break; /* vacío de verdad: no está */
+        }
+    }
+    if (g_pipes_n >= PIPE_N * 3 / 4) {
+        pipes_clear();
+    }
+    h = (unsigned)((vs * 2654435761u) ^ (fs * 40503u)) & (PIPE_N - 1);
+    while (g_pipes[h].pipe) {
+        h = (h + 1) & (PIPE_N - 1);
+    }
+    GLuint pp = 0;
+    p_glGenProgramPipelines(1, &pp);
+    p_glUseProgramStages(pp, GL_VERTEX_SHADER_BIT, vs);
+    p_glUseProgramStages(pp, GL_FRAGMENT_SHADER_BIT, fs);
+    if (glGetError() != GL_NO_ERROR) {
+        while (glGetError() != GL_NO_ERROR) {
+        }
+        p_glDeleteProgramPipelines(1, &pp);
+        return 0;
+    }
+    g_pipes[h].vs = vs, g_pipes[h].fs = fs, g_pipes[h].pipe = pp;
+    g_pipes_n++;
+    return pp;
+}
+
+/* El fragment shader a la medida para este dibujo, o NULL (se usa el común). */
+static FsX *fx_get(const GpuDraw *d, const GLint *tmode, const GLint *tcube)
+{
+    if (g_fsx_off || !G.sso) {
+        return NULL;
+    }
+    if (!g_fsx) {
+        g_fsx = calloc(MAX_FSX, sizeof(*g_fsx));
+        if (!g_fsx) {
+            g_fsx_off = true;
+            return NULL;
+        }
+    }
+    FsKey k;
+    fx_key(d, tmode, tcube, &k);
+    uint64_t key = fnv(1469598103934665603ull, k.w, k.n * 4) | 1ull;
+    static unsigned last = 0;
+    if (last < g_fsx_n && g_fsx[last].key == key) {
+        return g_fsx[last].bad ? NULL : &g_fsx[last];
+    }
+    for (unsigned i = 0; i < g_fsx_n; i++) {
+        if (g_fsx[i].key == key) {
+            last = i;
+            return g_fsx[i].bad ? NULL : &g_fsx[i];
+        }
+    }
+    if (g_fsx_n >= MAX_FSX) {
+        return NULL;
+    }
+#ifndef __SWITCH__
+    if (getenv("XBOXNX_FSX_MAX") && g_fsx_n >= (unsigned)atoi(getenv("XBOXNX_FSX_MAX"))) {
+        return NULL; /* replay: buscar cuál da distinto */
+    }
+    if (getenv("XBOXNX_FSX_DUMP")) {
+        FsKey kd;
+        fx_key(d, tmode, tcube, &kd);
+        char *src = fx_gen(&kd);
+        fprintf(stderr, "---- fsx %u\n", g_fsx_n);
+        for (unsigned i = 0; i < kd.n; i++) {
+            fprintf(stderr, "// w%u %08X\n", i, kd.w[i]);
+        }
+        fprintf(stderr, "// tmode %d %d %d %d tcube %d %d %d %d\n%s", tmode[0], tmode[1], tmode[2], tmode[3], tcube[0],
+                tcube[1], tcube[2], tcube[3], src ? src : "");
+        free(src);
+    }
+#endif
+    if (g_fsx_frame != G.frame) {
+        g_fsx_frame = G.frame, g_fsx_built = 0;
+    }
+    uint64_t ck = key ^ 0x46535834ull ^ (G.drv_hash * 31u); /* "FSX3": subir si cambia fx_gen */
+    GLuint p = cache_load(ck);
+    if (!p) {
+        if (g_fsx_limit < 0) {
+            g_fsx_limit = 1;
+#ifndef __SWITCH__
+            if (getenv("XBOXNX_SIN_FSX")) {
+                g_fsx_off = true;
+                return NULL;
+            }
+            if (getenv("XBOXNX_FSX_TODOS")) { /* replay: todos ya, para comparar la imagen */
+                g_fsx_limit = 1 << 30;
+            }
+#endif
+        }
+        if (g_fsx_built >= (unsigned)g_fsx_limit) {
+            return NULL; /* uno nuevo por cuadro: el resto sigue con el común */
+        }
+        g_fsx_built++;
+        uint64_t t0 = now_ns();
+        char *src = fx_gen(&k);
+        p = src ? stage_prog(GL_FRAGMENT_SHADER, src, true) : 0;
+        free(src);
+        G.st.ns_link += now_ns() - t0;
+        G.st.fsx_built++;
+        if (p) {
+            cache_save(ck, p);
+        }
+    } else {
+        G.st.fsx_cached++;
+    }
+    FsX *x = &g_fsx[g_fsx_n];
+    memset(x, 0, sizeof(*x));
+    x->key = key;
+    last = g_fsx_n++;
+    if (!p) {
+        x->bad = true;
+        G.st.fsx_bad++;
+        return NULL;
+    }
+    x->p.prog = p;
+    fs_locs(&x->p, p);
+    memset(x->p.ulen, 0, sizeof(x->p.ulen));
+    return x;
 }
 
 static uint64_t g_link_budget = 40000000ull; /* 40 ms de programas nuevos por cuadro; luego, al siguiente */
@@ -1781,10 +2401,13 @@ static void rb_finish(bool wait)
 
 static void rb_finish_(bool wait)
 {
+    uint64_t tw = now_ns();
     GLenum r = glClientWaitSync(RB.fence, GL_SYNC_FLUSH_COMMANDS_BIT, wait ? 2000000000ull : 0);
+    G.st.ns_rwait += now_ns() - tw;
     if (!wait && r == GL_TIMEOUT_EXPIRED) {
         return;
     }
+    uint64_t tc = now_ns();
     glDeleteSync(RB.fence);
     RB.on = false;
     GLenum tgt = RB.via_cs ? GL_SHADER_STORAGE_BUFFER : GL_PIXEL_PACK_BUFFER;
@@ -1806,6 +2429,7 @@ static void rb_finish_(bool wait)
         glUnmapBuffer(tgt);
     }
     glBindBuffer(tgt, 0);
+    G.st.ns_rcopy += now_ns() - tc;
 }
 
 /* Lo que la GPU ya terminó, a la RAM, sin esperar (antes de mostrar la pantalla). */
@@ -1829,6 +2453,7 @@ static void surf_flush_async(int i)
         return;
     }
     rb_finish(true); /* la anterior primero */
+    gp_mark(s->pa, s->w, s->h, GP_READ);
     uint64_t end = (uint64_t)s->pa + (uint64_t)s->pitch * (uint64_t)s->h;
     if (end > G.ram_size) {
         s->dirty = false;
@@ -2605,6 +3230,7 @@ static bool gpu_draw_(const GpuDraw *d)
     GLuint fbo = fbo_get(si, zi);
     sc_check(); /* fbo_get / zeta_get pueden haber cambiado el estado */
     Surf *s = &G.surf[si];
+    gp_mark(s->pa, s->w, s->h, s->swz ? GP_SWZ : GP_DRAW);
     if (SC.fbo != fbo) {
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         SC.fbo = fbo;
@@ -2709,7 +3335,7 @@ static bool gpu_draw_(const GpuDraw *d)
         sc_cap(GL_STENCIL_TEST, 64, false);
     }
     /* texturas */
-    if (SC.prog != P->prog) {
+    if (!G.sso && SC.prog != P->prog) {
         prog_use(P);
     }
     g_zone = Z_GL_TEXS;
@@ -2737,12 +3363,37 @@ static bool gpu_draw_(const GpuDraw *d)
         sc_check();
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         SC.fbo = fbo;
-        prog_use(P);
+        if (!G.sso) {
+            prog_use(P);
+        }
     }
     g_zone = Z_GL_UNIF;
     /* uniforms (solo los que cambiaron) */
     float vp[4] = {2.0f / (float)s->w, 2.0f / (float)s->h, d->zmax > 0 ? 2.0f / d->zmax : 1.0f, d->psize};
     Prog *F = G.sso ? &G.fsp : P; /* de quién son los uniforms del fragment shader */
+    if (G.sso) {
+        /* v0.18.76: el fragment shader a la medida de estos combiners, si ya está */
+        GLuint pipe = P->pipe;
+        g_zone = Z_GL_PROG;
+        FsX *x = fx_get(d, tmode, tcube);
+        if (x) {
+            GLuint pp = pipe_pair(P->prog, x->p.prog);
+            if (pp) {
+                pipe = pp;
+                F = &x->p;
+                G.st.fsx_draws++;
+            }
+        }
+        g_zone = Z_GL_UNIF;
+        if (SC.prog != pipe) {
+            if (!SC.nouse) {
+                glUseProgram(0); /* con un programa puesto, el pipeline no cuenta */
+                SC.nouse = true;
+            }
+            p_glBindProgramPipeline(pipe);
+            SC.prog = pipe;
+        }
+    }
     GLuint vp_ = P->prog, fp = F->prog;
     if (sc_u(P, 0, vp, sizeof(vp))) pu4fv(vp_, P->u_vp, 1, vp);
     if (sc_u(F, 1, tmode, sizeof(tmode))) pu1iv(fp, F->u_tmode, 4, tmode);
@@ -2998,6 +3649,7 @@ static bool impl_clear_color(uint32_t pa, uint32_t pitch, int h, int x0, int y0,
         G.st.clear_new++;
     }
     Surf *s = &G.surf[si];
+    gp_mark(s->pa, s->w, s->h, s->swz ? GP_SWZ : GP_DRAW);
     sc_check();
     if (!fbo_has(SC.fbo, si, -1)) {
         glBindFramebuffer(GL_FRAMEBUFFER, s->fbo);
@@ -3092,6 +3744,9 @@ static void impl_end_frame(void)
         g_zone = Z_GL_PROG;
         pre_step();
         g_zone = zone;
+    }
+    if (G.ready) {
+        gp_frame();
     }
     G.frame++;
 }
@@ -3933,6 +4588,8 @@ uint32_t gpu_query_collect(void) { return 0; }
 void gpu_query_reset(void) {}
 void gpu_flush_surface_async(uint32_t pa) { (void)pa; }
 int gpu_frames_behind(void) { return -1; }
+void gpu_prof_text(char *out, size_t n) { if (n) out[0] = 0; }
+void gpu_fsx_set(int mode) { (void)mode; }
 void gpu_readback_poll(void) {}
 void gpu_flush_all(void) {}
 void gpu_invalidate(uint32_t pa, uint32_t len) { (void)pa, (void)len; }

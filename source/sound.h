@@ -18,6 +18,9 @@ const char *sound_info(void);
 #ifndef __SWITCH__
 /* PC: sacar lo que hay en el anillo (pruebas). */
 unsigned sound_take(int16_t *out, unsigned n);
+/* v0.18.76: la salida estirada (n múltiplo de 256) y meter muestras como el APU. */
+void sound_render_test(int16_t *out, unsigned n);
+void sound_push_test(const int16_t *st, unsigned n);
 #endif
 
 #endif
