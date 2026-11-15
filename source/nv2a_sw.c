@@ -219,6 +219,72 @@ static void attr_conv(uint32_t fmt, const uint8_t *p, float o[4])
     }
 }
 
+/* v0.18.77: un atributo de nv vértices seguidos (paso stride) a dst (paso so
+ * floats): el tipo se mira una vez, no en cada vértice (attr_conv era el 17%
+ * del trabajo del push buffer). Mismos valores que attr_conv. */
+static float g_u8f[256];
+static void attr_conv_run(uint32_t fmt, const uint8_t *p, uint32_t stride, unsigned nv, float *dst, unsigned so)
+{
+    unsigned type = fmt & 0xF, size = (fmt >> 4) & 0xF;
+    if (!g_u8f[255]) {
+        for (int i = 0; i < 256; i++) {
+            g_u8f[i] = i / 255.0f;
+        }
+    }
+    if (type == 0 && size == 4) { /* D3DCOLOR (BGRA) */
+        for (unsigned v = 0; v < nv; v++, p += stride, dst += so) {
+            dst[0] = g_u8f[p[2]], dst[1] = g_u8f[p[1]], dst[2] = g_u8f[p[0]], dst[3] = g_u8f[p[3]];
+        }
+        return;
+    }
+    if ((type == 0 || type == 4) && size >= 1 && size <= 4) { /* bytes normalizados, en orden */
+        for (unsigned v = 0; v < nv; v++, p += stride, dst += so) {
+            dst[0] = dst[1] = dst[2] = 0;
+            dst[3] = 1;
+            for (unsigned i = 0; i < size; i++) {
+                dst[i] = g_u8f[p[i]];
+            }
+        }
+        return;
+    }
+    if (type == 6) { /* normal comprimida 11:11:10 */
+        for (unsigned v = 0; v < nv; v++, p += stride, dst += so) {
+            uint32_t w;
+            memcpy(&w, p, 4);
+            int32_t x = (int32_t)(w << 21) >> 21, y = (int32_t)(w << 10) >> 21, z = (int32_t)w >> 22;
+            dst[0] = x / 1023.0f, dst[1] = y / 1023.0f, dst[2] = z / 511.0f, dst[3] = 1.0f;
+        }
+        return;
+    }
+    if (type == 1 && size >= 1 && size <= 4) { /* shorts normalizados */
+        for (unsigned v = 0; v < nv; v++, p += stride, dst += so) {
+            int16_t sv[4] = {0, 0, 0, 0};
+            memcpy(sv, p, size * 2u);
+            dst[0] = dst[1] = dst[2] = 0;
+            dst[3] = 1;
+            for (unsigned i = 0; i < size; i++) {
+                dst[i] = (2.0f * sv[i] + 1.0f) / 65535.0f;
+            }
+        }
+        return;
+    }
+    if (type == 5 && size >= 1 && size <= 4) { /* shorts */
+        for (unsigned v = 0; v < nv; v++, p += stride, dst += so) {
+            int16_t sv[4] = {0, 0, 0, 0};
+            memcpy(sv, p, size * 2u);
+            dst[0] = dst[1] = dst[2] = 0;
+            dst[3] = 1;
+            for (unsigned i = 0; i < size; i++) {
+                dst[i] = (float)sv[i];
+            }
+        }
+        return;
+    }
+    for (unsigned v = 0; v < nv; v++, p += stride, dst += so) {
+        attr_conv(fmt, p, dst);
+    }
+}
+
 static unsigned attr_bytes(uint32_t fmt)
 {
     unsigned type = fmt & 0xF, size = (fmt >> 4) & 0xF;
@@ -385,7 +451,55 @@ static struct {
     uint32_t w, h;
 } g_swz[5]; /* [4]: el de gpu_decode (el hilo de la GPU) */
 
+static void swz_tables_slot(int s, uint32_t w, uint32_t h, uint32_t **xm, uint32_t **ym);
+
+/* v0.18.77: las del hilo del juego, guardadas por tamaño (antes, dos
+ * texturas de distinto tamaño en la misma etapa las rehacían en cada dibujo:
+ * 11% del trabajo del push buffer). Se echa la menos usada; un dibujo usa a
+ * lo sumo 4, así que nunca se echa una del mismo dibujo. */
+#define SWZ_CACHE 32
+static struct {
+    uint32_t *x, *y;
+    uint32_t w, h;
+    unsigned used;
+} g_swzc[SWZ_CACHE];
+static unsigned g_swzc_tick;
+
 static void swz_tables(int s, uint32_t w, uint32_t h, uint32_t **xm, uint32_t **ym)
+{
+    if (s >= 4) {
+        swz_tables_slot(s, w, h, xm, ym);
+        return;
+    }
+    int lru = 0;
+    for (int i = 0; i < SWZ_CACHE; i++) {
+        if (g_swzc[i].x && g_swzc[i].w == w && g_swzc[i].h == h) {
+            g_swzc[i].used = ++g_swzc_tick;
+            *xm = g_swzc[i].x;
+            *ym = g_swzc[i].y;
+            return;
+        }
+        if (g_swzc[i].used < g_swzc[lru].used) {
+            lru = i;
+        }
+    }
+    /* se arma en la ranura de la etapa y se pasa al caché */
+    swz_tables_slot(s, w, h, xm, ym);
+    if (!*xm || !*ym) {
+        return;
+    }
+    free(g_swzc[lru].x);
+    free(g_swzc[lru].y);
+    g_swzc[lru].x = g_swz[s].x;
+    g_swzc[lru].y = g_swz[s].y;
+    g_swzc[lru].w = w;
+    g_swzc[lru].h = h;
+    g_swzc[lru].used = ++g_swzc_tick;
+    g_swz[s].x = g_swz[s].y = NULL; /* ahora son del caché */
+    g_swz[s].w = g_swz[s].h = 0;
+}
+
+static void swz_tables_slot(int s, uint32_t w, uint32_t h, uint32_t **xm, uint32_t **ym)
 {
     if (w != g_swz[s].w || h != g_swz[s].h || !g_swz[s].x || !g_swz[s].y) {
         free(g_swz[s].x);
@@ -1716,9 +1830,7 @@ static bool pk_build(GpuDraw *d)
                     memcpy(o, p0 + (size_t)v * stride, sz * 4);
                 }
             } else {
-                for (unsigned v = 0; v < nv; v++) {
-                    attr_conv(fmt, p0 + (size_t)v * stride, dst + (size_t)v * so);
-                }
+                attr_conv_run(fmt, p0, stride, nv, dst, so);
             }
         } else {
             for (unsigned v = 0; v < nv; v++) {

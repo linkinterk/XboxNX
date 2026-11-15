@@ -10,6 +10,10 @@
  */
 #include <stdbool.h>
 #include <stdio.h>
+#include <time.h>
+#ifdef REPLAY_CALLGRIND
+#include <valgrind/callgrind.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 
@@ -126,6 +130,18 @@ int main(int argc, char **argv)
     }
     unsigned draws = 0;
     uint32_t tex_fmt[4] = {0}, tex_off[4] = {0}, shader = 0, cctl = 0, prim = 0;
+    const bool sin_cull = getenv("SIN_CULL") != NULL, cull_inv = getenv("CULL_INV") != NULL;
+    /* v0.18.77: REPETIR=n el cuadro n veces (para medir el camino del juego ya
+     * con todo compilado: la primera vuelta no cuenta) */
+    int reps = getenv("REPETIR") ? atoi(getenv("REPETIR")) : 1;
+    for (int rep = 0; rep < (reps > 0 ? reps : 1); rep++) {
+    struct timespec rt0, rt1;
+#ifdef REPLAY_CALLGRIND
+    if (rep == reps - 4) { /* medir solo las últimas vueltas (todo ya compilado) */
+        CALLGRIND_ZERO_STATS;
+    }
+#endif
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &rt0);
     for (size_t i = 0; i < n; i++) {
         uint32_t m = rec[i].m, v = rec[i].v;
         g_base = rec[i].base;
@@ -159,10 +175,10 @@ int main(int argc, char **argv)
         if (m == 0x17FC && v) {
             prim = v;
         }
-        if (getenv("SIN_CULL") && m == 0x0308) {
+        if (sin_cull && m == 0x0308) {
             v = 0;
         }
-        if (getenv("CULL_INV") && m == 0x03A0) {
+        if (cull_inv && m == 0x03A0) {
             v ^= 1;
         }
         sw_method(m, v);
@@ -184,6 +200,13 @@ int main(int argc, char **argv)
                 break;
             }
         }
+    }
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &rt1);
+    if (reps > 1) {
+        fprintf(stderr, "vuelta %d: %.2f ms de CPU del hilo principal\n", rep,
+                (rt1.tv_sec - rt0.tv_sec) * 1e3 + (rt1.tv_nsec - rt0.tv_nsec) / 1e6);
+        gpu_end_frame();
+    }
     }
     fprintf(stderr, "visibilidad: %u píxeles pasaron Z\n", (unsigned)sw_zpass_result());
     if (getenv("ASYNC")) { /* el camino de la Switch: al PBO y a la RAM después */
@@ -207,6 +230,11 @@ int main(int argc, char **argv)
             fprintf(stderr, "hilo GPU: %u dibujos por la cola, %u perdidos, %.1f ms ocupado, juego: %.1f ms copiando, %.1f ms esperando lugar, %u esperas (%.1f ms), cola máx %.1f MB\n",
                     g->mt_draws, g->mt_lost, g->ns_busy / 1e6, g->ns_enq / 1e6, g->ns_qwait / 1e6, g->syncs, g->ns_sync / 1e6,
                     g->q_max / 1048576.0);
+        }
+        if (getenv("XBOXNX_DBG_C")) {
+            unsigned cb = 0, cok = 0;
+            gpu_dbg_consts(&cb, &cok);
+            fprintf(stderr, "constantes en el hilo: %u iguales, %u distintas\n", cok, cb);
         }
         fprintf(stderr, "a la medida: %u compilados, %u de la SD, %u sin compilar, %llu dibujos\n", g->fsx_built,
                 g->fsx_cached, g->fsx_bad, (unsigned long long)g->fsx_draws);

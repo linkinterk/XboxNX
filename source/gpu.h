@@ -135,6 +135,9 @@ int gpu_frames_behind(void);
 void gpu_prof_text(char *out, size_t n);
 /* v0.18.76, para las pruebas: fragment shaders a la medida (0 no, 1 normal, 2 todos ya). */
 void gpu_fsx_set(int mode);
+#ifndef __SWITCH__
+void gpu_dbg_consts(unsigned *bad, unsigned *ok);
+#endif
 
 /* La pantalla de la app con GL (1280x720 RGBA): true si se mostró. */
 bool gpu_present_ui(const uint32_t *rgba, int w, int h);

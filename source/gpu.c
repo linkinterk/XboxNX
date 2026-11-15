@@ -3884,7 +3884,23 @@ typedef struct CDraw {
     GpuDraw d;
     uint32_t o_verts, o_in, o_pk, o_idx, o_src; /* desde el principio de la orden (0: no hay) */
     bool consts_new;                           /* las constantes vienen (si no: las de la orden anterior) */
+    uint16_t c_first, c_n;                     /* v0.18.77: solo las que cambiaron (vec4 desde c_first) */
+#ifndef __SWITCH__
+    uint64_t c_hash; /* pruebas (XBOXNX_DBG_C): el hash de las 192, para ver que el hilo tiene las mismas */
+#endif
 } CDraw;
+#ifndef __SWITCH__
+static unsigned g_dbg_c_bad, g_dbg_c_ok;
+#endif
+#ifndef __SWITCH__
+/* pruebas: cuántos dibujos llegaron al hilo con las constantes distintas / iguales */
+void gpu_dbg_consts(unsigned *bad, unsigned *ok)
+{
+    *bad = g_dbg_c_bad;
+    *ok = g_dbg_c_ok;
+}
+#endif
+
 
 typedef struct CClear {
     uint32_t pa, pitch, argb, value, zfmt, mask;
@@ -4047,10 +4063,19 @@ static void q_exec(const QHdr *h)
         d->vs_idx = c.o_idx ? (const uint32_t *)(const void *)(b + c.o_idx) : NULL;
         d->vs_src = c.o_src ? (const char *)(b + c.o_src) : NULL;
         if (d->vs_consts) {
-            if (c.consts_new) {
-                memcpy(Q.cur_c, body + q_al(sizeof(CDraw)), sizeof(Q.cur_c));
+            if (c.consts_new && c.c_first < 192 && c.c_n <= 192 - c.c_first) {
+                memcpy(Q.cur_c + (size_t)c.c_first * 4, body + q_al(sizeof(CDraw)), (size_t)c.c_n * 16);
             }
             d->vs_consts = Q.cur_c;
+#ifndef __SWITCH__
+            if (c.c_hash) {
+                if ((fnv(1469598103934665603ull, Q.cur_c, sizeof(Q.cur_c)) | 1) != c.c_hash) {
+                    g_dbg_c_bad++;
+                } else {
+                    g_dbg_c_ok++;
+                }
+            }
+#endif
         }
         if (!impl_draw(d)) {
             G.st.mt_lost++;
@@ -4294,8 +4319,31 @@ bool gpu_draw(const GpuDraw *d)
     size_t n_pk = d->vs_pk ? (size_t)d->vs_pk_n * k * 16 : 0;
     size_t n_idx = d->vs_idx ? (size_t)d->vs_nidx * 4 : 0;
     size_t n_src = 0; /* el texto del programa no hace falta: el hilo ya lo tiene compilado (vt_get) */
-    bool cnew = d->vs_consts && (!Q.last_c_ok || memcmp(Q.last_c, d->vs_consts, sizeof(Q.last_c)));
-    size_t n_c = cnew ? sizeof(Q.last_c) : 0;
+    /* v0.18.77: solo el tramo de constantes que cambió (las matrices, casi
+     * siempre unas pocas): antes iban las 192 (3 KB) en cada dibujo */
+    unsigned c_first = 0, c_last = 0;
+    bool cnew = false;
+    if (d->vs_consts) {
+        if (!Q.last_c_ok) {
+            cnew = true, c_first = 0, c_last = 191;
+        } else {
+            const uint64_t *a = (const uint64_t *)(const void *)Q.last_c, *bb = (const uint64_t *)(const void *)d->vs_consts;
+            int f = -1, l = -1;
+            for (int i = 0; i < 192 * 2; i++) {
+                if (a[i] != bb[i]) {
+                    if (f < 0) {
+                        f = i;
+                    }
+                    l = i;
+                }
+            }
+            if (f >= 0) {
+                cnew = true, c_first = (unsigned)f / 2, c_last = (unsigned)l / 2;
+            }
+        }
+    }
+    size_t n_c = cnew ? (size_t)(c_last - c_first + 1) * 16 : 0;
+
     size_t off = sizeof(QHdr) + q_al(sizeof(CDraw)) + n_c;
     size_t o_verts = n_verts ? off : 0;
     off += q_al(n_verts);
@@ -4324,11 +4372,22 @@ bool gpu_draw(const GpuDraw *d)
     c.o_verts = (uint32_t)o_verts, c.o_in = (uint32_t)o_in, c.o_pk = (uint32_t)o_pk;
     c.o_idx = (uint32_t)o_idx, c.o_src = (uint32_t)o_src;
     c.consts_new = cnew;
+    c.c_first = (uint16_t)c_first;
+    c.c_n = (uint16_t)(cnew ? c_last - c_first + 1 : 0);
+#ifndef __SWITCH__
+    {
+        static int dbg = -1;
+        if (dbg < 0) {
+            dbg = getenv("XBOXNX_DBG_C") != NULL;
+        }
+        c.c_hash = dbg && d->vs_consts ? fnv(1469598103934665603ull, d->vs_consts, sizeof(Q.cur_c)) | 1 : 0;
+    }
+#endif
     memcpy(p + sizeof(QHdr), &c, sizeof(c));
     uint8_t *q = p + sizeof(QHdr) + q_al(sizeof(CDraw));
     if (cnew) {
-        memcpy(q, d->vs_consts, sizeof(Q.last_c));
-        memcpy(Q.last_c, d->vs_consts, sizeof(Q.last_c));
+        memcpy(q, d->vs_consts + (size_t)c_first * 4, n_c);
+        memcpy(Q.last_c + (size_t)c_first * 4, d->vs_consts + (size_t)c_first * 4, n_c);
         Q.last_c_ok = true;
     }
     if (n_verts) memcpy(p + o_verts, d->verts, n_verts);
