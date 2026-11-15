@@ -3251,6 +3251,7 @@ static struct {
     uint64_t wpos;    /* el principal: dónde va la orden que está escribiendo */
     uint64_t done;    /* la última orden C_CALL terminada */
     uint64_t next_id;
+    uint64_t frames_in, frames_done; /* v0.18.74: cuadros dejados en la cola y ya hechos por el hilo */
     int cons_wait, prod_wait;
     QMutex m;
     QCond more, space, synced;
@@ -3423,6 +3424,7 @@ static void q_exec(const QHdr *h)
     case C_END_FRAME:
         impl_end_frame();
         q_compile_one(); /* a lo sumo uno por cuadro aunque la cola no se vacíe */
+        __atomic_add_fetch(&Q.frames_done, 1, __ATOMIC_RELEASE);
         break;
     case C_INVAL: {
         uint32_t v[2];
@@ -3727,7 +3729,19 @@ void gpu_end_frame(void)
         impl_end_frame();
         return;
     }
+    Q.frames_in++;
     q_simple(C_END_FRAME, NULL, 0);
+}
+
+/* v0.18.74: cuántos cuadros terminados por el juego todavía no hizo el hilo
+ * de la GPU (-1 sin el hilo). */
+int gpu_frames_behind(void)
+{
+    if (!Q.on) {
+        return -1;
+    }
+    uint64_t d = __atomic_load_n(&Q.frames_done, __ATOMIC_ACQUIRE);
+    return Q.frames_in > d ? (int)(Q.frames_in - d) : 0;
 }
 
 void gpu_invalidate(uint32_t pa, uint32_t len)
@@ -3918,6 +3932,7 @@ void gpu_flush_surface(uint32_t pa) { (void)pa; }
 uint32_t gpu_query_collect(void) { return 0; }
 void gpu_query_reset(void) {}
 void gpu_flush_surface_async(uint32_t pa) { (void)pa; }
+int gpu_frames_behind(void) { return -1; }
 void gpu_readback_poll(void) {}
 void gpu_flush_all(void) {}
 void gpu_invalidate(uint32_t pa, uint32_t len) { (void)pa, (void)len; }

@@ -926,6 +926,16 @@ static void resumen_tick(const UiState *s, double fps, double spd)
              g_mips = RDELTA(gs->mipmaps, p_mips);
     p_draws = gs->draws, p_ups = gs->uploads, p_upb = gs->upload_bytes, p_nstex = gs->ns_tex, p_nscall = gs->ns_call,
     p_mips = gs->mipmaps;
+    static unsigned p_skip, p_flips;
+    unsigned g_skip = RDELTA(hw_stats()->frames_skipped, p_skip), g_flips = RDELTA(hw_stats()->flips, p_flips);
+    p_skip = hw_stats()->frames_skipped, p_flips = hw_stats()->flips;
+    static unsigned p_progs;
+    static uint64_t p_nsdraw, p_nsvbuf, p_nslink, p_nsread;
+    unsigned g_progs = RDELTA(gs->vs_progs, p_progs);
+    uint64_t g_ns_draw = RDELTA(gs->ns_draw, p_nsdraw), g_ns_vbuf = RDELTA(gs->ns_vbuf, p_nsvbuf),
+             g_ns_link = RDELTA(gs->ns_link, p_nslink), g_ns_read = RDELTA(gs->ns_read + gs->ns_rp, p_nsread);
+    p_progs = gs->vs_progs, p_nsdraw = gs->ns_draw, p_nsvbuf = gs->ns_vbuf, p_nslink = gs->ns_link,
+    p_nsread = gs->ns_read + gs->ns_rp;
     static uint64_t p_avp, p_spin, p_idle, p_ard;
     uint64_t a_now = kio_async_count(), ard = a_now >= p_ard ? RDELTA(a_now, p_ard) : a_now;
     p_ard = a_now;
@@ -957,7 +967,8 @@ static void resumen_tick(const UiState *s, double fps, double spd)
                    "pantalla %u ms · decodificados %llu (%.1f us c/u) · sonido: %.0f cuadros/s, ocupado %.0f%%, atrasado %.0f ms, "
                    "saltados %llu (voces %.0f%%) · caché de lecturas: %.0f MB de la RAM y %.0f MB de la SD (%.0f MB guardados) · "
                    "esperas acortadas %llu (por la hora %llu) · lecturas en segundo plano %llu · "
-                   "GPU: %u dibujos (%.0f ms en GL), %u texturas subidas (%.0f MB, %.0f ms), %llu mipmaps\n",
+                   "cuadros sin dibujar %u de %u · GPU: %u dibujos (%.0f ms en total, %.0f en GL, %.0f vértices), %u texturas subidas (%.0f MB, %.0f ms), %llu mipmaps, "
+                   "%u programas nuevos (%.0f ms compilando), leer cuadros %.0f ms\n",
                 ts, n ? fps_sum / n : 0.0, fps_min < 1e8 ? fps_min : 0.0, n ? 100.0 * spd_sum / n : 0.0,
                 (s->prof[PROF_CPU] + 5) / 10, (s->prof[PROF_KERNEL] + 5) / 10, (s->prof[PROF_APU] + 5) / 10,
                 (s->prof[PROF_GPU] + 5) / 10, all ? 100.0 * (double)get / (double)all : 0.0,
@@ -969,8 +980,9 @@ static void resumen_tick(const UiState *s, double fps, double spd)
                 (unsigned long long)dn, dn ? (double)dtk / tps * 1e6 / (double)dn : 0.0, (double)af / dt,
                 100.0 * (double)abusy / (dt * 1e9), as->lag_ns / 1e6, (unsigned long long)askip,
                 100.0 * (double)avp / (dt * 1e9), rch / 1048576.0, rcm / 1048576.0, rc_ram / 1048576.0,
-                (unsigned long long)idle, (unsigned long long)spin, (unsigned long long)ard, g_draws,
-                g_ns_call / 1e6, g_ups, g_upb / 1048576.0, g_ns_tex / 1e6, (unsigned long long)g_mips);
+                (unsigned long long)idle, (unsigned long long)spin, (unsigned long long)ard, g_skip, g_flips, g_draws,
+                g_ns_draw / 1e6, g_ns_call / 1e6, g_ns_vbuf / 1e6, g_ups, g_upb / 1048576.0, g_ns_tex / 1e6,
+                (unsigned long long)g_mips, g_progs, g_ns_link / 1e6, g_ns_read / 1e6);
         fclose(f);
     }
     fps_sum = spd_sum = 0, n = 0, fps_min = 1e9;

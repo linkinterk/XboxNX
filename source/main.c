@@ -35,7 +35,7 @@
 #include "apu/apu.h"
 #include <time.h>
 
-#define APP_VER   "0.18.74"
+#define APP_VER   "0.18.75"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -834,7 +834,7 @@ int main(int argc, char **argv)
                     if (n == 1) {
                         snprintf(g_ui.toast, sizeof(g_ui.toast), "Dibujar todos los cuadros (más lento)");
                     } else {
-                        snprintf(g_ui.toast, sizeof(g_ui.toast), "Dibujar 1 de cada %u cuadros (el juego corre más rápido)", n);
+                        snprintf(g_ui.toast, sizeof(g_ui.toast), "Saltar hasta %u cuadros seguidos si la GPU va atrasada", n - 1);
                     }
                     dirty = true;
                 }

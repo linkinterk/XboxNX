@@ -128,6 +128,8 @@ void gpu_flush_all(void);
 void gpu_invalidate(uint32_t pa, uint32_t len);
 /* Fin de cuadro (limpia lo que no se usó en un rato). */
 void gpu_end_frame(void);
+/* Cuadros que el hilo de la GPU todavía no terminó (-1: sin el hilo). */
+int gpu_frames_behind(void);
 
 /* La pantalla de la app con GL (1280x720 RGBA): true si se mostró. */
 bool gpu_present_ui(const uint32_t *rgba, int w, int h);

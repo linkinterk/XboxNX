@@ -678,7 +678,26 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
             }
         }
         gpu_end_frame();
-        g_skipping = g_frameskip > 1 && g_cap.state != 2 && g_cap.state != 1 && (g_frame_no % g_frameskip) != 0;
+        {
+            /* v0.18.74: con el hilo de la GPU, se salta un cuadro solo si la
+             * GPU todavía no terminó el anterior (y a lo sumo g_frameskip - 1
+             * seguidos): si la GPU da abasto se ven todos (antes, con 1/2, se
+             * veía la mitad siempre aunque la GPU estuviera libre: saltos) */
+            static unsigned run;
+            int behind = gpu_frames_behind();
+            bool cap = g_cap.state == 2 || g_cap.state == 1;
+            if (g_frameskip <= 1 || cap) {
+                g_skipping = false;
+            } else if (behind < 0) {
+                g_skipping = (g_frame_no % g_frameskip) != 0;
+            } else {
+                g_skipping = behind >= 2 && run + 1 < g_frameskip;
+            }
+            run = g_skipping ? run + 1 : 0;
+            if (g_skipping) {
+                g_hw.st.frames_skipped++;
+            }
+        }
         sw_set_skip(g_skipping);
         if (done) {
             g_hw.last_target = done;
