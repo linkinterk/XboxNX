@@ -1558,6 +1558,7 @@ static bool jit_compile(Cpu *c, Block *b)
         b->slow = 0;
         b->helper = 0;
         Em e;
+        memset(&e, 0, sizeof(e)); /* v0.18.73: nada sin inicializar */
         /* primero las Insn (las funciones de C las reciben) y luego el código */
         size_t ibytes = sizeof(JHdr) + (((size_t)b->n * sizeof(Insn) + 15) & ~(size_t)15);
         if (g_jit.used + ibytes + 4096 > g_jit.size) {
@@ -1578,6 +1579,7 @@ static bool jit_compile(Cpu *c, Block *b)
         e.full = false;
         e.fallback = false;
         e.lf_kind = 0;
+        e.lf_zres = false; /* v0.18.73: sin esto venía con basura (saltos al revés) */
         e.ncold = e.npool = 0;
         e.nzcv = e.nzcv_prev = 0;
         e.jcc_site = NULL;

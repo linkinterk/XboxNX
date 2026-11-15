@@ -675,8 +675,26 @@ static void io_tests(const char *iso)
             wr(SCRATCH + 0x3C4, 0);
             wr(IOSB, 0xDEAD);
             uint32_t rc8[8] = {ha, he, 0, 0, IOSB, WIN, 140000, SCRATCH + 0x3C0};
+            call("NtSetEvent", he, 0, 0, 0, 0); /* señalado de antes: la lectura lo apaga */
             uint32_t r1 = (uint32_t)calln("NtReadFile", 8, rc8);
             CHECK(r1 == 0x103u && rd(IOSB) == 0x103u); /* de verdad en segundo plano */
+            uint32_t evobj = kob_lookup(&k, he, NULL);
+            CHECK(evobj && rd(evobj + 4) == 0); /* hasta que termine, sin señalar */
+            {
+                /* y el del objeto archivo, si no hay evento */
+                uint32_t fo = kob_lookup(&k, ha, NULL);
+                CHECK(fo);
+                wr(fo + K_FO_EVENT + 4, 1);
+                wr(SCRATCH + 0x3C0, 65536u * 30);
+                uint32_t rc2[8] = {ha, 0, 0, 0, SCRATCH + 0x3E0, WIN + 0xC0000, 4096, SCRATCH + 0x3C0};
+                uint32_t r2 = (uint32_t)calln("NtReadFile", 8, rc2);
+                CHECK(r2 != 0x103u || rd(SCRATCH + 0x3E0) != 0x103u || rd(fo + K_FO_EVENT + 4) == 0);
+                for (int w = 0; w < 400 && rd(SCRATCH + 0x3E0) == 0x103u; w++) {
+                    kio_async_wait(&k, 5000000u);
+                }
+                CHECK(rd(fo + K_FO_EVENT + 4) == 1);
+                wr(SCRATCH + 0x3C0, wo);
+            }
             for (uint32_t q = 0; q < 70000; q++) {
                 ref[wo + 65536 + q] ^= 0x5A; /* desde la mitad de lo que se está leyendo */
             }

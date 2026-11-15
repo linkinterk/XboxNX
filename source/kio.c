@@ -1760,6 +1760,22 @@ static uint64_t NtReadFile(KCall *c)
                 k->bytes_read += n;
                 io_moved(f, named, off + n);
                 io_status(k, c->a[4], ST_PENDING, 0);
+                /* v0.18.73: como NtReadFile del Xbox, el evento (o el del
+                 * archivo) queda sin señalar hasta que termine. Si venía
+                 * señalado de la lectura anterior, la espera del juego volvía
+                 * al momento y leía el búfer todavía vacío (punteros rotos:
+                 * "acceso a memoria sin mapear" en la v0.18.71 y la .72). */
+                uint32_t evo = 0;
+                if (c->a[1]) {
+                    evo = kob_lookup(k, c->a[1], NULL);
+                } else {
+                    ObType t;
+                    uint32_t fo = kob_lookup(k, c->a[0], &t);
+                    evo = fo && t == OB_FILE ? fo + K_FO_EVENT : 0;
+                }
+                if (evo) {
+                    vm_wr32(k->vm, evo + 4, 0);
+                }
                 return ST_PENDING;
             }
         }
