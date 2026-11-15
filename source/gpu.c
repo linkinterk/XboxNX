@@ -300,6 +300,8 @@ typedef struct TexEnt {
     unsigned checked, used;
     bool valid;
     bool mips;       /* v0.18.70: ya tiene sus niveles reducidos (glGenerateMipmap) */
+    uint8_t dyn;     /* v0.18.74: veces que cambió poco después de subirla (videos, efectos) */
+    unsigned up_frame; /* el cuadro en que se subió */
     uint16_t params; /* filtro y repetición puestos (1 + clave; 0: ninguno) */
 } TexEnt;
 
@@ -2408,6 +2410,15 @@ static GLuint tex_get(const GpuTex *t, float scale[2])
                              (GLsizei)t->w, (GLsizei)t->h, 0, GL_BGRA, GL_UNSIGNED_BYTE, G.scratch);
                 G.st.upload_bytes += need * 4;
             }
+            /* v0.18.74: una que cambia a menudo (el video del menú, efectos
+             * dibujados por la CPU) no lleva niveles reducidos: hacerlos en
+             * cada cambio llenaba el hilo de la GPU (los menús iban a 4-7 FPS) */
+            if (e->valid && G.frame - e->up_frame < 30) {
+                e->dyn = e->dyn < 255 ? (uint8_t)(e->dyn + 1) : 255;
+            } else if (e->dyn && G.frame - e->up_frame > 600) {
+                e->dyn = 0;
+            }
+            e->up_frame = G.frame;
             e->hash = h;
             e->valid = true;
             e->mips = false;
@@ -2419,7 +2430,7 @@ static GLuint tex_get(const GpuTex *t, float scale[2])
     /* v0.18.70: los niveles reducidos de la textura (el juego pide filtrar
      * con ellos casi todas: sin ellos, lo lejano se veía con granos y
      * brillos que saltan). Los hace la GPU una vez por textura subida. */
-    unsigned mip = t->cube || !p_glGenerateMipmap ? 0u : t->mip;
+    unsigned mip = t->cube || !p_glGenerateMipmap || e->dyn >= 2 ? 0u : t->mip;
     if (mip && !e->mips) {
         uint64_t tt = now_ns();
         p_glGenerateMipmap(GL_TEXTURE_2D);

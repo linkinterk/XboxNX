@@ -873,6 +873,9 @@ static void diag_end(const UiState *s)
 #define SUM_FILE "resumen.txt"
 #endif
 
+/* v0.18.74: un contador que volvió a empezar (juego reiniciado) da su valor, no un número enorme. */
+#define RDELTA(cur, prev) ((cur) >= (prev) ? (cur) - (prev) : (cur))
+
 static void resumen_tick(const UiState *s, double fps, double spd)
 {
     static time_t last;
@@ -900,33 +903,40 @@ static void resumen_tick(const UiState *s, double fps, double spd)
     CpuJitStats js;
     cpu_jit_stats(&js);
     const GpuStats *gs = gpu_stats();
-    uint64_t get = c->st_t_get - p_get, dec = c->st_t_dec - p_dec, all = c->st_t_all - p_all;
-    uint64_t kf = r->kfast - p_kfast, rd = r->counts[219] - p_rd, rdns = r->kns[219] - p_rdns;
-    uint64_t busy = gs->ns_busy - p_busy, sfl = gs->sflushes - p_sfl, sflns = gs->ns_sflush - p_sflns;
+    uint64_t get = RDELTA(c->st_t_get, p_get), dec = RDELTA(c->st_t_dec, p_dec), all = RDELTA(c->st_t_all, p_all);
+    uint64_t kf = RDELTA(r->kfast, p_kfast), rd = RDELTA(r->counts[219], p_rd), rdns = RDELTA(r->kns[219], p_rdns);
+    uint64_t busy = RDELTA(gs->ns_busy, p_busy), sfl = RDELTA(gs->sflushes, p_sfl), sflns = RDELTA(gs->ns_sflush, p_sflns);
     p_get = c->st_t_get, p_dec = c->st_t_dec, p_all = c->st_t_all, p_kfast = r->kfast;
     p_rd = r->counts[219], p_rdns = r->kns[219], p_busy = gs->ns_busy, p_sfl = gs->sflushes, p_sflns = gs->ns_sflush;
-    unsigned fl = js.flushes - p_flushes;
+    unsigned fl = RDELTA(js.flushes, p_flushes);
     p_flushes = js.flushes;
-    uint64_t why[5], cc = c->st_ccall - p_cc, wait = (gs->ns_qwait + gs->ns_sync) - p_wait;
+    uint64_t why[5], cc = RDELTA(c->st_ccall, p_cc), wait = RDELTA((gs->ns_qwait + gs->ns_sync), p_wait);
     for (int k = 0; k < 5; k++) {
-        why[k] = gs->sfl_why[k] - p_why[k];
+        why[k] = RDELTA(gs->sfl_why[k], p_why[k]);
         p_why[k] = gs->sfl_why[k];
     }
     p_cc = c->st_ccall, p_wait = gs->ns_qwait + gs->ns_sync;
     const ApuStats *as = apu_stats();
-    uint64_t af = as->frames - p_af, abusy = as->ns_busy - p_abusy, askip = as->skipped - p_askip;
+    uint64_t af = RDELTA(as->frames, p_af), abusy = RDELTA(as->ns_busy, p_abusy), askip = RDELTA(as->skipped, p_askip);
     p_af = as->frames, p_abusy = as->ns_busy, p_askip = as->skipped;
+    static unsigned p_draws, p_ups;
+    static uint64_t p_upb, p_nstex, p_nscall, p_mips;
+    unsigned g_draws = RDELTA(gs->draws, p_draws), g_ups = RDELTA(gs->uploads, p_ups);
+    uint64_t g_upb = RDELTA(gs->upload_bytes, p_upb), g_ns_tex = RDELTA(gs->ns_tex, p_nstex), g_ns_call = RDELTA(gs->ns_call, p_nscall),
+             g_mips = RDELTA(gs->mipmaps, p_mips);
+    p_draws = gs->draws, p_ups = gs->uploads, p_upb = gs->upload_bytes, p_nstex = gs->ns_tex, p_nscall = gs->ns_call,
+    p_mips = gs->mipmaps;
     static uint64_t p_avp, p_spin, p_idle, p_ard;
-    uint64_t a_now = kio_async_count(), ard = a_now >= p_ard ? a_now - p_ard : a_now;
+    uint64_t a_now = kio_async_count(), ard = a_now >= p_ard ? RDELTA(a_now, p_ard) : a_now;
     p_ard = a_now;
-    uint64_t avp = as->ns_vp - p_avp, spin = r->spin_skips - p_spin, idle = r->idle_skips - p_idle;
+    uint64_t avp = RDELTA(as->ns_vp, p_avp), spin = RDELTA(r->spin_skips, p_spin), idle = RDELTA(r->idle_skips, p_idle);
     p_avp = as->ns_vp, p_spin = r->spin_skips, p_idle = r->idle_skips;
-    uint64_t dn = js.decodes - p_dn, dtk = js.dec_ticks - p_dt;
+    uint64_t dn = RDELTA(js.decodes, p_dn), dtk = RDELTA(js.dec_ticks, p_dt);
     p_dn = js.decodes, p_dt = js.dec_ticks;
     static uint64_t p_rch, p_rcm;
     uint64_t rc_ram, rc_hit, rc_miss;
     kio_cache_stats(&rc_ram, &rc_hit, &rc_miss);
-    uint64_t rch = rc_hit - p_rch, rcm = rc_miss - p_rcm;
+    uint64_t rch = RDELTA(rc_hit, p_rch), rcm = RDELTA(rc_miss, p_rcm);
     p_rch = rc_hit, p_rcm = rc_miss;
     double tps = js.ticks_per_s ? (double)js.ticks_per_s : 1e9;
     FILE *f = fopen(SUM_FILE, started ? "a" : "w");
@@ -946,7 +956,8 @@ static void resumen_tick(const UiState *s, double fps, double spd)
                    "esperando a la GPU %.1f%% · lecturas %llu (%.1f ms c/u) · hora rápida %.0f/s · C desde el JIT %.0fk/s · "
                    "pantalla %u ms · decodificados %llu (%.1f us c/u) · sonido: %.0f cuadros/s, ocupado %.0f%%, atrasado %.0f ms, "
                    "saltados %llu (voces %.0f%%) · caché de lecturas: %.0f MB de la RAM y %.0f MB de la SD (%.0f MB guardados) · "
-                   "esperas acortadas %llu (por la hora %llu) · lecturas en segundo plano %llu\n",
+                   "esperas acortadas %llu (por la hora %llu) · lecturas en segundo plano %llu · "
+                   "GPU: %u dibujos (%.0f ms en GL), %u texturas subidas (%.0f MB, %.0f ms), %llu mipmaps\n",
                 ts, n ? fps_sum / n : 0.0, fps_min < 1e8 ? fps_min : 0.0, n ? 100.0 * spd_sum / n : 0.0,
                 (s->prof[PROF_CPU] + 5) / 10, (s->prof[PROF_KERNEL] + 5) / 10, (s->prof[PROF_APU] + 5) / 10,
                 (s->prof[PROF_GPU] + 5) / 10, all ? 100.0 * (double)get / (double)all : 0.0,
@@ -958,7 +969,8 @@ static void resumen_tick(const UiState *s, double fps, double spd)
                 (unsigned long long)dn, dn ? (double)dtk / tps * 1e6 / (double)dn : 0.0, (double)af / dt,
                 100.0 * (double)abusy / (dt * 1e9), as->lag_ns / 1e6, (unsigned long long)askip,
                 100.0 * (double)avp / (dt * 1e9), rch / 1048576.0, rcm / 1048576.0, rc_ram / 1048576.0,
-                (unsigned long long)idle, (unsigned long long)spin, (unsigned long long)ard);
+                (unsigned long long)idle, (unsigned long long)spin, (unsigned long long)ard, g_draws,
+                g_ns_call / 1e6, g_ups, g_upb / 1048576.0, g_ns_tex / 1e6, (unsigned long long)g_mips);
         fclose(f);
     }
     fps_sum = spd_sum = 0, n = 0, fps_min = 1e9;
@@ -1037,6 +1049,7 @@ void ui_resumen_exit(Runner *r)
     fprintf(f, "Al salir · gráficos: texturas con swizzle tomadas de lo dibujado %llu · ",
             (unsigned long long)gpu_stats()->swz_direct);
     fprintf(f, "superficies de otro ancho en la misma dirección (ya sin leer) %llu · ", (unsigned long long)gs->surf_alias);
+    fprintf(f, "cuadros terminados con otro destino puesto %u (se mostró la última pantalla) · ", hw_stats()->flip_other);
     fprintf(f, "texturas con mipmaps %llu · anisotropía del driver %ux · dibujos de puntos o líneas %llu · ",
             (unsigned long long)gs->mipmaps, gs->aniso_max, (unsigned long long)gs->points_lines);
     fprintf(f, "superficies cambiadas de tamaño %llu (ej. %08X de %ux%u%s a %ux%u%s), echadas por falta de lugar %llu · ",

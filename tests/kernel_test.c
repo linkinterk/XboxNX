@@ -1249,6 +1249,34 @@ static void hw_tests(void)
         XImage img = {0};
         CHECK(hw_screen(&k, &img) && img.w == 64 && img.px[(1 * 64 + 2) * 4] == 0x33 &&
               img.px[(1 * 64 + 2) * 4 + 2] == 0x99);
+        /* v0.18.74: un cuadro que termina con un destino con swizzle puesto
+         * (la pantalla de carga de Halo 2): se sigue mostrando la última
+         * pantalla dibujada, no esa textura leída como 64 de ancho */
+        {
+            static const uint32_t pbs[] = {
+                (3u << 18) | 0x0208, 0x208u | (5u << 16) | (5u << 24), 128, 0x40000, /* swizzle 32x32, otra dirección */
+                (1u << 18) | 0x012C, 0,                                             /* FLIP_INCREMENT_WRITE */
+            };
+            memcpy(vm.ram + PB + 0x600, pbs, sizeof(pbs));
+            memset(vm.ram + SURF + 0x40000, 0, 0x2000);
+            hw_set_frameskip(1);
+            unsigned fo = hw_stats()->flip_other;
+            v = PB + 0x600;
+            hw_mmio(&k, NV + 0x800044u, 4, true, &v);
+            v = PB + 0x600 + (uint32_t)sizeof(pbs);
+            hw_mmio(&k, NV + 0x800040u, 4, true, &v);
+            CHECK(hw_stats()->flip_other == fo + 1);
+            hw_set_frameskip(2); /* con saltos: se muestra lo último dibujado */
+            CHECK(hw_screen(&k, &img) && img.w == 64 && img.px[(1 * 64 + 2) * 4] == 0x33 &&
+                  img.px[(1 * 64 + 2) * 4 + 2] == 0x99);
+            hw_set_frameskip(3);
+            static const uint32_t pbr[] = {(3u << 18) | 0x0208, 0x108, 256, 0x1000}; /* de vuelta a la pantalla */
+            memcpy(vm.ram + PB + 0x680, pbr, sizeof(pbr));
+            v = PB + 0x680;
+            hw_mmio(&k, NV + 0x800044u, 4, true, &v);
+            v = PB + 0x680 + (uint32_t)sizeof(pbr);
+            hw_mmio(&k, NV + 0x800040u, 4, true, &v);
+        }
         free(img.px);
         /* NO_OPERATION con argumento: trampa para el ISR de D3D, y la CPU
          * avisada para atenderla ya (irq_kick); al borrarla, sigue */

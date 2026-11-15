@@ -367,12 +367,36 @@ static unsigned inline_stride(void)
 }
 
 /* SET_BEGIN_END y los vértices: cuenta lo que el juego dibuja en el cuadro. */
+/* v0.18.74: el destino de color actual ¿puede ser la pantalla? (lineal y
+ * con el ancho de la pantalla). Al terminar un cuadro Halo 2 a veces deja
+ * puesto otro destino (una textura con swizzle de la pantalla de carga): se
+ * mostraba ese, leído como 640x480, y se veía como ruido de colores. */
+static uint32_t g_screen_target;
+
+static bool screen_like(void)
+{
+    if (!g_hw.color_inst || ((g_hw.surf_format >> 8) & 0xF) != 1) {
+        return false;
+    }
+    uint32_t pitch = g_hw.surf_pitch & 0xFFFF, avp = g_hw.av_pitch;
+    unsigned aa = (g_hw.surf_format >> 12) & 0xF;
+    return !avp || pitch == avp || (aa && pitch == 2 * avp);
+}
+
+static void note_screen(void)
+{
+    if (screen_like()) {
+        g_screen_target = dma_base(g_hw.color_inst) + g_hw.color_offset;
+    }
+}
+
 static void draw_method(uint32_t m, uint32_t v)
 {
     HwDraws *d = &g_hw.cur;
     switch (m) {
     case NV097_SET_BEGIN_END:
         if (v) {
+            note_screen();
             g_hw.prim = v;
             g_hw.inline_words = 0;
             d->draws++;
@@ -638,8 +662,14 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         cap_flip(k);
         /* saltar cuadros: dibujar solo 1 de cada g_frameskip (no al capturar) */
         g_frame_no++;
-        if (!g_skipping && g_hw.color_inst) {
-            g_last_drawn = dma_base(g_hw.color_inst) + g_hw.color_offset;
+        uint32_t done = !g_hw.color_inst ? 0 : screen_like() || !g_screen_target
+                                                  ? dma_base(g_hw.color_inst) + g_hw.color_offset
+                                                  : g_screen_target;
+        if (done && !screen_like()) {
+            g_hw.st.flip_other++;
+        }
+        if (!g_skipping && done) {
+            g_last_drawn = done;
             {
                 int zf = g_zone;
                 g_zone = Z_FLIP;
@@ -650,8 +680,8 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         gpu_end_frame();
         g_skipping = g_frameskip > 1 && g_cap.state != 2 && g_cap.state != 1 && (g_frame_no % g_frameskip) != 0;
         sw_set_skip(g_skipping);
-        if (g_hw.color_inst) {
-            g_hw.last_target = dma_base(g_hw.color_inst) + g_hw.color_offset;
+        if (done) {
+            g_hw.last_target = done;
         }
         g_hw.st.last = g_hw.cur; /* el cuadro terminado */
         g_hw.st.total_draws += g_hw.cur.draws;
@@ -678,6 +708,9 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
     case NV097_CLEAR_SURFACE: {
         int zc = g_zone;
         g_zone = Z_CLEAR;
+        if (v & 0xF0u) {
+            note_screen();
+        }
         clear_color(k, v);
         g_zone = zc;
         break;

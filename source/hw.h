@@ -52,6 +52,7 @@ typedef struct HwStats {
     uint64_t pb_words;      /* palabras del push buffer recorridas */
     unsigned pb_stall;      /* 0 corre, 1 FLIP_STALL, 2 trampa, 3 FIFO cerrada, 4 error */
     unsigned traps, flips, sem_releases;
+    unsigned flip_other; /* v0.18.74: cuadros terminados con otro destino puesto (se mostró el último lineal) */
     unsigned frames;        /* cambios de PCRTC_START: cuadros mostrados */
     unsigned clears;        /* CLEAR_SURFACE hechos */
     unsigned reports, zpass_tests, reports_noinst;
