@@ -1502,6 +1502,9 @@ static void ard_complete(Kernel *k)
     }
 }
 
+/* Pruebas: olvidar los bloques del disco (que la próxima lectura vaya a la imagen). */
+void rc_test_forget_disc(void) { rc_drop(0); }
+
 bool kio_async_pending(void) { return g_ard.on && g_ard.head != __atomic_load_n(&g_ard.tail, __ATOMIC_RELAXED); }
 
 void kio_async_poll(Kernel *k)

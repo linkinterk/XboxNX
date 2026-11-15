@@ -746,6 +746,50 @@ static void io_tests(const char *iso)
         }
         CHECK(bad == 0);
         CHECK(pend > 0);
+        {
+            /* el disco: lecturas en segundo plano mientras el hilo principal
+             * también lee la imagen (v0.18.71 compartía la posición del
+             * archivo entre los dos hilos: datos de otro sitio) */
+            XDiscFile xf;
+            CHECK(xdisc_find(&disc, "default.xbe", &xf));
+            uint32_t hd = create("\\??\\D:\\default.xbe", 0x80100000u, 1, 0x40, &st);
+            CHECK(st == ST_SUCCESS);
+            uint8_t *want = malloc(xf.size), *mine = malloc(65536);
+            CHECK(xdisc_read(&disc, &xf, 0, want, xf.size));
+            int dbad = 0;
+            for (int it = 0; it < 40 && xf.size > 4096; it++) {
+                uint32_t off = (uint32_t)(it * 2048u) % (xf.size / 2048u * 2048u), n = 2048u * (1 + it % 16);
+                if (off + n > xf.size) {
+                    n = (xf.size - off) / 2048u * 2048u;
+                }
+                if (!n) {
+                    continue;
+                }
+                rc_test_forget_disc();
+                wr(SCRATCH + 0x3C0, off);
+                wr(SCRATCH + 0x3C4, 0);
+                wr(IOSB, 0xDEAD);
+                uint32_t rc8[8] = {hd, he, 0, 0, IOSB, WIN, n, SCRATCH + 0x3C0};
+                calln("NtReadFile", 8, rc8);
+                for (int z = 0; z < 20; z++) { /* el hilo principal lee mientras */
+                    uint32_t mo = (uint32_t)((z * 7919u + it * 104729u) % (xf.size > 65536 ? xf.size - 65536 : 1));
+                    uint32_t mn = xf.size < 65536 ? xf.size : 65536;
+                    dbad += !xdisc_read(&disc, &xf, mo, mine, mn) || memcmp(mine, want + mo, mn) != 0;
+                }
+                for (int w = 0; w < 400 && rd(IOSB) == 0x103u; w++) {
+                    kio_async_wait(&k, 5000000u);
+                }
+                vm_read(&vm, WIN, tmp, n);
+                dbad += rd(IOSB) != ST_SUCCESS || memcmp(tmp, want + off, n) != 0;
+            }
+            if (dbad) {
+                printf("disco en segundo plano: %d lecturas distintas\n", dbad);
+            }
+            CHECK(dbad == 0);
+            calln("NtClose", 1, &hd);
+            free(want);
+            free(mine);
+        }
         printf("3c lecturas asíncronas: %d de 60 en segundo plano, %llu en total\n", pend,
                (unsigned long long)kio_async_count());
         calln("NtClose", 1, &ha);

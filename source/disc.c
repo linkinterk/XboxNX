@@ -17,6 +17,7 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -34,22 +35,33 @@ static uint32_t rd32(const uint8_t *p)
 /* Etapa 5: directo al descriptor, en una sola lectura (antes stdio la partía
  * en trozos de 64 KB: en la SD de la Switch cada trozo es una llamada al
  * sistema de archivos, y los mapas de Halo 2 cargaban a ~8 MB/s). */
+/* v0.18.72: con candado. Desde la v0.18.71 el hilo de las lecturas en
+ * segundo plano también lee la imagen; lseek + read sin candado dejaba que
+ * un hilo moviera la posición del otro y el juego recibía datos de otro
+ * sitio del disco (punteros rotos: Halo 2 se paraba con "acceso a memoria
+ * sin mapear"). */
+static pthread_mutex_t g_read_mx = PTHREAD_MUTEX_INITIALIZER;
+
 static bool read_at(const XDisc *d, void *buf, size_t len, uint64_t off)
 {
     int fd = d->f ? d->fd : -1;
-    if (fd < 0 || lseek(fd, (off_t)off, SEEK_SET) == (off_t)-1) {
+    if (fd < 0) {
         return false;
     }
+    pthread_mutex_lock(&g_read_mx);
+    bool ok = lseek(fd, (off_t)off, SEEK_SET) != (off_t)-1;
     uint8_t *p = buf;
-    while (len) {
+    while (ok && len) {
         ssize_t r = read(fd, p, len);
         if (r <= 0) {
-            return false;
+            ok = false;
+            break;
         }
         p += r;
         len -= (size_t)r;
     }
-    return true;
+    pthread_mutex_unlock(&g_read_mx);
+    return ok;
 }
 
 bool xdisc_open(XDisc *d, const char *path)

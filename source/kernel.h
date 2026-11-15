@@ -270,6 +270,7 @@ bool kio_async_pending(void);
 void kio_async_poll(Kernel *k);
 uint64_t kio_async_wait(Kernel *k, uint64_t max_ns);
 uint64_t kio_async_count(void);
+void rc_test_forget_disc(void);
 void kio_dump(struct Kernel *k, void *file); /* los archivos abiertos (FILE *) */
 /* El evento del objeto archivo (para esperar sobre su handle). */
 #define K_FO_EVENT 0x38u
