@@ -21,6 +21,24 @@
 #define MEM_HZ 1600000000u
 #define GPU_DOCK_HZ 768000000u
 #define GPU_HAND_HZ 460800000u
+/* v0.18.71: la Switch nueva (Mariko: OLED, Lite y la V2) tiene en sus
+ * tablas de serie 1963.5 MHz de CPU y 921.6 de GPU (lo que sys-clk llama
+ * seguro en Mariko); el emulador va limitado por un núcleo de la CPU. */
+#define CPU_MARIKO_HZ 1963500000u
+#define GPU_MARIKO_DOCK_HZ 921600000u
+#define GPU_MARIKO_HAND_HZ 614400000u
+
+static bool is_mariko(void)
+{
+    u64 hw = 0;
+    if (R_FAILED(splInitialize())) {
+        return false;
+    }
+    bool ok = R_SUCCEEDED(splGetConfig(SplConfigItem_HardwareType, &hw));
+    splExit();
+    /* 0 Icosa y 1 Copper son la primera (Erista); 2 Hoag, 3 Iowa, 4 Calcio y 5 Aula, Mariko */
+    return ok && hw >= 2;
+}
 
 static u32 g_orig[3];   /* cpu, memoria, gpu (0: no se pudo leer) */
 static bool g_raised;
@@ -66,8 +84,9 @@ void clocks_raise(void)
     for (int i = 0; i < 3; i++) {
         g_orig[i] = get_hz(k_mod[i]);
     }
-    u32 gpu = appletGetOperationMode() == AppletOperationMode_Console ? GPU_DOCK_HZ : GPU_HAND_HZ;
-    const u32 want[3] = {CPU_HZ, MEM_HZ, gpu};
+    bool mariko = is_mariko(), dock = appletGetOperationMode() == AppletOperationMode_Console;
+    u32 gpu = mariko ? (dock ? GPU_MARIKO_DOCK_HZ : GPU_MARIKO_HAND_HZ) : (dock ? GPU_DOCK_HZ : GPU_HAND_HZ);
+    const u32 want[3] = {mariko ? CPU_MARIKO_HZ : CPU_HZ, MEM_HZ, gpu};
     for (int i = 0; i < 3; i++) {
         if (g_orig[i] && g_orig[i] < want[i]) { /* nunca se baja lo que ya puso sys-clk */
             set_hz(k_mod[i], want[i]);

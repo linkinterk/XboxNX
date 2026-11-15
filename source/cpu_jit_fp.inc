@@ -956,6 +956,8 @@ static void emit_lf_full(Em *e, unsigned kind, unsigned sz, int cin)
     strw(e, W11, XC, OFF(lf_res));
     /* los saltos nativos solo saben de 32 bits sin acarreo */
     e->lf_kind = (sz == 4 && cin < 0 && kind != LF_MUL) ? kind : 0;
+    /* v0.18.71: pero jz/jnz sí, de cualquier tamaño (w11 viene ya recortado) */
+    e->lf_zres = kind == LF_ADD || kind == LF_SUB || kind == LF_LOGIC || kind == LF_INC || kind == LF_DEC;
 }
 
 /* un operando de sz bytes: de [x13] (mem) o del registro r */

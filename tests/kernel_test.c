@@ -646,6 +646,113 @@ static void io_tests(const char *iso)
         free(tmp);
 #undef RNDX
     }
+    {
+        /* v0.18.71: lecturas asíncronas. Un archivo escrito por fuera (no
+         * está en la caché), abierto sin E/S síncrona, leído con evento:
+         * STATUS_PENDING, y al terminar los datos, el IOSB y el evento.
+         * Una escritura entre medio de una lectura en curso no deja datos
+         * viejos en la caché. */
+        const uint32_t WIN = 0x01000000u, FS = 3u << 20;
+        uint8_t *ref = malloc(FS), *tmp = malloc(1u << 20);
+        for (uint32_t i = 0; i < FS; i++) {
+            ref[i] = (uint8_t)(i * 2654435761u >> 13);
+        }
+        FILE *hf = fopen("build-test/hdd/Partition1/TDATA/async.bin", "wb");
+        CHECK(hf && fwrite(ref, 1, FS, hf) == FS);
+        if (hf) {
+            fclose(hf);
+        }
+        CHECK(call("NtCreateEvent", SCRATCH + 0x20, 0, 0, 0, 0) == ST_SUCCESS); /* de notificación */
+        uint32_t he = rd(SCRATCH + 0x20);
+        uint32_t ha = create("\\Device\\Harddisk0\\Partition1\\tdata\\async.bin", 0xC0000000u, 1, 0x40, &st);
+        CHECK(st == ST_SUCCESS && he);
+        int pend = 0, bad = 0;
+        uint32_t seed = 777;
+        {
+            /* escribir mientras hay una lectura en curso (nada en la caché todavía) */
+            uint32_t wo = 65536u * 7;
+            wr(SCRATCH + 0x3C0, wo);
+            wr(SCRATCH + 0x3C4, 0);
+            wr(IOSB, 0xDEAD);
+            uint32_t rc8[8] = {ha, he, 0, 0, IOSB, WIN, 140000, SCRATCH + 0x3C0};
+            uint32_t r1 = (uint32_t)calln("NtReadFile", 8, rc8);
+            CHECK(r1 == 0x103u && rd(IOSB) == 0x103u); /* de verdad en segundo plano */
+            for (uint32_t q = 0; q < 70000; q++) {
+                ref[wo + 65536 + q] ^= 0x5A; /* desde la mitad de lo que se está leyendo */
+            }
+            vm_write(&vm, WIN + 0x80000, ref + wo + 65536, 70000);
+            wr(SCRATCH + 0x3C0, wo + 65536);
+            uint32_t wc[8] = {ha, 0, 0, 0, SCRATCH + 0x3D0, WIN + 0x80000, 70000, SCRATCH + 0x3C0};
+            uint32_t w0 = (uint32_t)calln("NtWriteFile", 8, wc);
+            CHECK(w0 == ST_SUCCESS || w0 == 0x103u);
+            for (int w = 0; w < 400 && rd(IOSB) == 0x103u; w++) {
+                kio_async_wait(&k, 5000000u);
+            }
+            kio_sync();
+        }
+        for (int it = 0; it < 60; it++) {
+            seed = seed * 1103515245u + 12345u;
+            uint32_t off = (seed >> 8) % (FS - 1), n = 1 + (seed >> 3) % 300000;
+            if (off + n > FS) {
+                n = FS - off;
+            }
+            call("NtClearEvent", he, 0, 0, 0, 0);
+            wr(SCRATCH + 0x3C0, off);
+            wr(SCRATCH + 0x3C4, 0);
+            wr(IOSB, 0xDEAD);
+            uint32_t rc8[8] = {ha, he, 0, 0, IOSB, WIN, n, SCRATCH + 0x3C0};
+            uint32_t r0 = (uint32_t)calln("NtReadFile", 8, rc8);
+            if (r0 == 0x103u) {
+                pend++;
+                bad += rd(IOSB) != 0x103u && rd(IOSB) != ST_SUCCESS;
+                for (int w = 0; w < 400 && rd(IOSB) == 0x103u; w++) {
+                    kio_async_wait(&k, 5000000u);
+                }
+            } else {
+                bad += r0 != ST_SUCCESS;
+            }
+            uint32_t got = rd(IOSB + 4);
+            vm_read(&vm, WIN, tmp, n);
+            uint32_t prev = 0xFF;
+            call("NtSetEvent", he, SCRATCH + 0x24, 0, 0, 0); /* devuelve el estado de antes */
+            prev = rd(SCRATCH + 0x24);
+            if (rd(IOSB) != ST_SUCCESS || got != n || memcmp(tmp, ref + off, n) || prev != 1) {
+                if (bad++ < 3) {
+                    printf("asíncrona %d: en %u de %u: estado %08X, %u bytes, evento %u\n", it, off, n, rd(IOSB), got,
+                           prev);
+                }
+            }
+        }
+        /* lo escrito, leído de nuevo (de la caché o de la SD, nunca lo viejo) */
+        for (uint32_t off = 0; off < 40u * 65536u; off += 65536u) {
+            wr(SCRATCH + 0x3C0, off);
+            wr(SCRATCH + 0x3C4, 0);
+            uint32_t rc8[8] = {ha, he, 0, 0, IOSB, WIN, 65536, SCRATCH + 0x3C0};
+            uint32_t r0 = (uint32_t)calln("NtReadFile", 8, rc8);
+            for (int w = 0; w < 400 && r0 == 0x103u && rd(IOSB) == 0x103u; w++) {
+                kio_async_wait(&k, 5000000u);
+            }
+            vm_read(&vm, WIN, tmp, 65536);
+            if (memcmp(tmp, ref + off, 65536)) {
+                uint32_t q = 0;
+                while (tmp[q] == ref[off + q]) {
+                    q++;
+                }
+                if (bad++ < 3) {
+                    printf("releída en %u: distinta desde +%u (r0 %08X, iosb %08X %u)\n", off, q, r0, rd(IOSB),
+                           rd(IOSB + 4));
+                }
+            }
+        }
+        CHECK(bad == 0);
+        CHECK(pend > 0);
+        printf("3c lecturas asíncronas: %d de 60 en segundo plano, %llu en total\n", pend,
+               (unsigned long long)kio_async_count());
+        calln("NtClose", 1, &ha);
+        remove("build-test/hdd/Partition1/TDATA/async.bin");
+        free(ref);
+        free(tmp);
+    }
     FILE *hf = fopen("build-test/hdd/Partition1/TDATA/prueba.bin", "rb");
     CHECK(hf != NULL);
     if (hf) {

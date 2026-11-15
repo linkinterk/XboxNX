@@ -455,6 +455,7 @@ RunState runner_slice(Runner *r, uint64_t max)
          * vuelta (antes solo al replanificar: un hilo que calculaba o
          * esperaba sin llamar al kernel lo dejaba parado hasta 16 ms) */
         apu_tick(k);
+        kio_async_poll(k); /* v0.18.71: las lecturas de la SD que terminaron */
         if (st == CPU_LIMIT) {
             if (k->irq_kick) {
                 /* una interrupción del hardware (la trampa del GPU): su ISR ya,

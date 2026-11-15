@@ -19,6 +19,7 @@
 #pragma GCC diagnostic ignored "-Wformat-truncation"
 
 #include <ctype.h>
+#include <fcntl.h>
 #include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
@@ -1060,6 +1061,7 @@ static struct {
     uint64_t disc_size;
     uint64_t hit, miss; /* bytes servidos de la RAM y de la SD */
     uint64_t ahead;      /* bytes leídos de más por ir en orden */
+    uint32_t wgen[RC_FILES]; /* v0.18.71: sube cada vez que se escribe o se tira un archivo */
     uint64_t last_end[RC_FILES];
     uint8_t *tmp;
     size_t tmp_cap;
@@ -1156,6 +1158,11 @@ static RcBlock *rc_new(uint32_t file, uint64_t blk)
 /* Tira los bloques de un archivo (file < RC_FILES) o de todos los del disco duro (RC_FILES). */
 static void rc_drop(uint32_t file)
 {
+    for (unsigned j = 0; j < RC_FILES; j++) {
+        if (file == RC_FILES ? j != 0 : j == file) {
+            g_rc.wgen[j]++;
+        }
+    }
     for (RcBlock *b = g_rc.oldest; b;) {
         RcBlock *n = b->newer;
         if (file == RC_FILES ? b->file != 0 : b->file == file) {
@@ -1222,6 +1229,7 @@ static void rc_wrote(const char *host, uint64_t off, const uint8_t *data, uint32
         }
         return;
     }
+    g_rc.wgen[s]++;
     uint64_t end = off + len;
     for (uint64_t b = off / RC_BS; b * RC_BS < end; b++) {
         uint64_t bs = b * RC_BS;
@@ -1328,6 +1336,289 @@ static bool rc_read(Kernel *k, uint32_t file, uint64_t size, RcSrc src, const vo
         off = ce;
     }
     return true;
+}
+
+/* ---- v0.18.71: lecturas asíncronas ----
+ * Una lectura de un archivo abierto sin E/S síncrona y con algo que avisar
+ * (evento, APC o el disco) que no está toda en la caché: la hace un hilo
+ * aparte y NtReadFile devuelve STATUS_PENDING al momento (como el DVD del
+ * Xbox). Antes todo el emulador esperaba a la SD (2-5 ms por lectura, hasta
+ * 6 s de cada 30 al cargar zonas: los tirones). Al terminar, el hilo
+ * principal (kio_async_poll) copia los datos al juego, llena la caché si
+ * nadie escribió ese archivo mientras, y señala el evento o encola el APC. */
+#define ARD_MAX 32
+typedef struct ARd {
+    int ti;           /* el hilo que la pidió (su APC) */
+    uint32_t a[5];    /* FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock */
+    uint32_t va, n;   /* el búfer del juego */
+    uint64_t bs, re;  /* lo que se lee de la fuente: [bs, re), en bloques de la caché */
+    uint64_t abs;     /* donde empieza lo pedido */
+    uint64_t size;
+    uint32_t slot, wgen;
+    char *path;       /* el archivo del host (lo abre el hilo lector); NULL: el disco */
+    const XDisc *disc;
+    uint8_t *buf;
+    bool ok;
+} ARd;
+
+static struct {
+    bool on, quit;
+    AMutex m;
+    ACond more, fin;
+    ARd q[ARD_MAX];
+    unsigned head, rd, tail; /* head..rd: leídas; rd..tail: por leer */
+    uint64_t count;          /* las que se hicieron así */
+} g_ard;
+
+static void ard_loop(void)
+{
+    for (;;) {
+        am_lock(&g_ard.m);
+        while (g_ard.rd == g_ard.tail && !g_ard.quit) {
+            ac_wait(&g_ard.more, &g_ard.m);
+        }
+        if (g_ard.quit) {
+            am_unlock(&g_ard.m);
+            return;
+        }
+        ARd *r = &g_ard.q[g_ard.rd % ARD_MAX];
+        am_unlock(&g_ard.m);
+        size_t len = (size_t)(r->re - r->bs);
+        r->buf = malloc(len ? len : 1);
+        if (r->path) {
+            /* el hilo lo abre y lo cierra (abrir en la SD también tarda) */
+            int fd = open(r->path, O_RDONLY);
+            r->ok = r->buf && fd >= 0 && fd_pread(fd, r->buf, len, r->bs);
+            if (fd >= 0) {
+                close(fd);
+            }
+        } else {
+            r->ok = r->buf && xdisc_read_abs(r->disc, r->bs, r->buf, len);
+        }
+        am_lock(&g_ard.m);
+        g_ard.rd++;
+        ac_all(&g_ard.fin);
+        am_unlock(&g_ard.m);
+    }
+}
+
+#ifdef __SWITCH__
+static Thread g_ard_thr;
+static void ard_entry(void *p) { (void)p; ard_loop(); }
+#else
+static pthread_t g_ard_thr;
+static void *ard_entry(void *p) { (void)p; ard_loop(); return NULL; }
+#endif
+
+static bool ard_init(void)
+{
+    if (g_ard.on) {
+        return true;
+    }
+    if (getenv("XBOXNX_LECTURA_SINCRONA")) {
+        return false;
+    }
+    am_init(&g_ard.m);
+    ac_init(&g_ard.more);
+    ac_init(&g_ard.fin);
+#ifdef __SWITCH__
+    /* 0x2B y en el núcleo 2, como el hilo de las escrituras: casi siempre espera a la SD */
+    g_ard.on = R_SUCCEEDED(threadCreate(&g_ard_thr, ard_entry, NULL, NULL, 0x8000, 0x2B, 2)) &&
+               R_SUCCEEDED(threadStart(&g_ard_thr));
+#else
+    g_ard.on = pthread_create(&g_ard_thr, NULL, ard_entry, NULL) == 0;
+#endif
+    return g_ard.on;
+}
+
+static void set_event(KCall *c, uint32_t ev);
+
+/* Las que terminaron, en orden (en el hilo principal). */
+static void ard_complete(Kernel *k)
+{
+    for (;;) {
+        am_lock(&g_ard.m);
+        bool any = g_ard.head != g_ard.rd;
+        am_unlock(&g_ard.m);
+        if (!any) {
+            return;
+        }
+        ARd *r = &g_ard.q[g_ard.head % ARD_MAX];
+        uint32_t st = ST_SUCCESS, n = r->n;
+        if (r->ok && vm_write(k->vm, r->va, r->buf + (r->abs - r->bs), r->n)) {
+            if (g_rc.wgen[r->slot] == r->wgen && (r->slot == 0 ? g_rc.disc == r->disc : g_rc.path[r->slot] != NULL)) {
+                for (uint64_t y = r->bs / RC_BS; y * RC_BS < r->re; y++) {
+                    uint64_t ys = y * RC_BS;
+                    if (rc_find(r->slot, y)) {
+                        continue;
+                    }
+                    RcBlock *nb = rc_new(r->slot, y);
+                    if (!nb) {
+                        break;
+                    }
+                    nb->len = (uint32_t)(r->re - ys < RC_BS ? r->re - ys : RC_BS);
+                    memcpy(nb->data, r->buf + (ys - r->bs), nb->len);
+                }
+            }
+            g_rc.miss += r->n;
+        } else {
+            st = ST_DEVICE_DATA_ERROR;
+            n = 0;
+        }
+        free(r->buf);
+        r->buf = NULL;
+        free(r->path);
+        r->path = NULL;
+        KCall kc;
+        memset(&kc, 0, sizeof(kc));
+        kc.k = k;
+        kc.vm = k->vm;
+        memcpy(kc.a, r->a, sizeof(r->a));
+        if (r->a[4]) {
+            vm_wr32(k->vm, r->a[4], st);
+            vm_wr32(k->vm, r->a[4] + 4, n);
+        }
+        if (r->a[2]) {
+            kps_queue_apc(k, r->ti, r->a[2], r->a[3], r->a[4], 0);
+        }
+        if (r->a[1]) {
+            uint32_t ev = kob_lookup(k, r->a[1], NULL);
+            if (ev) {
+                set_event(&kc, ev);
+            }
+        } else {
+            ObType t;
+            uint32_t fo = kob_lookup(k, r->a[0], &t);
+            if (fo && t == OB_FILE) {
+                set_event(&kc, fo + K_FO_EVENT);
+            }
+        }
+        if (r->a[2] && !r->a[1]) {
+            kps_signaled(&kc); /* el APC: que despierte una espera alertable */
+        }
+        am_lock(&g_ard.m);
+        g_ard.head++;
+        am_unlock(&g_ard.m);
+    }
+}
+
+bool kio_async_pending(void) { return g_ard.on && g_ard.head != __atomic_load_n(&g_ard.tail, __ATOMIC_RELAXED); }
+
+void kio_async_poll(Kernel *k)
+{
+    if (g_ard.on && g_ard.head != __atomic_load_n(&g_ard.rd, __ATOMIC_ACQUIRE)) {
+        ard_complete(k);
+    }
+}
+
+/* Nadie puede correr y hay lecturas en curso: esperar a la SD hasta max_ns
+ * (de verdad). Devuelve cuánto se esperó. */
+uint64_t kio_async_wait(Kernel *k, uint64_t max_ns)
+{
+    if (!kio_async_pending()) {
+        return 0;
+    }
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    am_lock(&g_ard.m);
+    if (g_ard.head == g_ard.rd) {
+#ifdef __SWITCH__
+        condvarWaitTimeout(&g_ard.fin, &g_ard.m, max_ns);
+#else
+        struct timespec dl = t0;
+        dl.tv_sec += (time_t)(max_ns / 1000000000u);
+        dl.tv_nsec += (long)(max_ns % 1000000000u);
+        if (dl.tv_nsec >= 1000000000L) {
+            dl.tv_sec++, dl.tv_nsec -= 1000000000L;
+        }
+        pthread_cond_timedwait(&g_ard.fin, &g_ard.m, &dl);
+#endif
+    }
+    am_unlock(&g_ard.m);
+    ard_complete(k);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    return (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000u + (uint64_t)(t1.tv_nsec - t0.tv_nsec);
+}
+
+uint64_t kio_async_count(void) { return g_ard.count; }
+
+/* ¿Hace falta la SD para [abs, abs + n) de la fuente? (algún bloque falta) */
+static bool rc_missing(uint32_t file, uint64_t abs, uint32_t n)
+{
+    for (uint64_t b = abs / RC_BS; b * RC_BS < abs + n; b++) {
+        RcBlock *x = rc_find(file, b);
+        uint64_t hi = abs + n < (b + 1) * RC_BS ? abs + n - b * RC_BS : RC_BS;
+        if (!x || x->len < hi) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Encola la lectura; false si no se puede (se hace al momento). */
+static bool ard_submit(Kernel *k, const uint32_t a[5], uint32_t slot, const char *path, const XDisc *disc,
+                       uint64_t abs, uint32_t va, uint32_t n, uint64_t size)
+{
+    if (!ard_init() || n > (32u << 20)) {
+        return false;
+    }
+    am_lock(&g_ard.m);
+    bool full = g_ard.tail - g_ard.head >= ARD_MAX;
+    am_unlock(&g_ard.m);
+    if (full) {
+        return false;
+    }
+    char *pc = NULL;
+    if (path) {
+        pc = strdup(path);
+        if (!pc) {
+            return false;
+        }
+    }
+    ARd *r = &g_ard.q[g_ard.tail % ARD_MAX];
+    memset(r, 0, sizeof(*r));
+    r->ti = k->cur;
+    memcpy(r->a, a, sizeof(r->a));
+    r->va = va;
+    r->n = n;
+    r->abs = abs;
+    r->size = size;
+    r->bs = abs / RC_BS * RC_BS;
+    uint64_t re = (abs + n + RC_BS - 1) / RC_BS * RC_BS;
+    r->re = re < size ? re : size;
+    r->slot = slot;
+    r->wgen = g_rc.wgen[slot];
+    r->path = pc;
+    r->disc = disc;
+    g_ard.count++;
+    am_lock(&g_ard.m);
+    __atomic_store_n(&g_ard.tail, g_ard.tail + 1, __ATOMIC_RELEASE);
+    ac_all(&g_ard.more);
+    am_unlock(&g_ard.m);
+    return true;
+}
+
+static void ard_exit(void)
+{
+    if (!g_ard.on) {
+        return;
+    }
+    am_lock(&g_ard.m);
+    g_ard.quit = true;
+    ac_all(&g_ard.more);
+    am_unlock(&g_ard.m);
+#ifdef __SWITCH__
+    threadWaitForExit(&g_ard_thr);
+    threadClose(&g_ard_thr);
+#else
+    pthread_join(g_ard_thr, NULL);
+#endif
+    for (unsigned i = g_ard.head; i != g_ard.tail; i++) { /* lo que quedó */
+        ARd *r = &g_ard.q[i % ARD_MAX];
+        free(r->buf);
+        free(r->path);
+    }
+    memset(&g_ard, 0, sizeof(g_ard));
 }
 
 void kio_cache_stats(uint64_t *ram, uint64_t *hit, uint64_t *miss)
@@ -1437,6 +1728,38 @@ static uint64_t NtReadFile(KCall *c)
         st = ST_END_OF_FILE;
     } else {
         n = (uint32_t)(size - off < len ? size - off : len);
+        /* v0.18.71: si hace falta la SD y el juego espera un aviso, en segundo plano */
+        if (async && (c->a[1] || c->a[2] || f->kind == F_DISC)) {
+            uint32_t slot = 0, s_va = c->a[5];
+            uint64_t abs = 0, fsz = 0;
+            const char *hp = NULL;
+            bool can = false;
+            if (f->kind == F_DISC && k->disc) {
+                if (g_rc.disc != k->disc) {
+                    rc_drop(0);
+                    g_rc.disc = k->disc;
+                    g_rc.disc_size = xdisc_image_size(k->disc);
+                }
+                abs = xdisc_abs(k->disc, &f->disc) + off;
+                fsz = g_rc.disc_size;
+                can = fsz && off + n <= f->disc.size && abs + n <= fsz;
+            } else if (f->kind == F_HOST && f->fp && f->host[0]) {
+                fflush(f->fp);
+                slot = rc_slot(f->host, true);
+                hp = f->host;
+                abs = off;
+                fsz = size;
+                can = slot != 0;
+            }
+            if (can && rc_missing(slot, abs, n) &&
+                ard_submit(k, c->a, slot, hp, f->kind == F_DISC ? k->disc : NULL, abs, s_va, n, fsz)) {
+                k->reads++;
+                k->bytes_read += n;
+                io_moved(f, named, off + n);
+                io_status(k, c->a[4], ST_PENDING, 0);
+                return ST_PENDING;
+            }
+        }
         if (!read_into(k, f, off, c->a[5], n, size)) {
             st = ST_DEVICE_DATA_ERROR;
             n = 0;
@@ -2483,6 +2806,7 @@ void kio_sync(void) { aio_drain(); }
  * cargador no puede soltar la memoria: error al volver al hbmenu). */
 void kio_exit(void)
 {
+    ard_exit();
     rc_clear();
     if (!g_aio.on) {
         return;
@@ -2502,6 +2826,7 @@ void kio_exit(void)
 
 void kio_set_media(Kernel *k, const XDisc *disc, const char *hdd_root)
 {
+    ard_exit(); /* lecturas en curso de la sesión anterior */
     rc_clear(); /* otro disco u otro disco duro */
     k->disc = disc;
     snprintf(k->hdd_root, sizeof(k->hdd_root), "%s", hdd_root);

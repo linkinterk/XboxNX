@@ -916,7 +916,9 @@ static void resumen_tick(const UiState *s, double fps, double spd)
     const ApuStats *as = apu_stats();
     uint64_t af = as->frames - p_af, abusy = as->ns_busy - p_abusy, askip = as->skipped - p_askip;
     p_af = as->frames, p_abusy = as->ns_busy, p_askip = as->skipped;
-    static uint64_t p_avp, p_spin, p_idle;
+    static uint64_t p_avp, p_spin, p_idle, p_ard;
+    uint64_t a_now = kio_async_count(), ard = a_now >= p_ard ? a_now - p_ard : a_now;
+    p_ard = a_now;
     uint64_t avp = as->ns_vp - p_avp, spin = r->spin_skips - p_spin, idle = r->idle_skips - p_idle;
     p_avp = as->ns_vp, p_spin = r->spin_skips, p_idle = r->idle_skips;
     uint64_t dn = js.decodes - p_dn, dtk = js.dec_ticks - p_dt;
@@ -944,7 +946,7 @@ static void resumen_tick(const UiState *s, double fps, double spd)
                    "esperando a la GPU %.1f%% · lecturas %llu (%.1f ms c/u) · hora rápida %.0f/s · C desde el JIT %.0fk/s · "
                    "pantalla %u ms · decodificados %llu (%.1f us c/u) · sonido: %.0f cuadros/s, ocupado %.0f%%, atrasado %.0f ms, "
                    "saltados %llu (voces %.0f%%) · caché de lecturas: %.0f MB de la RAM y %.0f MB de la SD (%.0f MB guardados) · "
-                   "esperas acortadas %llu (por la hora %llu)\n",
+                   "esperas acortadas %llu (por la hora %llu) · lecturas en segundo plano %llu\n",
                 ts, n ? fps_sum / n : 0.0, fps_min < 1e8 ? fps_min : 0.0, n ? 100.0 * spd_sum / n : 0.0,
                 (s->prof[PROF_CPU] + 5) / 10, (s->prof[PROF_KERNEL] + 5) / 10, (s->prof[PROF_APU] + 5) / 10,
                 (s->prof[PROF_GPU] + 5) / 10, all ? 100.0 * (double)get / (double)all : 0.0,
@@ -956,7 +958,7 @@ static void resumen_tick(const UiState *s, double fps, double spd)
                 (unsigned long long)dn, dn ? (double)dtk / tps * 1e6 / (double)dn : 0.0, (double)af / dt,
                 100.0 * (double)abusy / (dt * 1e9), as->lag_ns / 1e6, (unsigned long long)askip,
                 100.0 * (double)avp / (dt * 1e9), rch / 1048576.0, rcm / 1048576.0, rc_ram / 1048576.0,
-                (unsigned long long)idle, (unsigned long long)spin);
+                (unsigned long long)idle, (unsigned long long)spin, (unsigned long long)ard);
         fclose(f);
     }
     fps_sum = spd_sum = 0, n = 0, fps_min = 1e9;

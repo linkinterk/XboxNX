@@ -263,6 +263,13 @@ void kio_sync(void);
 void kio_exit(void); /* al salir de la app: termina el hilo de escritura */
 /* v0.18.69: la caché de lecturas (bytes en la RAM, servidos de ella y de la SD) */
 void kio_cache_stats(uint64_t *ram, uint64_t *hit, uint64_t *miss);
+/* v0.18.71: las lecturas asíncronas (en un hilo aparte): ¿hay alguna en
+ * curso?, terminar las listas (hilo principal), esperar a la SD hasta max_ns
+ * cuando nadie puede correr (devuelve lo esperado), y cuántas van. */
+bool kio_async_pending(void);
+void kio_async_poll(Kernel *k);
+uint64_t kio_async_wait(Kernel *k, uint64_t max_ns);
+uint64_t kio_async_count(void);
 void kio_dump(struct Kernel *k, void *file); /* los archivos abiertos (FILE *) */
 /* El evento del objeto archivo (para esperar sobre su handle). */
 #define K_FO_EVENT 0x38u

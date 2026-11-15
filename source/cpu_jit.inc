@@ -144,6 +144,8 @@ typedef struct Em {
     bool full;
     bool fallback; /* emitiendo el camino de respaldo (no cuenta como lento) */
     unsigned lf_kind; /* LF_* de 32 bits que dejó la instrucción anterior (0: no se sabe) */
+    bool lf_zres;     /* v0.18.71: lf_res guarda el resultado (de cualquier tamaño, sin
+                       * extender el signo) de add/sub/lógica/inc/dec: ZF = (lf_res == 0) */
     bool lf_dead;     /* etapa 5: los flags de esta instrucción no los lee nadie (no guardarlos) */
     /* v0.18.61: los caminos lentos van al final del bloque (el rápido sigue
      * de largo, sin saltar por encima de ellos) */
@@ -858,8 +860,11 @@ static void emit_page_n(Em *e, bool write, unsigned n, uint32_t **slow1, uint32_
     lsrw(e, W10, W9, 12);
     ldrw_lsl2(e, W10, XPT, W10);
     ubfx12(e, W11, W9);
-    cmpwi(e, W11, 0x1000 - n);
-    *slow2 = fwd_bcond(e, COND_HI);
+    *slow2 = NULL;
+    if (n > 1) { /* v0.18.71: un byte nunca cruza de página */
+        cmpwi(e, W11, 0x1000 - n);
+        *slow2 = fwd_bcond(e, COND_HI);
+    }
     *slow1 = fwd_cb(e, J_CBZ, W10); /* x10 = página + 1: x20 y x22 ya restan 1 */
     *slow3 = NULL;
     if (write) {
@@ -1112,8 +1117,13 @@ static bool emit_insn(Em *e, const Block *b, unsigned i, const Vm *vm)
     InsnFn f = in->fn;
     bool r32 = in->sz == 4;
     unsigned prev_kind = e->lf_kind;
+    bool prev_z = e->lf_zres;
+    /* v0.18.71: mov entre registros o de un inmediato a un registro, lea y
+     * nop no emiten nada que toque NZCV: lo que dejó la anterior sigue ahí
+     * (antes un mov entre el cmp y el jcc obligaba a recargar los flags) */
+    bool keep_nzcv = f == x_nop || (r32 && (f == x_lea || ((f == x_mov_ge || f == x_mov_eg || f == x_mov_ei) && in->is_reg)));
     e->nzcv_prev = e->nzcv;
-    e->nzcv = 0;
+    e->nzcv = keep_nzcv ? e->nzcv_prev : 0;
     if (f == x_kcall) { /* v0.18.68: la hora sin salir del JIT */
         e->lf_kind = 0;
         emit_kcall(e, b, i, vm);
@@ -1126,6 +1136,7 @@ static bool emit_insn(Em *e, const Block *b, unsigned i, const Vm *vm)
          * también jcc, setcc y cmov, que solo los leen) */
     } else {
         e->lf_kind = 0;
+        e->lf_zres = false;
     }
     if (f == x_nop) {
         return true;
@@ -1133,7 +1144,11 @@ static bool emit_insn(Em *e, const Block *b, unsigned i, const Vm *vm)
     if (emit_mmx(e, b, i, vm)) {
         return true;
     }
-    if (emit_more(e, b, i, vm, prev_kind)) {
+    unsigned jk = prev_kind;
+    if (!jk && prev_z && f == x_jcc && (in->aop == 4 || in->aop == 5)) {
+        jk = LF_LOGIC; /* v0.18.71: jz/jnz tras una operación de 8 o 16 bits: tst del resultado */
+    }
+    if (emit_more(e, b, i, vm, jk)) {
         return f != x_jcc; /* el jcc pone el EIP él mismo */
     }
     if (emit_x87(e, b, i, vm) || emit_sse(e, b, i, vm)) {
@@ -1145,8 +1160,7 @@ static bool emit_insn(Em *e, const Block *b, unsigned i, const Vm *vm)
     }
     if (f == x_mov_eg && r32) {
         if (in->is_reg) {
-            ldrw(e, W12, XC, ROFF(in->reg));
-            strw(e, W12, XC, ROFF(in->rm));
+            mov_w(e, k_rmap[in->rm], k_rmap[in->reg]); /* v0.18.71: una sola instrucción */
             return true;
         }
         emit_ea(e, in, true);
@@ -1154,19 +1168,18 @@ static bool emit_insn(Em *e, const Block *b, unsigned i, const Vm *vm)
         return true;
     }
     if (f == x_mov_ei && r32) {
-        movw(e, W12, in->imm);
         if (in->is_reg) {
-            strw(e, W12, XC, ROFF(in->rm));
+            movw(e, k_rmap[in->rm], in->imm); /* v0.18.71: directo al registro */
             return true;
         }
+        movw(e, W12, in->imm);
         emit_ea(e, in, true);
         emit_store_or_call(e, b, i, vm);
         return true;
     }
     if (f == x_mov_ge && r32) {
         if (in->is_reg) {
-            ldrw(e, W12, XC, ROFF(in->rm));
-            strw(e, W12, XC, ROFF(in->reg));
+            mov_w(e, k_rmap[in->reg], k_rmap[in->rm]);
             return true;
         }
         emit_load_or_call(e, b, i, vm, then_mov_ge);
@@ -1348,6 +1361,74 @@ static void emit_links(Em *e)
 }
 
 /* Traduce el bloque; false si no hay JIT o no cupo. */
+/* v0.18.71: una racha de push (o de pop) de 32 bits, como en la entrada y la
+ * salida de cada función: una sola comprobación de página para todos (el
+ * rango entero en la misma página, mapeada y sin código) y luego cada
+ * escritura o lectura con su desplazamiento. Si la comprobación falla, el
+ * código de siempre de cada uno. Devuelve cuántas instrucciones tomó (0:
+ * ninguna, no es una racha). */
+static int g_jit_no_runs = -1;
+static bool is_push32(const Insn *in)
+{
+    return in->sz == 4 && ((in->fn == x_push_r && in->reg != R_ESP) || in->fn == x_push_i);
+}
+static bool is_pop32(const Insn *in) { return in->sz == 4 && in->fn == x_pop_r && in->reg != R_ESP; }
+
+static unsigned emit_stack_run(Em *e, const Block *b, unsigned i, const Vm *vm)
+{
+    if (g_jit_no_runs) {
+        return 0;
+    }
+    bool push = is_push32(&b->in[i]);
+    if (!push && !is_pop32(&b->in[i])) {
+        return 0;
+    }
+    unsigned k = 1;
+    while (i + k < b->n && k < 8 && (push ? is_push32(&b->in[i + k]) : is_pop32(&b->in[i + k]))) {
+        k++;
+    }
+    if (k < 2) {
+        return 0;
+    }
+    uint32_t *s1, *s2, *s3;
+    if (push) {
+        subwi(e, W9, k_rmap[R_ESP], 4 * k);
+    } else {
+        mov_w(e, W9, k_rmap[R_ESP]);
+    }
+    emit_page_n(e, push, 4 * k, &s1, &s2, &s3);
+    E(e, 0x8B0B014Du); /* add x13, x10, x11 */
+    for (unsigned j = 0; j < k; j++) {
+        const Insn *in = &b->in[i + j];
+        if (push) {
+            int src = W12;
+            if (in->fn == x_push_r) {
+                src = k_rmap[in->reg];
+            } else {
+                movw(e, W12, in->imm);
+            }
+            strw(e, src, 13, 4 * (k - 1 - j)); /* el primero, más arriba */
+        } else {
+            ldrw(e, k_rmap[in->reg], 13, 4 * j);
+        }
+    }
+    if (push) {
+        mov_w(e, k_rmap[R_ESP], W9);
+    } else {
+        addwi(e, k_rmap[R_ESP], W9, 4 * k);
+    }
+    uint32_t *done = fwd_b(e);
+    patch(e, s1);
+    patch(e, s2);
+    patch(e, s3);
+    for (unsigned j = 0; j < k; j++) {
+        emit_insn(e, b, i + j, vm); /* el camino de siempre, uno por uno */
+    }
+    patch(e, done);
+    e->nzcv = e->nzcv_prev = 0;
+    return k;
+}
+
 static bool jit_compile(Cpu *c, Block *b)
 {
     if (!jit_init() || !c->vm->code || !b->n) {
@@ -1559,11 +1640,21 @@ static bool jit_compile(Cpu *c, Block *b)
             if (g_jit_no_dead < 0) {
                 g_jit_no_dead = getenv("CPU_SIN_MUERTOS") != NULL;
             }
+            if (g_jit_no_runs < 0) {
+                g_jit_no_runs = getenv("CPU_SIN_RACHAS") != NULL;
+            }
             e.lf_dead = !g_jit_no_dead && lf_dead_at(b, i);
             e.jcc_site = NULL;
             e.jcc_none = false;
             e.exit_eip = 0;
             e.fj = false;
+            unsigned run = emit_stack_run(&e, b, i, c->vm);
+            if (run) {
+                i += run - 1;
+                stale = true;
+                e.lf_dead = false;
+                continue;
+            }
             stale = emit_insn(&e, b, i, c->vm);
             e.lf_dead = false;
             if (b->in[i].fn == x_jcc && i + 1 < b->n && !e.jcc_none) {

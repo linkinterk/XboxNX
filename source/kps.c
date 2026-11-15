@@ -674,6 +674,9 @@ void kps_idle_skip(Kernel *k)
     /* los de menos prioridad no correrían mientras este espera (en el Xbox
      * tampoco); su turno de vez en cuando lo da el planificador igual */
     uint64_t next, before = k->now_ns;
+    if (kio_async_pending()) {
+        return; /* v0.18.71: esperando a la SD, el tiempo no salta */
+    }
     if (kps_next_deadline(k, &next) && next > k->now_ns) {
         uint64_t cap = k->now_ns + 20000000u;
         k->now_ns = next < cap ? next : cap;
@@ -827,6 +830,7 @@ bool kps_schedule(Kernel *k, Cpu *c, bool preempt)
             return true;
         }
     }
+    uint64_t io_waited = 0;
     for (int guard = 0; guard < 100000; guard++) {
         hw_tick(k);
         timers_fire(k);
@@ -865,7 +869,21 @@ bool kps_schedule(Kernel *k, Cpu *c, bool preempt)
         }
         /* nadie listo: saltar al siguiente plazo */
         uint64_t next;
-        if (!kps_next_deadline(k, &next)) {
+        bool dl = kps_next_deadline(k, &next);
+        if (kio_async_pending() && io_waited < 100000000u) {
+            /* v0.18.71: esperan una lectura de la SD en curso: el tiempo
+             * corre como el de verdad (antes de saltar al plazo siguiente) */
+            uint64_t lim = dl && next > k->now_ns ? next - k->now_ns : 2000000u;
+            if (lim > 2000000u) {
+                lim = 2000000u;
+            }
+            uint64_t w = kio_async_wait(k, lim);
+            k->now_ns += dl && next > k->now_ns && w > next - k->now_ns ? next - k->now_ns : w;
+            io_waited += w + 1;
+            guard = 0; /* no es un bloqueo (a lo sumo 100 ms por vez) */
+            continue;
+        }
+        if (!dl) {
             k->cur = -1;
             return false;
         }
