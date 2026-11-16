@@ -572,7 +572,7 @@ static const char *k_fs =
     "uniform vec4 u_fog;\n"
     "uniform vec4 u_fogp;\n" /* v0.18.70: parámetros de la niebla y su modo (0: sin niebla) */
     "uniform vec4 u_fc[2];\n" /* las constantes del combinador final */
-    "uniform int u_misc[2];\n" /* v0.18.70: x: especular (0 apagado, 1 sí, 2 sí con alfa 1); y: sprite de puntos */
+    "uniform int u_misc[3];\n" /* v0.18.70: x: especular (0 apagado, 1 sí, 2 sí con alfa 1); y: sprite de puntos; z (v0.18.85): ALPHAKILLEN por etapa */
     "uniform int u_atest; uniform uint u_afunc; uniform float u_aref;\n"
     "vec4 R[16];\n"
     "float map_in(float x, uint m) {\n"
@@ -629,6 +629,8 @@ static const char *k_fs =
     "  if (u_tmode[1] != 0) R[9] = stage(u_tmode[1], u_tcube[1], u_tscale[1], v_t1, s2d1, scb1);\n"
     "  if (u_tmode[2] != 0) R[10] = stage(u_tmode[2], u_tcube[2], u_tscale[2], v_t2, s2d2, scb2);\n"
     "  if (u_tmode[3] != 0) R[11] = stage(u_tmode[3], u_tcube[3], u_tscale[3], u_misc[1] != 0 ? vec4(gl_PointCoord, 1.0, 1.0) : v_t3, s2d3, scb3);\n"
+    "  if (u_misc[2] != 0 && (((u_misc[2] & 1) != 0 && R[8].a == 0.0) || ((u_misc[2] & 2) != 0 && R[9].a == 0.0) ||\n"
+    "      ((u_misc[2] & 4) != 0 && R[10].a == 0.0) || ((u_misc[2] & 8) != 0 && R[11].a == 0.0))) discard;\n"
     "  R[12].a = R[8].a;\n"
     "  vec4 c;\n"
     "  uint n = u_cctl & 0xFFu;\n"
@@ -1398,6 +1400,19 @@ static void fx_op(char *o, size_t n, const char *x, uint32_t op)
     snprintf(o, n, f[op & 7u], x);
 }
 
+/* v0.18.85: las etapas con ALPHAKILLEN que de verdad leen una textura */
+static unsigned akill_mask(const GpuDraw *d, const GLint *tmode)
+{
+    unsigned m = 0;
+    for (int i = 0; i < 4; i++) {
+        GLint md = tmode[i];
+        if (d->tex[i].akill && md != 0 && md != 4 && md != 5 && md != 0x0A && md != 0x11) {
+            m |= 1u << i;
+        }
+    }
+    return m;
+}
+
 /* Lo que fija un fragment shader a la medida (todo menos los valores). */
 typedef struct {
     uint32_t w[40];
@@ -1421,6 +1436,7 @@ static void fx_key(const GpuDraw *d, const GLint *tmode, const GLint *tcube, FsK
         w0 |= (uint32_t)(tmode[i] & 31) << (5 * i);
         w0 |= (uint32_t)(tcube[i] != 0) << (20 + i);
     }
+    w0 |= akill_mask(d, tmode) << 24;
     w1 |= n;
     w1 |= ((d->cctl >> 12) & 1u) << 4 | ((d->cctl >> 8) & 1u) << 5;
     w1 |= (uint32_t)(d->atest != 0) << 6;
@@ -1498,6 +1514,11 @@ static char *fx_gen(const FsKey *k)
                     "    R%d = texture(s2d%d, uv * u_tscale[%d]); }\n", tc, 8 + i, i, i);
         } else {
             sbp(&o, "  R%d = texture(s2d%d, (%s).xy * u_tscale[%d]);\n", 8 + i, i, tc, i);
+        }
+    }
+    for (int i = 0; i < 4; i++) {
+        if ((w0 >> (24 + i)) & 1u) {
+            sbp(&o, "  if (R%d.a == 0.0) discard;\n", 8 + i);
         }
     }
     sbp(&o, "  R12.a = R8.a;\n  vec4 c;\n");
@@ -3439,9 +3460,9 @@ static bool gpu_draw_(const GpuDraw *d)
         }
     }
     {
-        int misc[2] = {d->spec ? (d->spec_a1 ? 2 : 1) : 0, d->prim == 1 && d->psprite};
+        int misc[3] = {d->spec ? (d->spec_a1 ? 2 : 1) : 0, d->prim == 1 && d->psprite, (int)akill_mask(d, tmode)};
         if (sc_u(F, 19, misc, sizeof(misc)) && F->u_misc >= 0) {
-            pu1iv(fp, F->u_misc, 2, misc);
+            pu1iv(fp, F->u_misc, 3, misc);
         }
     }
     int at = d->atest;

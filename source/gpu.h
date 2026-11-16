@@ -29,6 +29,9 @@ typedef struct GpuTex {
     uint32_t addr;          /* dirección física (para reconocer superficies) */
     uint32_t fmt, w, h;
     bool cube, linear, bilinear;
+    /* v0.18.85: ALPHAKILLEN (bit 2 del control 0): el píxel se descarta si
+     * la alfa de la textura es 0 (la barra del escudo de Halo 2) */
+    bool akill;
     /* v0.18.70: el filtro de lejos con mipmaps (0 no; 1 el nivel más cercano,
      * 2 mezclando niveles) y la anisotropía que pide el juego (1..4) */
     uint8_t mip, aniso;

@@ -1078,6 +1078,7 @@ static void write_px(const Target *t, uint8_t *p, const float c[4])
 static Tex g_tex[4];
 static bool g_tex_on[4];
 static unsigned g_tex_mode[4];
+static unsigned g_akill; /* v0.18.85: etapas con ALPHAKILLEN que leen una textura */
 
 /* Lo que cuenta cada hilo del dibujo (se suma al final). */
 typedef struct Count {
@@ -1085,6 +1086,13 @@ typedef struct Count {
     unsigned depth_fail, alpha_fail;
     uint32_t first_px;
 } Count;
+
+/* los modos del texture shader que leen la textura (no ninguno, PASS_THROUGH,
+ * CLIP_PLANE, DOT_ZW ni DOT_PRODUCT) */
+static bool tex_fetches(unsigned m)
+{
+    return m != 0 && m != 4 && m != 5 && m != 0x0A && m != 0x11;
+}
 
 static void shade(const Target *t, int x, int y, const float l[3], const OutVert *v[3], float z, Count *k)
 {
@@ -1164,6 +1172,12 @@ static void shade(const Target *t, int x, int y, const float l[3], const OutVert
             w /= tc[3];
         }
         sample(&g_tex[s], u, w, R[8 + s]);
+    }
+    for (unsigned m = g_akill; m; m &= m - 1) { /* v0.18.85: ALPHAKILLEN */
+        if (R[8 + __builtin_ctz(m)][3] == 0) {
+            k->alpha_fail++;
+            return;
+        }
     }
     R[12][3] = R[8][3]; /* r0.a empieza con la alfa de la textura 0 */
     float c[4];
@@ -1977,6 +1991,7 @@ static bool gpu_try(const Target *t, const OutVert *ov)
             unsigned minf = (S.t_filter[s] >> 16) & 0xFF, levels = (S.t_fmt[s] >> 16) & 0xF;
             g->mip = (uint8_t)(levels > 1 && !x->linear ? (minf >= 5 ? 2 : minf >= 3 ? 1 : 0) : 0);
             g->aniso = (uint8_t)(1 + ((S.t_ctl0[s] >> 4) & 3));
+            g->akill = (S.t_ctl0[s] >> 2) & 1;
         }
         g->au = x->au, g->av = x->av;
         g->data = x->base;
@@ -2109,11 +2124,15 @@ static void draw_(void)
         return;
     }
     run_program(); /* la clave del programa puesto */
+    g_akill = 0;
     for (int s = 0; s < 4; s++) {
         g_tex_mode[s] = (S.shader_prog >> (5 * s)) & 0x1F;
         g_tex_on[s] = g_tex_mode[s] && ((S.t_ctl0[s] >> 30) & 1);
         if (g_tex_on[s] && g_tex_mode[s] != 4) {
             g_tex_on[s] = tex_setup(s, &g_tex[s]);
+            if (g_tex_on[s] && tex_fetches(g_tex_mode[s]) && ((S.t_ctl0[s] >> 2) & 1)) {
+                g_akill |= 1u << s;
+            }
         }
     }
     if (gpu_enabled() && gpu_try_vs(&t)) {

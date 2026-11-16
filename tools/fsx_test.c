@@ -39,7 +39,8 @@ static void decode(const void *ctx, int face, uint32_t *out)
     (void)ctx;
     (void)face;
     for (int i = 0; i < 64; i++) {
-        out[i] = 0x01000000u * (uint32_t)(i * 4) | (uint32_t)(i * 37 % 256) << 16 | (uint32_t)(i * 91 % 256) << 8 |
+        /* v0.18.85: una de cada 5 con alfa 0 (ALPHAKILLEN) */
+        out[i] = 0x01000000u * (uint32_t)(i % 5 == 0 ? 0 : i * 4) | (uint32_t)(i * 37 % 256) << 16 | (uint32_t)(i * 91 % 256) << 8 |
                  (uint32_t)(255 - i * 3);
     }
 }
@@ -126,6 +127,7 @@ int main(int argc, char **argv)
                 t->au = t->av = 1;
                 t->data = tex_bytes, t->bytes = sizeof(tex_bytes);
                 t->decode = decode;
+                t->akill = rnd() % 3 == 0;
             }
         }
         for (int pass = 0; pass < 2; pass++) {
