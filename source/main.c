@@ -35,7 +35,7 @@
 #include "apu/apu.h"
 #include <time.h>
 
-#define APP_VER   "0.18.80"
+#define APP_VER   "0.18.81"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -147,7 +147,7 @@ static void ajustes_guardar(void)
     g_pfifo_want = hw_pfifo_wanted();
     FILE *f = fopen(AJUSTES, "w");
     if (f) {
-        fprintf(f, "reloj=%u\ncuadros=%u\nnucleo_push=%d\n", g_nspi, hw_frameskip(), g_pfifo_want ? 1 : 0);
+        fprintf(f, "ajustes=2\nreloj=%u\ncuadros=%u\nnucleo_push=%d\n", g_nspi, hw_frameskip(), g_pfifo_want ? 1 : 0);
         fclose(f);
     }
 }
@@ -159,13 +159,19 @@ static void ajustes_leer(void)
         return;
     }
     char line[64];
+    /* v0.18.81: los ajustes de antes (sin "ajustes=2") no traen los cuadros
+     * ni el push buffer: quedan los nuevos predeterminados (1/1, push buffer
+     * en su núcleo); después se recuerda lo que se elija */
+    bool v2 = false;
     while (fgets(line, sizeof(line), f)) {
         unsigned v;
-        if (sscanf(line, "reloj=%u", &v) == 1 && (v == 1 || v == 2 || v == 4 || v == 8)) {
+        if (sscanf(line, "ajustes=%u", &v) == 1 && v >= 2) {
+            v2 = true;
+        } else if (sscanf(line, "reloj=%u", &v) == 1 && (v == 1 || v == 2 || v == 4 || v == 8)) {
             g_nspi = v;
-        } else if (sscanf(line, "cuadros=%u", &v) == 1 && v >= 1 && v <= 6) {
+        } else if (v2 && sscanf(line, "cuadros=%u", &v) == 1 && v >= 1 && v <= 6) {
             hw_set_frameskip(v);
-        } else if (sscanf(line, "nucleo_push=%u", &v) == 1) {
+        } else if (v2 && sscanf(line, "nucleo_push=%u", &v) == 1) {
             g_pfifo_want = v != 0;
             hw_pfifo_set(g_pfifo_want);
         }
@@ -988,8 +994,8 @@ int main(int argc, char **argv)
     ui_thread_stop();
     crash_step("parar el muestreo");
     sampler_stop();
-    crash_step("soltar el hilo del push buffer");
-    hw_pfifo_detach(); /* v0.18.79: que no toque la RAM del Xbox ni la GPU desde aquí */
+    crash_step("terminar el hilo del push buffer");
+    hw_pfifo_exit(); /* v0.18.81: que no toque la RAM del Xbox ni la GPU, y que termine (si no: error al salir) */
     crash_step("parar el audio del Xbox");
     apu_exit();
     crash_step("escribir lo pendiente en la SD");

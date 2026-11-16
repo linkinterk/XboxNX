@@ -2174,7 +2174,7 @@ static bool emit_extra(Em *e, const Block *b, unsigned i, const Vm *vm)
         patch(e, lazy);
         /* v0.18.69: con los flags perezosos de add/sub/lógica/inc/dec, AH
          * sale de lf_* sin calcularlos (como flags_sync); los demás, C */
-        cmpwi(e, W12, 5);
+        cmpwi(e, W12, LF_SAR); /* v0.18.81: también tras shl/shr/sar */
         uint32_t *slowc = fwd_bcond(e, COND_HI);
         ldrw(e, W13, XC, OFF(lf_res));
         ldrb_i(e, 14, XC, OFF(lf_sz));
@@ -2196,6 +2196,8 @@ static bool emit_extra(Em *e, const Block *b, unsigned i, const Vm *vm)
         E(e, 0x321F0129u); /* orr w9, w9, #2 */
         cmpwi(e, W12, LF_LOGIC);
         uint32_t *logic = fwd_bcond(e, COND_EQ); /* AF = CF = 0 */
+        cmpwi(e, W12, LF_SHL);
+        uint32_t *shf = fwd_bcond(e, 2); /* b.hs: desplazamientos */
         ldrw(e, W10, XC, OFF(lf_a));
         ldrw(e, W11, XC, OFF(lf_b));
         E(e, 0x4A0B014Fu); /* eor w15, w10, w11 */
@@ -2221,9 +2223,41 @@ static bool emit_extra(Em *e, const Block *b, unsigned i, const Vm *vm)
         uint32_t *st2 = fwd_b(e);
         patch(e, incdec);
         E(e, 0x2A000129u); /* orr w9, w9, w0 */
+        uint32_t *st3 = fwd_b(e);
+        /* v0.18.81: shl/shr/sar: AF = 0, CF como shift_cf (lf_a = valor, lf_b = cuenta 1..31) */
+        patch(e, shf);
+        ldrw(e, W10, XC, OFF(lf_a));
+        ldrw(e, W11, XC, OFF(lf_b));
+        movw(e, W15, 1);
+        E(e, 0x9ACE21EFu); /* lsl x15, x15, x14 */
+        E(e, 0xD10005EFu); /* sub x15, x15, #1 */
+        E(e, 0x8A0F014Au); /* and x10, x10, x15: el valor de su tamaño */
+        cmpwi(e, W12, LF_SHR);
+        uint32_t *shr = fwd_bcond(e, COND_EQ);
+        cmpwi(e, W12, LF_SAR);
+        uint32_t *sar = fwd_bcond(e, COND_EQ);
+        E(e, 0x9ACB214Fu); /* lsl x15, x10, x11 */
+        E(e, 0x9ACE25EFu); /* lsr x15, x15, x14: el último bit que salió */
+        uint32_t *cf1 = fwd_b(e);
+        patch(e, shr);
+        subwi(e, W11, W11, 1);
+        E(e, 0x1ACB254Fu); /* lsr w15, w10, w11 */
+        uint32_t *cf2 = fwd_b(e);
+        patch(e, sar);
+        movw(e, X0, 32);
+        rrr(e, SUBW, X0, X0, 14);
+        E(e, 0x1AC0214Fu); /* lsl w15, w10, w0 */
+        E(e, 0x1AC029EFu); /* asr w15, w15, w0: con signo */
+        subwi(e, W11, W11, 1);
+        E(e, 0x1ACB29EFu); /* asr w15, w15, w11 */
+        patch(e, cf1);
+        patch(e, cf2);
+        E(e, 0x120001EFu); /* and w15, w15, #1 */
+        rrr(e, ORRW, W9, W9, W15);
         patch(e, logic);
         patch(e, st1);
         patch(e, st2);
+        patch(e, st3);
         strb(e, W9, XC, r8off(4));
         uint32_t *done2 = fwd_b(e);
         patch(e, slowc);

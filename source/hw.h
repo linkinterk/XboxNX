@@ -103,6 +103,7 @@ bool hw_init(struct Kernel *k);
  * esperado); set: usarlo o no (sin él, el hilo del juego como antes). */
 void hw_pfifo_hold(bool on);
 void hw_pfifo_detach(void);
+void hw_pfifo_exit(void); /* v0.18.81: al salir de la app: el hilo termina */
 bool hw_pfifo_busy(void);
 uint64_t hw_pfifo_wait(uint64_t max_ns);
 void hw_pfifo_set(bool on);

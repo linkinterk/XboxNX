@@ -324,6 +324,28 @@ void hw_pfifo_detach(void)
     hw_pfifo_hold(false);
 }
 
+/* v0.18.81: al salir el hilo termina de verdad (si quedaba vivo, al volver
+ * al hbmenu el cargador no podía soltar el programa: error 2001-0106) */
+void hw_pfifo_exit(void)
+{
+    if (!PF.started) {
+        return;
+    }
+    hw_pfifo_detach();
+    pf_lock(&PF.m);
+    PF.quit = 1;
+    pfc_all(&PF.more);
+    pf_unlock(&PF.m);
+#ifdef __SWITCH__
+    threadWaitForExit(&PF.thr);
+    threadClose(&PF.thr);
+#else
+    pthread_join(PF.thr, NULL);
+#endif
+    PF.started = false;
+    PF.quit = 0;
+}
+
 bool hw_pfifo_busy(void)
 {
     return pf_on() && (__atomic_load_n(&PF.busy, __ATOMIC_SEQ_CST) || __atomic_load_n(&PF.kick, __ATOMIC_SEQ_CST));
@@ -686,7 +708,7 @@ static void draw_method(uint32_t m, uint32_t v)
     }
 }
 
-static unsigned g_frameskip = 3, g_frame_no;
+static unsigned g_frameskip = 1, g_frame_no; /* v0.18.81: 1/1 de serie */
 static uint32_t g_last_drawn; /* el destino del último cuadro que sí se dibujó */
 void hw_set_frameskip(unsigned n)
 {

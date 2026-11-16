@@ -55,7 +55,26 @@ def comiss_jcc():
     return code + bytes([0x70 | rnd.randrange(16), 0x01, 0x46])
 
 
+def shift_lahf():
+    """v0.18.81: shl/shr/sar de 8 o 32 bits (cuenta fija o CL) y lahf: AH de
+    los flags perezosos del desplazamiento sin llamar a C."""
+    r = rnd.choice([0, 1, 2, 3, 5, 7])
+    op = rnd.choice([4, 5, 7])
+    k = rnd.randrange(4)
+    if k == 0:
+        code = bytes([0xC1, 0xC0 | op << 3 | r, rnd.choice([1, 2, 7, 8, 15, 16, 31, rnd.randrange(32)])])
+    elif k == 1:
+        code = bytes([0xD3, 0xC0 | op << 3 | r])
+    elif k == 2:
+        code = bytes([0xC0, 0xC0 | op << 3 | r, rnd.randrange(1, 8)])
+    else:
+        code = bytes([0xD1, 0xC0 | op << 3 | r])
+    return code + b"\x9f"
+
+
 def piece():
+    if rnd.random() < 0.06:
+        return shift_lahf()
     if rnd.random() < 0.15:
         return cmp_jcc()
     if rnd.random() < 0.1:
