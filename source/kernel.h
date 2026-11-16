@@ -335,4 +335,14 @@ void kernel_counts(unsigned *data, unsigned *impl, unsigned *todo);
 /* Dirección de un dato exportado por nombre (0 si no existe). */
 uint32_t kernel_data_va(const Kernel *k, const char *name);
 
+/* v0.18.84: el idioma (1 inglés, 2 japonés, 3 alemán, 4 francés, 5 español,
+ * 6 italiano, 7 coreano, 8 chino, 9 portugués) y la región (0 la del juego,
+ * 1 Norteamérica, 2 Japón, 4 Europa) de la consola: la EEPROM que lee el
+ * juego al arrancar (ExQueryNonVolatileSetting). wide: la EEPROM dice
+ * pantalla ancha (16:9): los juegos que lo admiten, como Halo 2, dibujan
+ * anamórfico. */
+void kernel_set_console(unsigned language, unsigned region, bool wide); /* wide: el juego en 16:9 */
+const char *kernel_language_name(unsigned language);
+const char *kernel_region_name(unsigned region);
+
 #endif

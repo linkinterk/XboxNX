@@ -1,0 +1,19 @@
+XboxNX v0.18.84 · registro de rendimiento (cada ~5 s)
+
+=== 22:52:24 ===
+0.0 FPS · juego al 0%  ·  Pantalla del Xbox  ·  640x480  ·  PCRTC 02000000  ·  0 cuadros  ·  0 flips  ·  0.00 s del juego
+Último cuadro: 0 dibujos, 0 vértices, 0 con shader, 0 con textura, 0 sueltos
+Tiempo (relojes: PC): CPU 0% · kernel 0% · audio 0% · GPU 0% · hardware 0% · pantalla 0%
+Software: 0 triángulos, 0 píxeles · sin shader 0 · sin destino 0 (motivo 0: fmt 0 pitch 0 clip 0 0) · shader con error 0 · se muestra 02000000
+Último: prim 0, 0 vértices, 0 tri, 0 px, 0 ocultos, 0 tras Z · destino 00000000 pitch 0 fmt 0 · Z 00000000
+Textura 0: no modo 0 fmt 00 0x0 en 00000000 · combiners 0 final 00000000 00000000 · 1er píxel 00000000
+Vértice 0: pos 0.0 0.0 0.0 0.00 · oD0 0.00 0.00 0.00 0.00 · oT0 0.00 0.00 0.00 0.00
+IRQL 0 · DPC en cola 0 · sin ISR · 0 ISR, 0 DPC · esperas saltadas 0 (0.0 s) · PGRAPH intr 0 en 0 · PMC 0 en 0 · trampa 0: 0 (0) · PCRTC 0 en 0
+Archivos: 0 lecturas (0.0 MB), 0 escrituras, 0 abiertos · último: -
+Kernel (más tiempo, 0.0 s; 0 de la hora sin salir de la CPU): HalReturnToFirmware 1 0.0s 13.5us NtClose 1 0.0s 9.6us
+Aperturas fallidas: 0 · última: - · APC: 0 encolados, 0 corridos
+JIT apagado: 0 traducidos, búfer 0.0 de 0 MB, vaciado 0 veces · 4 decodificados (4 bloques, 0 compartiendo casilla) · código reescrito 0 veces · montón en uso 0 de 0 MB
+Tiempo CPU: traducido 0%, bloques sin traducir 0%, intérprete suelto 0%, buscar bloque 0% (decodificar 0.0%), resto 100% · 0 ns por vuelta · 0.0M vueltas (0% JIT), 0.0M sueltas · C: 0.00 lentas y 0.00 de respaldo por bloque · 0.0M llamadas a cpu_run · traducir 0.0 s
+GPU no · 0 dibujos (vértices en GPU 0 · 0 shaders, enteros: compilar 0.0 s · 0 de otras veces, 0 ya listos · 0 dibujos esperaron) · 0 por software · 0 subidas (0 MB) · 0 copias · en gpu_draw 0.0 s (vértices 0.0 s, texturas 0.0 s, llamada 0.0 s), leer cuadros 0.0 s (glReadPixels 0.0 s; probando, BGRA 0 µs, RGBA 0 µs), superficies 0, borrados 0 color 0 Z (0 cambiaron de FBO, 0 nuevos), visibilidad 0 (0.0 s; pruebas 0, informes 0, sin DMA 0, por otro subcanal 0 clase 0) · sin GL
+Visibilidad, métodos 17C0-17FC: (encender 0)
+Sonido: PC · encendido (A) · 0.0 s del juego · 0% del tiempo con sonido (0% estirado)

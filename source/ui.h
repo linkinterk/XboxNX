@@ -59,6 +59,8 @@ typedef struct UiState {
     int stage_back;          /* la pantalla a la que vuelve */
     bool run_screen;         /* X: ver la pantalla del Xbox en vez del registro */
     bool run_diag;           /* v0.18.68: los datos encima del juego (tocar la imagen) */
+    bool wide;               /* v0.18.84: la imagen estirada a 16:9 (toda la pantalla) */
+    char console[96];        /* v0.18.84: idioma, región y pantalla (en la biblioteca) */
     char toast[160];         /* un aviso en el registro (el volcado) */
     char last_crash[240];    /* el cierre de la vez anterior (cierre.txt) */
     /* pruebas */

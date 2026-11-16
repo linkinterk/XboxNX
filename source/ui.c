@@ -261,8 +261,9 @@ static void draw_card(const UiCard *c, int x, int y, bool sel)
 
 static void draw_library(const UiState *s)
 {
-    char sub[64];
-    snprintf(sub, sizeof(sub), "%d %s en sd:/xbox/", s->ncards, s->ncards == 1 ? "juego" : "juegos");
+    char sub[192];
+    snprintf(sub, sizeof(sub), "%d %s en sd:/xbox/  ·  %s", s->ncards, s->ncards == 1 ? "juego" : "juegos",
+             s->console);
     top_bar(s, s->ncards ? sub : "Emulador de Xbox original para Nintendo Switch");
 
     if (s->ncards == 0) {
@@ -274,8 +275,8 @@ static void draw_library(const UiState *s)
         gfx_text_center(px, 760, py + 210, 21, C_ON_VAR, "Copia tu ISO (.iso o .xiso, de un disco tuyo) a");
         gfx_text_center(px, 760, py + 240, 21, C_GREEN, "sd:/xbox/");
         gfx_text_center(px, 760, py + 290, 18, C_ON_VAR, "Si pesa más de 4 GB, la tarjeta SD tiene que estar en exFAT.");
-        Hint h[] = {{"Y", "Buscar"}, {"X", "Pruebas"}, {"-", "Etapas"}, {"+", "Salir"}};
-        bottom_bar(h, 4);
+        Hint h[] = {{"Y", "Buscar"}, {"R", "Idioma"}, {"L", "Región"}, {"ZR", "Pantalla"}, {"+", "Salir"}};
+        bottom_bar(h, 5);
         return;
     }
 
@@ -292,8 +293,8 @@ static void draw_library(const UiState *s)
         gfx_rrect(UI_W - 18, GRID_Y, 6, th, 3, C_SURF_HI);
         gfx_rrect(UI_W - 18, by, 6, bh, 3, C_GREEN);
     }
-    Hint h[] = {{"A", "Abrir"}, {"Y", "Buscar"}, {"X", "Pruebas"}, {"-", "Etapas"}, {"+", "Salir"}};
-    bottom_bar(h, 5);
+    Hint h[] = {{"A", "Abrir"}, {"Y", "Buscar"}, {"R", "Idioma"}, {"L", "Región"}, {"ZR", "Pantalla"}, {"+", "Salir"}};
+    bottom_bar(h, 6);
 }
 
 /* ---- detalle ---- */
@@ -1134,6 +1135,8 @@ static void draw_xbox_screen(const UiState *s)
                 h = img.h * w / img.w;
             }
             ix = (UI_W - w) / 2, iy = 34;
+        } else if (s->wide) { /* v0.18.84: estirada a 16:9 (el juego dibuja en anamórfico) */
+            w = UI_W, h = UI_H, ix = 0, iy = 0;
         } else {
             h = UI_H, w = img.w * h / img.h;
             if (w > UI_W) {

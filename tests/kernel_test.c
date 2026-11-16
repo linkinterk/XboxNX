@@ -1000,9 +1000,9 @@ static void sys_tests(void)
     uint32_t m3[3] = {SCRATCH + 0xFF0, SCRATCH + 0xFF8, 0x40};
     CHECK(calln("RtlCompareMemory", 3, m3) == 0x40);
 
-    /* configuración: idioma inglés, región NTSC */
+    /* configuración: idioma español (v0.18.84, de serie), región NTSC */
     uint32_t q[5] = {7, SCRATCH + 0x70, SCRATCH + 0x74, 4, SCRATCH + 0x78};
-    CHECK(calln("ExQueryNonVolatileSetting", 5, q) == ST_SUCCESS && rd(SCRATCH + 0x74) == 1 &&
+    CHECK(calln("ExQueryNonVolatileSetting", 5, q) == ST_SUCCESS && rd(SCRATCH + 0x74) == 5 &&
           rd(SCRATCH + 0x70) == 4 && rd(SCRATCH + 0x78) == 4);
     uint32_t q2[5] = {0x11, 0, SCRATCH + 0x74, 4, 0};
     CHECK(calln("ExQueryNonVolatileSetting", 5, q2) == ST_SUCCESS);
@@ -1013,6 +1013,16 @@ static void sys_tests(void)
     uint32_t sv[4] = {7, 4, SCRATCH + 0x7C, 4};
     CHECK(calln("ExSaveNonVolatileSetting", 4, sv) == ST_SUCCESS);
     CHECK(calln("ExQueryNonVolatileSetting", 5, q) == ST_SUCCESS && rd(SCRATCH + 0x74) == 3);
+    /* v0.18.84: lo elegido en la biblioteca: inglés, Europa (PAL a 60 Hz), 16:9 */
+    kernel_set_console(1, 4, true);
+    CHECK(calln("ExQueryNonVolatileSetting", 5, q) == ST_SUCCESS && rd(SCRATCH + 0x74) == 1);
+    uint32_t qr[5] = {0x104, 0, SCRATCH + 0x74, 4, 0};
+    CHECK(calln("ExQueryNonVolatileSetting", 5, qr) == ST_SUCCESS && rd(SCRATCH + 0x74) == 4);
+    uint32_t qv[5] = {8, 0, SCRATCH + 0x74, 4, 0};
+    CHECK(calln("ExQueryNonVolatileSetting", 5, qv) == ST_SUCCESS && (rd(SCRATCH + 0x74) & 0x00410000u) == 0x00410000u);
+    kernel_set_console(5, 0, false);
+    CHECK(calln("ExQueryNonVolatileSetting", 5, qv) == ST_SUCCESS && !(rd(SCRATCH + 0x74) & 0x00410000u));
+    CHECK(calln("ExQueryNonVolatileSetting", 5, q) == ST_SUCCESS && rd(SCRATCH + 0x74) == 5);
 
     /* SHA-1("abc") = a9993e36... */
     vm_write(&vm, SCRATCH + 0x200, "abc", 3);

@@ -533,6 +533,31 @@ static const NvSetting k_nv[] = {
 
 static uint8_t g_eeprom[EEPROM_SIZE];
 static bool g_eeprom_ready;
+static unsigned g_language = 5, g_region; /* v0.18.84: español; la región del juego */
+static bool g_wide;                         /* v0.18.84: pantalla ancha */
+
+void kernel_set_console(unsigned language, unsigned region, bool wide)
+{
+    g_wide = wide;
+    if (language >= 1 && language <= 9) {
+        g_language = language;
+    }
+    g_region = (region == 1 || region == 2 || region == 4) ? region : 0;
+    g_eeprom_ready = false; /* se vuelve a armar con esto la próxima vez */
+}
+
+const char *kernel_language_name(unsigned language)
+{
+    static const char *const n[] = {"?", "English", "Japonés", "Deutsch", "Français", "Español",
+                                    "Italiano", "Coreano", "Chino", "Português"};
+    return language <= 9 ? n[language] : "?";
+}
+
+const char *kernel_region_name(unsigned region)
+{
+    return region == 1 ? "Norteamérica (NTSC)" : region == 2 ? "Japón (NTSC-J)" : region == 4 ? "Europa (PAL 60 Hz)"
+                                                                                           : "la del juego";
+}
 
 static uint32_t eeprom_checksum(const uint8_t *p, unsigned len)
 {
@@ -600,16 +625,27 @@ static uint8_t *eeprom(Kernel *k)
         memcpy(g_eeprom + 0x1C, hd_key, 16);
         put32(g_eeprom + 0x90, 1); /* inglés */
     }
-    /* la región y el video siguen al juego (NTSC o PAL) */
-    uint32_t region = game_region(k);
+    /* la región y el video siguen al juego (NTSC o PAL), salvo que se elija
+     * otra en la biblioteca (v0.18.84; Europa con PAL a 60 Hz) */
+    uint32_t region = g_region ? g_region : game_region(k);
     bool pal = region == 4;
     put32(g_eeprom + 0x2C, region);
-    put32(g_eeprom + 0x58, pal ? 0x00800300u : 0x00400100u);
-    put32(g_eeprom + 0xBC, pal ? 2 : 1);
-    eeprom_seal();
-    if (!have) {
-        eeprom_store(k);
+    put32(g_eeprom + 0x58, pal ? 0x00800300u : region == 2 ? 0x00400200u : 0x00400100u);
+    put32(g_eeprom + 0xBC, pal ? 2 : region == 2 ? 2 : 1);
+    put32(g_eeprom + 0x90, g_language); /* v0.18.84: el idioma elegido (español de serie) */
+    {
+        /* video (0x94): 0x00010000 pantalla ancha, 0x00400000 PAL a 60 Hz */
+        uint32_t vf = get32(g_eeprom + 0x94) & ~(0x00010000u | 0x00100000u | 0x00400000u);
+        if (g_wide) {
+            vf |= 0x00010000u;
+        }
+        if (pal) {
+            vf |= 0x00400000u;
+        }
+        put32(g_eeprom + 0x94, vf);
     }
+    eeprom_seal();
+    eeprom_store(k);
     g_eeprom_ready = true;
     /* XboxHDKey: con ella se firman las partidas guardadas */
     uint32_t hd = kernel_data_va(k, "XboxHDKey");

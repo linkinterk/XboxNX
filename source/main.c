@@ -35,7 +35,7 @@
 #include "apu/apu.h"
 #include <time.h>
 
-#define APP_VER   "0.18.83"
+#define APP_VER   "0.18.84"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -141,13 +141,25 @@ static unsigned g_nspi = 8; /* 8 ns: con lo que el juego corre más rápido (Y l
 #define AJUSTES "sdmc:/switch/XboxNX/ajustes.txt"
 
 static bool g_pfifo_want = true; /* v0.18.79: el push buffer en su hilo (ajustes) */
+/* v0.18.84: idioma y región de la consola, y la pantalla a 16:9 (ajustes) */
+static unsigned g_lang = 5, g_region;
+static bool g_wide;
+
+static void console_apply(void)
+{
+    kernel_set_console(g_lang, g_region, g_wide);
+    snprintf(g_ui.console, sizeof(g_ui.console), "Idioma: %s · Región: %s · %s", kernel_language_name(g_lang),
+             kernel_region_name(g_region), g_wide ? "16:9" : "4:3");
+    g_ui.wide = g_wide;
+}
 
 static void ajustes_guardar(void)
 {
     g_pfifo_want = hw_pfifo_wanted();
     FILE *f = fopen(AJUSTES, "w");
     if (f) {
-        fprintf(f, "ajustes=2\nreloj=%u\ncuadros=%u\nnucleo_push=%d\n", g_nspi, hw_frameskip(), g_pfifo_want ? 1 : 0);
+        fprintf(f, "ajustes=2\nreloj=%u\ncuadros=%u\nnucleo_push=%d\nidioma=%u\nregion=%u\nancha=%d\n", g_nspi,
+                hw_frameskip(), g_pfifo_want ? 1 : 0, g_lang, g_region, g_wide ? 1 : 0);
         fclose(f);
     }
 }
@@ -174,6 +186,12 @@ static void ajustes_leer(void)
         } else if (v2 && sscanf(line, "nucleo_push=%u", &v) == 1) {
             g_pfifo_want = v != 0;
             hw_pfifo_set(g_pfifo_want);
+        } else if (sscanf(line, "idioma=%u", &v) == 1 && v >= 1 && v <= 9) {
+            g_lang = v;
+        } else if (sscanf(line, "region=%u", &v) == 1 && (v == 0 || v == 1 || v == 2 || v == 4)) {
+            g_region = v;
+        } else if (sscanf(line, "ancha=%u", &v) == 1) {
+            g_wide = v != 0;
         }
     }
     fclose(f);
@@ -675,6 +693,7 @@ int main(int argc, char **argv)
     sound_init(); /* 3h: el audio del Xbox por la Switch */
     ui_thread_start(); /* etapa 5: la pantalla en el núcleo 2 mientras se juega */
     ajustes_leer(); /* el reloj y los cuadros que dejaste la última vez */
+    console_apply(); /* v0.18.84: idioma, región y pantalla */
     s32 prev_touches = 0;
 
     g_ui.version = APP_VER;
@@ -739,6 +758,21 @@ int main(int argc, char **argv)
                 dirty = true;
             } else if (k & HidNpadButton_Y) {
                 scan_games();
+                dirty = true;
+            } else if (k & (HidNpadButton_R | HidNpadButton_L | HidNpadButton_ZR)) {
+                /* v0.18.84: R idioma, L región, ZR pantalla 4:3 / 16:9 (se recuerdan;
+                 * el juego los lee al arrancar) */
+                if (k & HidNpadButton_R) {
+                    g_lang = g_lang >= 9 ? 1 : g_lang + 1;
+                }
+                if (k & HidNpadButton_L) {
+                    g_region = g_region == 0 ? 1 : g_region == 1 ? 2 : g_region == 2 ? 4 : 0;
+                }
+                if (k & HidNpadButton_ZR) {
+                    g_wide = !g_wide;
+                }
+                console_apply();
+                ajustes_guardar();
                 dirty = true;
             } else if (k & HidNpadButton_Minus) {
                 g_ui.stage_back = UI_LIBRARY;

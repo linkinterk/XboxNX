@@ -97,7 +97,8 @@ int main(int argc, char **argv)
     }
 
     UiState s = {0};
-    s.version = "0.18.83";
+    s.version = "0.18.84";
+    snprintf(s.console, sizeof(s.console), "Idioma: Español · Región: la del juego · 16:9");
     s.cards = cards;
 
     s.screen = UI_LOADING;
