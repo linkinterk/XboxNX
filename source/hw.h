@@ -96,6 +96,19 @@ uint32_t hw_last_target(void);
 
 /* Prepara el hardware para una ejecución nueva. */
 bool hw_init(struct Kernel *k);
+/* v0.18.79: el push buffer en su propio hilo (núcleo 1).
+ * hold: que no corra (y esperar a que termine lo que hacía) / que siga;
+ * detach: soltar el juego (antes de liberar su memoria); busy: hay trabajo
+ * pendiente; wait: esperar a que termine, a lo sumo max_ns (devuelve lo
+ * esperado); set: usarlo o no (sin él, el hilo del juego como antes). */
+void hw_pfifo_hold(bool on);
+void hw_pfifo_detach(void);
+bool hw_pfifo_busy(void);
+uint64_t hw_pfifo_wait(uint64_t max_ns);
+void hw_pfifo_set(bool on);
+bool hw_pfifo_on(void);
+bool hw_pfifo_wanted(void);
+void hw_pfifo_stats(uint64_t *runs, uint64_t *ns_busy, uint64_t *waits, uint64_t *ns_waited);
 /* Acceso de la CPU a una dirección sin memoria: true si es de un chip. */
 bool hw_mmio(void *kernel, uint32_t addr, int size, bool write, uint32_t *value);
 uint32_t hw_port_in(void *kernel, uint16_t port, int size);

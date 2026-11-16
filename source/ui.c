@@ -926,6 +926,21 @@ static void resumen_tick(const UiState *s, double fps, double spd)
              g_mips = RDELTA(gs->mipmaps, p_mips);
     p_draws = gs->draws, p_ups = gs->uploads, p_upb = gs->upload_bytes, p_nstex = gs->ns_tex, p_nscall = gs->ns_call,
     p_mips = gs->mipmaps;
+    char pfs[96];
+    {
+        static uint64_t p_busy, p_wait, p_t;
+        uint64_t runs, busy, waits, waited, now = prof_now_ns();
+        hw_pfifo_stats(&runs, &busy, &waits, &waited);
+        double span = p_t && now > p_t ? (double)(now - p_t) : 30e9;
+        if (hw_pfifo_on()) {
+            snprintf(pfs, sizeof(pfs), "su hilo %.0f%% ocupado, el juego lo esperó %.0f ms",
+                     100.0 * (double)RDELTA(busy, p_busy) / span, RDELTA(waited, p_wait) / 1e6);
+        } else {
+            snprintf(pfs, sizeof(pfs), "en el hilo del juego");
+        }
+        p_busy = busy, p_wait = waited, p_t = now;
+        (void)runs, (void)waits;
+    }
     static unsigned p_skip, p_flips;
     unsigned g_skip = RDELTA(hw_stats()->frames_skipped, p_skip), g_flips = RDELTA(hw_stats()->flips, p_flips);
     p_skip = hw_stats()->frames_skipped, p_flips = hw_stats()->flips;
@@ -977,7 +992,7 @@ static void resumen_tick(const UiState *s, double fps, double spd)
                    "pantalla %u ms · decodificados %llu (%.1f us c/u) · sonido: %.0f cuadros/s, ocupado %.0f%%, atrasado %.0f ms, "
                    "saltados %llu (voces %.0f%%) · caché de lecturas: %.0f MB de la RAM y %.0f MB de la SD (%.0f MB guardados) · "
                    "esperas acortadas %llu (por la hora %llu) · lecturas en segundo plano %llu · "
-                   "cuadros sin dibujar %u de %u · GPU: %u dibujos (%.0f ms en total, %.0f en GL, %.0f vértices), %u texturas subidas (%.0f MB, %.0f ms), %llu mipmaps, "
+                   "push buffer: %s · cuadros sin dibujar %u de %u · GPU: %u dibujos (%.0f ms en total, %.0f en GL, %.0f vértices), %u texturas subidas (%.0f MB, %.0f ms), %llu mipmaps, "
                    "%u programas nuevos (%.0f ms compilando), leer cuadros %.0f ms (esperando a la GPU %.0f, copiando %.0f), "
                    "shaders a la medida %u nuevos y %u de la SD (%.0f%% de los dibujos)\n%s%s",
                 ts, n ? fps_sum / n : 0.0, fps_min < 1e8 ? fps_min : 0.0, n ? 100.0 * spd_sum / n : 0.0,
@@ -991,7 +1006,7 @@ static void resumen_tick(const UiState *s, double fps, double spd)
                 (unsigned long long)dn, dn ? (double)dtk / tps * 1e6 / (double)dn : 0.0, (double)af / dt,
                 100.0 * (double)abusy / (dt * 1e9), as->lag_ns / 1e6, (unsigned long long)askip,
                 100.0 * (double)avp / (dt * 1e9), rch / 1048576.0, rcm / 1048576.0, rc_ram / 1048576.0,
-                (unsigned long long)idle, (unsigned long long)spin, (unsigned long long)ard, g_skip, g_flips, g_draws,
+                (unsigned long long)idle, (unsigned long long)spin, (unsigned long long)ard, pfs, g_skip, g_flips, g_draws,
                 g_ns_draw / 1e6, g_ns_call / 1e6, g_ns_vbuf / 1e6, g_ups, g_upb / 1048576.0, g_ns_tex / 1e6,
                 (unsigned long long)g_mips, g_progs, g_ns_link / 1e6, g_ns_read / 1e6, g_ns_rwait / 1e6, g_ns_rcopy / 1e6,
                 g_fxb, g_fxc, g_draws ? 100.0 * (double)g_fxd / g_draws : 0.0, gprof, gprof[0] ? "\n" : "");

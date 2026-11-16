@@ -677,6 +677,12 @@ void kps_idle_skip(Kernel *k)
     if (kio_async_pending()) {
         return; /* v0.18.71: esperando a la SD, el tiempo no salta */
     }
+    if (hw_pfifo_busy()) {
+        /* v0.18.79: el push buffer se está haciendo en su hilo (el juego
+         * espera a la GPU): el tiempo corre como el de verdad */
+        k->now_ns += hw_pfifo_wait(1000000u);
+        return;
+    }
     if (kps_next_deadline(k, &next) && next > k->now_ns) {
         uint64_t cap = k->now_ns + 20000000u;
         k->now_ns = next < cap ? next : cap;
@@ -881,6 +887,18 @@ bool kps_schedule(Kernel *k, Cpu *c, bool preempt)
             k->now_ns += dl && next > k->now_ns && w > next - k->now_ns ? next - k->now_ns : w;
             io_waited += w + 1;
             guard = 0; /* no es un bloqueo (a lo sumo 100 ms por vez) */
+            continue;
+        }
+        if (hw_pfifo_busy() && io_waited < 100000000u) {
+            /* v0.18.79: lo mismo con el push buffer en su hilo */
+            uint64_t lim = dl && next > k->now_ns ? next - k->now_ns : 2000000u;
+            if (lim > 2000000u) {
+                lim = 2000000u;
+            }
+            uint64_t w = hw_pfifo_wait(lim);
+            k->now_ns += dl && next > k->now_ns && w > next - k->now_ns ? next - k->now_ns : w;
+            io_waited += w + 1;
+            guard = 0;
             continue;
         }
         if (!dl) {

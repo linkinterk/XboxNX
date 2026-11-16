@@ -35,7 +35,7 @@
 #include "apu/apu.h"
 #include <time.h>
 
-#define APP_VER   "0.18.78"
+#define APP_VER   "0.18.79"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -140,11 +140,14 @@ static unsigned g_nspi = 8; /* 8 ns: con lo que el juego corre más rápido (Y l
 /* Los ajustes que se recuerdan entre arranques (sdmc:/switch/XboxNX/ajustes.txt). */
 #define AJUSTES "sdmc:/switch/XboxNX/ajustes.txt"
 
+static bool g_pfifo_want = true; /* v0.18.79: el push buffer en su hilo (ajustes) */
+
 static void ajustes_guardar(void)
 {
+    g_pfifo_want = hw_pfifo_wanted();
     FILE *f = fopen(AJUSTES, "w");
     if (f) {
-        fprintf(f, "reloj=%u\ncuadros=%u\n", g_nspi, hw_frameskip());
+        fprintf(f, "reloj=%u\ncuadros=%u\nnucleo_push=%d\n", g_nspi, hw_frameskip(), g_pfifo_want ? 1 : 0);
         fclose(f);
     }
 }
@@ -162,6 +165,9 @@ static void ajustes_leer(void)
             g_nspi = v;
         } else if (sscanf(line, "cuadros=%u", &v) == 1 && v >= 1 && v <= 6) {
             hw_set_frameskip(v);
+        } else if (sscanf(line, "nucleo_push=%u", &v) == 1) {
+            g_pfifo_want = v != 0;
+            hw_pfifo_set(g_pfifo_want);
         }
     }
     fclose(f);
@@ -221,6 +227,7 @@ static void load_into_memory(void)
     g_ui.load_total = 0;
     g_ui.load_name = "Cargando en la memoria del Xbox...";
     present();
+    hw_pfifo_detach(); /* v0.18.79: el hilo del push buffer suelta el juego anterior (antes de soltar su RAM) */
     vm_free(&g_vm);
     memset(&g_load, 0, sizeof(g_load));
     u64 t0 = armGetSystemTick();
@@ -819,10 +826,12 @@ int main(int argc, char **argv)
                     /* volcado para depurar: RAM, páginas, hilos, llamadas, default.xbe */
                     snprintf(g_ui.toast, sizeof(g_ui.toast), "Guardando el volcado (64 MB)...");
                     present();
+                    hw_pfifo_hold(true); /* v0.18.79: el hilo del push buffer, quieto mientras tanto */
                     gpu_flush_all(); /* lo que está en la GPU, a la RAM */
                     dump_state(&g_run, &g_game.disc, "sdmc:/switch/XboxNX/volcado", g_ui.toast, sizeof(g_ui.toast));
                     /* y el cuadro siguiente entero, para repetirlo en la PC */
                     hw_capture_arm("sdmc:/switch/XboxNX/volcado");
+                    hw_pfifo_hold(false);
                     g_cap_seen = 1;
                     dirty = true;
                 }
@@ -847,15 +856,32 @@ int main(int argc, char **argv)
                     if (!gpu_ready()) {
                         snprintf(g_ui.toast, sizeof(g_ui.toast), "Sin GPU: %s", gpu_info());
                     } else if (gpu_enabled()) {
+                        hw_pfifo_hold(true);
                         gpu_flush_all();
                         gpu_enable(false);
+                        hw_pfifo_hold(false);
                         snprintf(g_ui.toast, sizeof(g_ui.toast), "Dibujo por software (CPU)");
                     } else {
+                        hw_pfifo_hold(true);
                         gpu_reset();
                         gpu_enable(true);
+                        hw_pfifo_hold(false);
                         snprintf(g_ui.toast, sizeof(g_ui.toast), "Dibujo por GPU (etapa 4c)");
                     }
                     dirty = true;
+                }
+                {
+                    u64 held = padGetButtons(&pad);
+                    if ((k & (HidNpadButton_ZL | HidNpadButton_ZR)) && (held & HidNpadButton_ZL) && (held & HidNpadButton_ZR)) {
+                        /* v0.18.79: ZL + ZR: el push buffer en su hilo sí/no */
+                        hw_pfifo_set(!hw_pfifo_wanted());
+                        ajustes_guardar();
+                        snprintf(g_ui.toast, sizeof(g_ui.toast), "%s",
+                                 hw_pfifo_wanted() ? "Push buffer en su propio núcleo (más rápido)"
+                                               : "Push buffer en el hilo del juego (como antes)");
+                        dirty = true;
+                        k &= ~(u64)(HidNpadButton_ZL | HidNpadButton_ZR);
+                    }
                 }
                 if (k & HidNpadButton_Y) {
                     g_nspi = g_nspi >= 8 ? 1 : g_nspi * 2;
@@ -953,6 +979,8 @@ int main(int argc, char **argv)
     ui_thread_stop();
     crash_step("parar el muestreo");
     sampler_stop();
+    crash_step("soltar el hilo del push buffer");
+    hw_pfifo_detach(); /* v0.18.79: que no toque la RAM del Xbox ni la GPU desde aquí */
     crash_step("parar el audio del Xbox");
     apu_exit();
     crash_step("escribir lo pendiente en la SD");

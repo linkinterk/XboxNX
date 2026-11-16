@@ -15,6 +15,19 @@
 #include "../source/runner.h"
 #include "../source/dump.h"
 
+/* v0.18.79: con el push buffer en su hilo (XBOXNX_PFIFO_HILO=1), cada escritura
+ * espera a que el hilo termine lo pedido (las pruebas miran el resultado ya) */
+static bool hw_mmio_sync(void *k, uint32_t a, int size, bool w, uint32_t *v)
+{
+    bool r = hw_mmio(k, a, size, w, v);
+    if (w) {
+        hw_pfifo_hold(true);
+        hw_pfifo_hold(false);
+    }
+    return r;
+}
+#define hw_mmio hw_mmio_sync
+
 static int g_fail;
 #define CHECK(c)                                                 \
     do {                                                         \

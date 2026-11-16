@@ -146,11 +146,227 @@ typedef struct Hw {
 static Hw g_hw;
 static uint32_t dma_of_handle(uint32_t handle);
 
-static uint32_t nv_ld(uint32_t off) { return *(uint32_t *)(g_hw.nv + off); }
-static void nv_st(uint32_t off, uint32_t v) { *(uint32_t *)(g_hw.nv + off) = v; }
+/* v0.18.79: los registros los usan dos hilos (el juego y el del push buffer):
+ * con acquire/release, para que lo escrito antes (la RAM, otros registros)
+ * se vea antes que el registro */
+static uint32_t nv_ld(uint32_t off) { return __atomic_load_n((uint32_t *)(void *)(g_hw.nv + off), __ATOMIC_ACQUIRE); }
+static void nv_st(uint32_t off, uint32_t v) { __atomic_store_n((uint32_t *)(void *)(g_hw.nv + off), v, __ATOMIC_RELEASE); }
+static void nv_or(uint32_t off, uint32_t v) { __atomic_fetch_or((uint32_t *)(void *)(g_hw.nv + off), v, __ATOMIC_ACQ_REL); }
+static void nv_andn(uint32_t off, uint32_t v) { __atomic_fetch_and((uint32_t *)(void *)(g_hw.nv + off), ~v, __ATOMIC_ACQ_REL); }
+
+/* ---- v0.18.79: el push buffer en su propio hilo (como el PFIFO del Xbox) ----
+ * Antes el hilo del juego recorría el push buffer en cuanto el juego movía
+ * PUT: armar cada dibujo le quitaba al juego del 11 al 55% de su tiempo. Ahora
+ * lo hace otro hilo (núcleo 1) mientras el juego sigue; GET avanza cuando ya
+ * se hizo, como en el Xbox (el juego espera a GET, a REF o a los semáforos
+ * antes de reusar memoria). Las trampas para el ISR levantan la interrupción
+ * y el hilo para hasta que el ISR la atiende (como antes). */
+#ifdef __SWITCH__
+#include <switch.h>
+typedef Mutex PfMutex;
+typedef CondVar PfCond;
+#define pf_init(m) mutexInit(m)
+#define pf_lock(m) mutexLock(m)
+#define pf_unlock(m) mutexUnlock(m)
+#define pfc_init(c) condvarInit(c)
+#define pfc_wait(c, m) condvarWait(c, m)
+#define pfc_wait_ns(c, m, ns) condvarWaitTimeout(c, m, ns)
+#define pfc_all(c) condvarWakeAll(c)
+#else
+#include <pthread.h>
+#include <time.h>
+typedef pthread_mutex_t PfMutex;
+typedef pthread_cond_t PfCond;
+#define pf_init(m) pthread_mutex_init(m, NULL)
+#define pf_lock(m) pthread_mutex_lock(m)
+#define pf_unlock(m) pthread_mutex_unlock(m)
+#define pfc_init(c) pthread_cond_init(c, NULL)
+#define pfc_wait(c, m) pthread_cond_wait(c, m)
+#define pfc_all(c) pthread_cond_broadcast(c)
+static void pfc_wait_ns(PfCond *c, PfMutex *m, uint64_t ns)
+{
+    struct timespec dl;
+    clock_gettime(CLOCK_REALTIME, &dl);
+    dl.tv_sec += (time_t)(ns / 1000000000u);
+    dl.tv_nsec += (long)(ns % 1000000000u);
+    if (dl.tv_nsec >= 1000000000) {
+        dl.tv_sec++;
+        dl.tv_nsec -= 1000000000;
+    }
+    pthread_cond_timedwait(c, m, &dl);
+}
+#endif
+
+static struct {
+    bool started, want; /* el hilo existe; se quiere usar (ajustes) */
+    Kernel *k;          /* NULL: no hay juego (no corre) */
+    int kick;           /* hay trabajo nuevo (PUT, ISR, flip) */
+    int busy;           /* recorriendo el push buffer */
+    int hold;           /* el juego necesita que no corra (volcado, reinicio) */
+    bool quit;
+    PfMutex m;
+    PfCond more, idle;
+    uint64_t runs, ns_busy, waits, ns_waited;
+#ifdef __SWITCH__
+    Thread thr;
+#else
+    pthread_t thr;
+#endif
+} PF = {.want = true};
+
+static void pb_run_(Kernel *k);
+static uint64_t pf_now(void) { return prof_now_ns(); }
+
+static void pf_loop(void)
+{
+    pf_lock(&PF.m);
+    for (;;) {
+        while ((!PF.kick || PF.hold || !PF.k) && !PF.quit) {
+            pfc_wait(&PF.more, &PF.m);
+        }
+        if (PF.quit) {
+            break;
+        }
+        PF.kick = 0;
+        Kernel *k = PF.k;
+        __atomic_store_n(&PF.busy, 1, __ATOMIC_SEQ_CST);
+        pf_unlock(&PF.m);
+        uint64_t t0 = pf_now();
+        pb_run_(k);
+        PF.ns_busy += pf_now() - t0;
+        PF.runs++;
+        pf_lock(&PF.m);
+        __atomic_store_n(&PF.busy, 0, __ATOMIC_SEQ_CST);
+        pfc_all(&PF.idle);
+    }
+    pf_unlock(&PF.m);
+}
+
+#ifdef __SWITCH__
+static void pf_entry(void *a) { (void)a; pf_loop(); }
+#else
+static void *pf_entry(void *a) { (void)a; pf_loop(); return NULL; }
+#endif
+
+static bool pf_start(void)
+{
+    if (PF.started) {
+        return true;
+    }
+#ifndef __SWITCH__
+    if (!getenv("XBOXNX_PFIFO_HILO")) { /* en la PC (pruebas): como antes, salvo que se pida */
+        return false;
+    }
+#endif
+    pf_init(&PF.m);
+    pfc_init(&PF.more);
+    pfc_init(&PF.idle);
+#ifdef __SWITCH__
+    /* núcleo 1 (el del audio, que tiene más prioridad: 0x2C) */
+    PF.started = R_SUCCEEDED(threadCreate(&PF.thr, pf_entry, NULL, NULL, 0x40000, 0x2D, 1)) &&
+                 R_SUCCEEDED(threadStart(&PF.thr));
+#else
+    PF.started = pthread_create(&PF.thr, NULL, pf_entry, NULL) == 0;
+#endif
+    return PF.started;
+}
+
+static bool pf_on(void) { return PF.started && PF.want; }
+
+/* Hay trabajo: al hilo (o aquí mismo, sin el hilo). */
+static void pb_run(Kernel *k);
+static void pb_kick(Kernel *k)
+{
+    if (!pf_on()) {
+        pb_run(k);
+        return;
+    }
+    pf_lock(&PF.m);
+    PF.kick = 1;
+    pfc_all(&PF.more);
+    pf_unlock(&PF.m);
+}
+
+void hw_pfifo_hold(bool on)
+{
+    if (!PF.started) {
+        return;
+    }
+    pf_lock(&PF.m);
+    if (on) {
+        /* primero lo pendiente (para que lo que el juego ya pidió esté hecho) */
+        while (!PF.hold && PF.k && (__atomic_load_n(&PF.busy, __ATOMIC_SEQ_CST) || PF.kick)) {
+            pfc_wait(&PF.idle, &PF.m);
+        }
+        PF.hold++;
+        while (__atomic_load_n(&PF.busy, __ATOMIC_SEQ_CST)) {
+            pfc_wait(&PF.idle, &PF.m);
+        }
+    } else if (PF.hold > 0) {
+        PF.hold--;
+        if (!PF.hold) {
+            pfc_all(&PF.more);
+        }
+    }
+    pf_unlock(&PF.m);
+}
+
+void hw_pfifo_detach(void)
+{
+    if (!PF.started) {
+        return;
+    }
+    hw_pfifo_hold(true);
+    pf_lock(&PF.m);
+    PF.k = NULL;
+    PF.kick = 0;
+    pf_unlock(&PF.m);
+    hw_pfifo_hold(false);
+}
+
+bool hw_pfifo_busy(void)
+{
+    return pf_on() && (__atomic_load_n(&PF.busy, __ATOMIC_SEQ_CST) || __atomic_load_n(&PF.kick, __ATOMIC_SEQ_CST));
+}
+
+uint64_t hw_pfifo_wait(uint64_t max_ns)
+{
+    if (!hw_pfifo_busy()) {
+        return 0;
+    }
+    uint64_t t0 = pf_now();
+    pf_lock(&PF.m);
+    if (PF.busy || PF.kick) {
+        pfc_wait_ns(&PF.idle, &PF.m, max_ns);
+    }
+    pf_unlock(&PF.m);
+    uint64_t dt = pf_now() - t0;
+    PF.waits++;
+    PF.ns_waited += dt;
+    return dt;
+}
+
+void hw_pfifo_set(bool on)
+{
+    hw_pfifo_hold(true); /* lo que esté haciendo, que termine */
+    PF.want = on;
+    hw_pfifo_hold(false);
+    if (on && !PF.started) {
+        pf_start();
+    }
+}
+
+bool hw_pfifo_on(void) { return pf_on(); }
+bool hw_pfifo_wanted(void) { return PF.want; }
+
+void hw_pfifo_stats(uint64_t *runs, uint64_t *ns_busy, uint64_t *waits, uint64_t *ns_waited)
+{
+    *runs = PF.runs, *ns_busy = PF.ns_busy, *waits = PF.waits, *ns_waited = PF.ns_waited;
+}
 
 bool hw_init(Kernel *k)
 {
+    hw_pfifo_detach(); /* el hilo no toca nada mientras se reinicia */
     if (!g_hw.nv) {
         g_hw.nv = calloc(1, NV2A_SIZE);
     } else {
@@ -169,6 +385,12 @@ bool hw_init(Kernel *k)
     g_hw.next_vblank = FRAME_NS;
     aci_init(k);
     usb_init(k->vm->ram, VM_RAM_SIZE);
+    if (pf_start()) {
+        pf_lock(&PF.m);
+        PF.k = k;
+        PF.kick = 0;
+        pf_unlock(&PF.m);
+    }
     return true;
 }
 
@@ -258,7 +480,25 @@ static uint32_t surf_get(uint32_t mask) { return (nv_ld(NV_PGRAPH_SURFACE) & mas
 
 static void surf_set(uint32_t mask, uint32_t v)
 {
-    nv_st(NV_PGRAPH_SURFACE, (nv_ld(NV_PGRAPH_SURFACE) & ~mask) | ((v << __builtin_ctz(mask)) & mask));
+    /* v0.18.79: el flip lo escribe el hilo del push buffer y la lectura el
+     * ISR del vblank (el hilo del juego): sin perder ninguno de los dos */
+    uint32_t *r = (uint32_t *)(void *)(g_hw.nv + NV_PGRAPH_SURFACE);
+    uint32_t old = __atomic_load_n(r, __ATOMIC_ACQUIRE), nw;
+    do {
+        nw = (old & ~mask) | ((v << __builtin_ctz(mask)) & mask);
+    } while (!__atomic_compare_exchange_n(r, &old, nw, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+}
+
+/* lo mismo, sumando 1 módulo mod de una vez (el vblank: READ + 1) */
+static void surf_inc(uint32_t mask, uint32_t modmask)
+{
+    uint32_t *r = (uint32_t *)(void *)(g_hw.nv + NV_PGRAPH_SURFACE);
+    uint32_t old = __atomic_load_n(r, __ATOMIC_ACQUIRE), nw;
+    do {
+        uint32_t mod = (old & modmask) >> __builtin_ctz(modmask), cur = (old & mask) >> __builtin_ctz(mask);
+        uint32_t v = mod ? (cur + 1) % mod : 0;
+        nw = (old & ~mask) | ((v << __builtin_ctz(mask)) & mask);
+    } while (!__atomic_compare_exchange_n(r, &old, nw, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
 }
 
 /* memoria física del Xbox */
@@ -590,7 +830,7 @@ static void get_report(Kernel *k, uint32_t v)
             p[0] = (uint32_t)ts;
             p[1] = (uint32_t)(ts >> 32);
             p[2] = n;
-            p[3] = 0;
+            __atomic_store_n(&p[3], 0, __ATOMIC_RELEASE);
         }
     }
 }
@@ -622,9 +862,9 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         nv_st(NV_PGRAPH_TRAPPED_ADDR, subch << 16 | m);
         nv_st(NV_PGRAPH_TRAPPED_DATA, v);
         nv_st(NV_PGRAPH_NSOURCE, 1);
-        nv_st(NV_PGRAPH_INTR, nv_ld(NV_PGRAPH_INTR) | (1u << 20));
+        nv_or(NV_PGRAPH_INTR, 1u << 20);
         g_hw.st.traps++;
-        k->irq_kick = 1; /* que el ISR de D3D la atienda ya, no al final del turno */
+        __atomic_store_n(&k->irq_kick, 1, __ATOMIC_RELEASE); /* que el ISR de D3D la atienda ya, no al final del turno */
         return PB_TRAP;
     }
     if (g_hw.obj_class[subch] != 0x97) {
@@ -656,8 +896,7 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
     case NV097_SET_FLIP_WRITE: surf_set(SURF_WRITE, v); break;
     case NV097_SET_FLIP_MODULO: surf_set(SURF_MODULO, v); break;
     case NV097_FLIP_INCREMENT_WRITE: {
-        uint32_t mod = surf_get(SURF_MODULO);
-        surf_set(SURF_WRITE, mod ? (surf_get(SURF_WRITE) + 1) % mod : 0);
+        surf_inc(SURF_WRITE, SURF_MODULO);
         g_hw.st.flips++;
         cap_flip(k);
         /* saltar cuadros: dibujar solo 1 de cada g_frameskip (no al capturar) */
@@ -738,7 +977,8 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         if (g_hw.sem_inst) {
             uint32_t *p = phys32(k, dma_base(g_hw.sem_inst) + g_hw.sem_offset);
             if (p) {
-                *p = v;
+                /* con el push buffer en su hilo: lo de antes, visible antes */
+                __atomic_store_n(p, v, __ATOMIC_RELEASE);
                 g_hw.st.sem_releases++;
             }
         }
@@ -779,6 +1019,10 @@ static void pb_run_(Kernel *k)
     unsigned branches = 0;
     g_hw.stall = PB_GO;
     for (unsigned budget = 0; get != put && budget < 4000000; budget++) {
+        if (!(budget & 4095)) {
+            nv_st(NV_PFIFO_CACHE1_DMA_GET, get); /* v0.18.79: que el juego vea el avance (el hilo) */
+            put = nv_ld(NV_PFIFO_CACHE1_DMA_PUT);
+        }
         if (!(nv_ld(NV_PGRAPH_FIFO) & 1) || (nv_ld(NV_PGRAPH_INTR) & (1u << 20))) {
             g_hw.stall = (nv_ld(NV_PGRAPH_INTR) & (1u << 20)) ? PB_TRAP : PB_FIFO;
             break;
@@ -892,8 +1136,8 @@ static void nv_write(Kernel *k, uint32_t off, int size, uint32_t value)
         nv_st(off, nv_ld(off) & ~value); /* 1 borra */
         return;
     case NV_PGRAPH_INTR:
-        nv_st(off, nv_ld(off) & ~value);
-        pb_run(k); /* el ISR atendió la trampa: sigue */
+        nv_andn(off, value);
+        pb_kick(k); /* el ISR atendió la trampa: sigue */
         return;
     case NV_PTIMER_ALARM_0: {
         nv_st(off, value);
@@ -910,27 +1154,30 @@ static void nv_write(Kernel *k, uint32_t off, int size, uint32_t value)
         return;
     case NV_PGRAPH_INCREMENT:
         if (value & 2) { /* el flip del ISR del vblank: avanza la lectura */
-            uint32_t mod = surf_get(SURF_MODULO);
-            surf_set(SURF_READ, mod ? (surf_get(SURF_READ) + 1) % mod : 0);
-            pb_run(k);
+            surf_inc(SURF_READ, SURF_MODULO);
+            pb_kick(k);
         }
         return;
     case NV_PGRAPH_FIFO:
         nv_st(off, value);
         if (value & 1) {
-            pb_run(k);
+            pb_kick(k);
         }
         return;
     case NV_USER_DMA_PUT:
     case NV_USER_DMA_GET:
     case NV_USER_REF:
-        nv_st(off - NV_USER_DMA_PUT + NV_PFIFO_CACHE1_DMA_PUT, value);
-        if (off == NV_USER_DMA_GET) {
+        if (off == NV_USER_DMA_GET) { /* mover GET: con el hilo quieto */
+            hw_pfifo_hold(true);
+            nv_st(NV_PFIFO_CACHE1_DMA_GET, value);
             g_hw.left = 0;
             g_hw.sub_active = false;
+            hw_pfifo_hold(false);
+            return;
         }
+        nv_st(off - NV_USER_DMA_PUT + NV_PFIFO_CACHE1_DMA_PUT, value);
         if (off == NV_USER_DMA_PUT) {
-            pb_run(k);
+            pb_kick(k);
         }
         return;
     case NV_PVIDEO_STOP:
