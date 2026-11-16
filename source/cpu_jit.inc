@@ -2115,6 +2115,8 @@ static bool jit_compile(Cpu *c, Block *b)
         }
         if (b->ppage + 1 < 4096) {
             cmpwi(&e, W10, b->ppage + 1);
+        } else if (!((b->ppage + 1) & 0xFFFu) && ((b->ppage + 1) >> 12) < 4096) {
+            E(&e, 0x7140001Fu | ((b->ppage + 1) >> 12) << 10 | (uint32_t)W10 << 5); /* v0.18.83: cmp w10, #n, lsl #12 */
         } else {
             movw(&e, W11, b->ppage + 1);
             cmpw(&e, W10, W11);
@@ -2126,13 +2128,17 @@ static bool jit_compile(Cpu *c, Block *b)
             movw(&e, W9, b->ppage);
             ldrw_lsl2(&e, W10, 26, W9);
         }
-        if (b->gen < 4096) {
-            cmpwi(&e, W10, b->gen);
+        if (!b->gen) { /* v0.18.83: casi siempre 0: cbnz */
+            slow_add(&e, &bx, fwd_cb(&e, J_CBNZ, W10)); /* el código cambió */
         } else {
-            movw(&e, W11, b->gen);
-            cmpw(&e, W10, W11);
+            if (b->gen < 4096) {
+                cmpwi(&e, W10, b->gen);
+            } else {
+                movw(&e, W11, b->gen);
+                cmpw(&e, W10, W11);
+            }
+            slow_bcond(&e, &bx, COND_NE);            /* el código cambió */
         }
-        slow_bcond(&e, &bx, COND_NE);                /* el código cambió */
         uint32_t *fast = e.p; /* v0.18.62: desde la misma página se entra aquí */
         E(&e, 0xF1000000u | b->n << 10 | 23u << 5 | 23u); /* subs x23, x23, #n */
         slow_bcond(&e, &bx, 3);                      /* b.lo: no alcanza */

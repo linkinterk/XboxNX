@@ -205,16 +205,17 @@ static void fround_n(Em *e, Slow *s)
     uint32_t *full = fwd_bcond(e, COND_NE);
     fcmpd0(e, 2);
     uint32_t *zero = fwd_bcond(e, COND_EQ);
-    fabsd(e, 3, 2);
-    movx(e, W14, 0x3810000000000000ull); /* 2^-126 */
-    fmov_dx(e, 4, W14);
-    fcmpd(e, 3, 4);
-    slow_bcond(e, s, COND_MI);
-    movx(e, W14, 0x47EFFFFFE0000000ull); /* FLT_MAX */
-    fmov_dx(e, 4, W14);
-    fcmpd(e, 3, 4);
-    slow_bcond(e, s, COND_GT);
+    /* v0.18.83: se redondea a float y se mira el exponente del resultado
+     * (antes fabs y dos comparaciones con constantes de 64 bits, ~20
+     * instrucciones): de 2 a 254 es lo mismo que el x87 con 24 bits; 0, 1
+     * (por debajo de FLT_MIN, donde float pierde bits y el x87 no) y 255
+     * (más allá de FLT_MAX) van al lento. Halo 2 corre con PC = 24 bits. */
     fcvt_sd(e, 3, 2);
+    E(e, 0x1E260000u | 3u << 5 | (uint32_t)W14);                         /* fmov w14, s3 */
+    E(e, 0x53000000u | 23u << 16 | 30u << 10 | (uint32_t)W14 << 5 | W14); /* ubfx w14, w14, #23, #8 */
+    subwi(e, W14, W14, 2);
+    cmpwi(e, W14, 252);
+    slow_bcond(e, s, COND_HI);
     fcvt_ds(e, 2, 3);
     patch(e, full);
     patch(e, zero);
