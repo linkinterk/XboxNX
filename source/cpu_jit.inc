@@ -152,6 +152,8 @@ typedef struct Em {
     struct {
         uint32_t *back;
         uint16_t first, n, i;
+        uint8_t xd, xl; /* v0.18.80: xmm por guardar antes y por recargar después */
+        bool fz;
     } cold[96];
     unsigned ncold, npool;
     uint32_t *pool[320];
@@ -171,7 +173,29 @@ typedef struct Em {
     uint32_t page; /* la página virtual del bloque (las salidas dentro de ella van a la entrada rápida) */
     uint32_t *ic_ldr_eip, *ic_ldr_entry, *ic_adr; /* v0.18.63: la caché del último EIP variable (NULL: no hay) */
     unsigned nlink;
+    /* v0.18.80, la página del último operando: x27 = la página en el host,
+     * w28 = el offset de [base + index*scale + pc_d0] dentro de ella. Otro
+     * operando con la misma base (sin tocar) y un desplazamiento cerca se
+     * hace con add/cmp en vez de leer la tabla de páginas otra vez. */
+    const Block *cur_b;
+    const Insn *cur_in, *ea_in;
+    unsigned cur_i;
+    uint32_t *ea_mark;   /* el código justo tras emit_ea de cur_in (w9 = su dirección) */
+    bool pc_cand;        /* cur_in puede usar o fijar la página (la primera vez) */
+    bool pc_live, pc_wr; /* x27/w28 valen (y se comprobó el código: sirve para guardar) */
+    uint8_t pc_base, pc_index, pc_scale;
+    int32_t pc_d0;
+    uint64_t pc_est[4];  /* instrucciones que la fijan: su camino lento la invalida */
+    /* v0.18.80, los xmm en v16..v23 dentro del bloque: xl = cargados de
+     * c->fp.xmm, xd = cambiados (hay que guardarlos antes de C y al salir) */
+    bool xc_on, xc_locked, xc_bad;
+    uint8_t xl, xd, xd_before; /* xd_before: al empezar la instrucción */
+    uint8_t xc_cd, xc_cl;      /* el camino lento que se emite: guardar xc_cd, recargar xc_cl */
+    uint32_t *xw_first;        /* la primera escritura a un xmm de esta instrucción */
+    bool fz;                   /* v0.18.80: la instrucción deja NZCV de un fcmp (comiss): su lento lo rehace */
 } Em;
+/* v0.18.80: lf_kind/nzcv tras comiss/ucomiss hechos aquí (NZCV = fcmp a, b) */
+#define LFK_FCMP 32u
 
 static inline void E(Em *e, uint32_t ins)
 {
@@ -323,8 +347,15 @@ static void patch(Em *e, uint32_t *at)
 }
 
 /* salir devolviendo k instrucciones hechas */
+static void xc_store(Em *e, unsigned m);
+static void xc_load(Em *e, unsigned m);
+static void xc_flush(Em *e);
 static inline void exit_k(Em *e, unsigned k)
 {
+    if (e->xw_first) {
+        e->xc_bad = true; /* saldría con la escritura a medias */
+    }
+    xc_store(e, e->xd);
     movw(e, X0, k);
     if (e->nexits < sizeof(e->exits) / sizeof(e->exits[0])) {
         e->exits[e->nexits++] = fwd_b(e);
@@ -369,8 +400,182 @@ static void emit_ea_at(Em *e, const Insn *in, bool with_fs, int dst)
         ldrw(e, W10, XC, OFF(fs_base));
         rrr(e, ADDW, dst, dst, W10);
     }
+    if (dst == W9) {
+        e->ea_mark = e->p;
+        e->ea_in = in;
+    }
 }
 static void emit_ea(Em *e, const Insn *in, bool with_fs) { emit_ea_at(e, in, with_fs, W9); }
+
+/* v0.18.80, pruebas: CPU_JIT_LENTO=1 manda cada consulta de página al camino
+ * lento (para probar los caminos lentos con los xmm y la página guardados) */
+static int g_jit_lento = -1;
+static uint32_t *fwd_cb(Em *e, uint32_t op, int rt);
+/* el salto al lento si la página no está (pruebas: 1 siempre, 2 si el bit 4
+ * de la dirección está puesto) */
+static uint32_t *page_miss(Em *e)
+{
+    if (g_jit_lento == 1) {
+        return fwd_cb(e, J_CBZ, 31);
+    }
+    if (g_jit_lento == 2) {
+        E(e, 0x721C013Fu); /* tst w9, #0x10 */
+        E(e, 0x1A8A13EAu); /* csel w10, wzr, w10, ne: como si no estuviera */
+    }
+    return fwd_cb(e, J_CBZ, W10);
+}
+
+/* ---- v0.18.80: la página del operando anterior (x27, w28) ---- */
+static bool fp_flag_neutral(const Insn *in);
+static bool is_mmx_op(InsnFn f);
+#define PC_INVALID 0xFFFF0000u
+
+/* Instrucciones con un operando de memoria del modrm que pueden usarla. */
+static bool pc_cand_insn(const Insn *in)
+{
+    if (in->is_reg || in->fs) {
+        return false;
+    }
+    InsnFn f = in->fn;
+    return f == x_mov_ge || f == x_mov_eg || f == x_mov_ei || f == x_alu_eg || f == x_alu_ge || f == x_alu_ei ||
+           f == x_test_eg || f == x_test_ei || f == x_movx || f == x_imul || f == x_movd_load || f == x_movd_store ||
+           f == x_movq_load || f == x_movq_store || is_mmx_op(f) || fp_flag_neutral(in) ||
+           (f == x_interp && (in->sz & (INTERP_MARK | INTERP_0F)) == (INTERP_MARK | INTERP_0F) &&
+            (in->aop == 0x2E || in->aop == 0x2F));
+}
+
+static unsigned wreg(unsigned r, unsigned sz) { return sz == 1 ? (r & 3u) : r; }
+
+/* ¿Puede la instrucción cambiar el registro r del x86? (si no se sabe, sí) */
+static bool pc_writes(const Insn *in, unsigned r)
+{
+    InsnFn f = in->fn;
+    if (f == x_nop || f == x_test_eg || f == x_test_ei || f == x_movq_load || f == x_movq_store ||
+        f == x_movd_load || f == x_mmx_shift_i || f == x_emms || is_mmx_op(f)) {
+        return false;
+    }
+    if (f == x_mov_ge || f == x_lea || f == x_imul) {
+        return wreg(in->reg, in->sz) == r;
+    }
+    if (f == x_movx) {
+        return in->reg == r;
+    }
+    if (f == x_mov_eg || f == x_mov_ei || f == x_incdec || f == x_shift || f == x_movd_store) {
+        return in->is_reg && wreg(in->rm, in->sz) == r;
+    }
+    if (f == x_alu_eg || f == x_alu_ei) {
+        return in->is_reg && in->aop != OP_CMP && wreg(in->rm, in->sz) == r;
+    }
+    if (f == x_alu_ge) {
+        return in->aop != OP_CMP && wreg(in->reg, in->sz) == r;
+    }
+    if (f == x_cdq) {
+        return r == R_EDX;
+    }
+    if (f == x_jcc) {
+        return false;
+    }
+    if (f == x_cmov) {
+        return wreg(in->reg, in->sz) == r;
+    }
+    if (f == x_setcc) {
+        return in->is_reg && wreg(in->rm, 1) == r;
+    }
+    if (f == x_interp && (in->sz & (INTERP_MARK | INTERP_0F)) == (INTERP_MARK | INTERP_0F) &&
+        (in->aop == 0x2E || in->aop == 0x2F)) {
+        return false; /* comiss: solo flags */
+    }
+    if (f == x_push_r || f == x_push_i) {
+        return r == R_ESP;
+    }
+    if (fp_flag_neutral(in)) {
+        unsigned op = in->aop;
+        if (in->sz & INTERP_0F) {
+            if (op == 0x2C || op == 0x2D || op == 0x50 || op == 0xC5 || op == 0xD7) {
+                return in->reg == r;
+            }
+            if (op == 0x7E) {
+                return in->is_reg && in->rm == r;
+            }
+            return false;
+        }
+        return op == 0xDF && in->is_reg && in->reg == 4 && r == R_EAX; /* fnstsw ax */
+    }
+    return true;
+}
+
+static bool pc_same(const Insn *a, const Insn *b)
+{
+    return a->base == b->base && a->index == b->index && (a->index == NOREG || a->scale == b->scale);
+}
+
+/* ¿Vale la pena fijarla en la instrucción i? (otra más adelante la usaría) */
+static bool pc_worth(const Block *b, unsigned i)
+{
+    const Insn *a = &b->in[i];
+    for (unsigned j = i + 1; j < b->n && j < i + 24; j++) {
+        const Insn *x = &b->in[j];
+        if (pc_cand_insn(x) && pc_same(a, x)) {
+            int32_t d = (int32_t)(x->disp - a->disp);
+            if (d > -4000 && d < 4000) {
+                return true;
+            }
+        }
+        if ((a->base != NOREG && pc_writes(x, a->base)) ||
+            (a->index != NOREG && pc_writes(x, a->index))) {
+            return false;
+        }
+    }
+    return false;
+}
+
+/* Antes de la consulta de la página de w9: si la de antes sirve, x10/x11
+ * salen de x27/w28 y se salta la consulta (devuelve ese salto). */
+static uint32_t *pc_pre(Em *e, bool write, unsigned n, bool *est)
+{
+    *est = false;
+    if (!e->pc_cand || e->ea_mark != e->p || e->ea_in != e->cur_in) {
+        return NULL;
+    }
+    e->pc_cand = false;
+    const Insn *in = e->cur_in;
+    if (e->pc_live && in->base == e->pc_base && in->index == e->pc_index &&
+        (in->index == NOREG || in->scale == e->pc_scale) && (!write || e->pc_wr)) {
+        int32_t d = (int32_t)in->disp - e->pc_d0;
+        if (d > -4096 && d < 4096) {
+            if (d >= 0) {
+                addwi(e, W11, 28, (uint32_t)d);
+            } else {
+                subwi(e, W11, 28, (uint32_t)-d);
+            }
+            cmpwi(e, W11, 0x1000u - n);
+            uint32_t *miss = fwd_bcond(e, COND_HI);
+            movx_r(e, W10, 27);
+            uint32_t *hit = fwd_b(e);
+            patch(e, miss);
+            return hit;
+        }
+    }
+    *est = pc_worth(e->cur_b, e->cur_i);
+    return NULL;
+}
+
+static void pc_post(Em *e, uint32_t *hit, bool est, bool write)
+{
+    if (est) {
+        movx_r(e, 27, W10);
+        mov_w(e, 28, W11);
+        const Insn *in = e->cur_in;
+        e->pc_live = true;
+        e->pc_wr = write;
+        e->pc_base = in->base;
+        e->pc_index = in->index;
+        e->pc_scale = in->scale;
+        e->pc_d0 = (int32_t)in->disp;
+        e->pc_est[(e->cur_i >> 6) & 3] |= 1ull << (e->cur_i & 63);
+    }
+    patch(e, hit);
+}
 /* lea: al registro del x86 (sin segmento) */
 static void emit_ea_to(Em *e, const Insn *in, int dst) { emit_ea_at(e, in, false, dst); }
 
@@ -378,18 +583,21 @@ static void emit_ea_to(Em *e, const Insn *in, int dst) { emit_ea_at(e, in, false
  * Si no está (o es de código y se va a escribir) salta al camino lento. */
 static void emit_page(Em *e, bool write, uint32_t **slow1, uint32_t **slow2, uint32_t **slow3)
 {
+    bool est;
+    uint32_t *hit = pc_pre(e, write, 4, &est);
     lsrw(e, W10, W9, 12);
     ldrw_lsl2(e, W10, XPT, W10);
     ubfx12(e, W11, W9);
     cmpwi(e, W11, 0xFFC);
     *slow2 = fwd_bcond(e, COND_HI);
-    *slow1 = fwd_cb(e, J_CBZ, W10); /* x10 = página + 1: x20 y x22 ya restan 1 */
+    *slow1 = page_miss(e); /* x10 = página + 1: x20 y x22 ya restan 1 */
     *slow3 = NULL;
     if (write) { /* página con código traducido: lo hace la función (vm_touch) */
         ldrb_r(e, W13, XCODE, W10);
         *slow3 = fwd_cb(e, J_CBNZ, W13);
     }
     addx_lsl(e, W10, XRAM, W10, 12);
+    pc_post(e, hit, est, write);
 }
 
 /* Llamar a la función de siempre de la instrucción i (con sus comprobaciones). */
@@ -454,6 +662,13 @@ static void emit_call(Em *e, const Block *b, unsigned i, const Vm *vm)
         ((Block *)b)->slow |= 1ull << (i & 63); /* para el perfil (no el camino de respaldo) */
     }
     /* adr x1, la copia de la Insn (junto al código) */
+    /* v0.18.80: los xmm cambiados, a memoria (en el camino lento: los de
+     * antes de la instrucción; su propia escritura viene después del salto) */
+    if (e->fallback) {
+        xc_store(e, e->xc_cd);
+    } else {
+        xc_flush(e);
+    }
     intptr_t d = (intptr_t)(uintptr_t)(e->insn_rx + i) - (intptr_t)em_rx(e);
     E(e, 0x10000000u | ((uint32_t)d & 3u) << 29 | (((uint32_t)(d >> 2)) & 0x7FFFFu) << 5 | 1u);
     movw(e, W9, i | (e->fallback ? 0x80000000u : 0u));
@@ -467,6 +682,14 @@ static void emit_call(Em *e, const Block *b, unsigned i, const Vm *vm)
         e->full = true;
     }
     patch(e, go);
+    if (e->fallback) {
+        xc_load(e, e->xc_cl); /* lo que el camino rápido espera tener */
+    } else {
+        e->xl = 0;
+    }
+    if (e->fallback && (e->pc_est[(i >> 6) & 3] >> (i & 63) & 1)) {
+        movw(e, 28, PC_INVALID); /* v0.18.80: no fijó la página: que nadie la use */
+    }
 }
 
 /* lf_* de una operación de 32 bits: w9 = a, w10 = b, w11 = res */
@@ -510,8 +733,35 @@ static bool alu_native(unsigned aop) { return aop != OP_ADC && aop != OP_SBB; }
 
 /* El camino lento de la instrucción i (sus saltos en sites; los NULL no
  * cuentan): al final del bloque, y de ahí vuelve aquí. Si no cabe, en línea. */
+/* v0.18.80: tras el camino lento de un comiss, NZCV como los dejaría fcmp
+ * (de ZF PF CF en c->flags): mayor 0010, menor 1000, igual 0110, sin orden 0011 */
+static void fz_rebuild(Em *e)
+{
+    ldrw(e, W9, XC, OFF(flags));
+    E(e, 0x1200012Au); /* and w10, w9, #1 (CF) */
+    E(e, 0x5306192Bu); /* ubfx w11, w9, #6, #1 (ZF) */
+    E(e, 0x5302092Cu); /* ubfx w12, w9, #2, #1 (PF) */
+    E(e, 0x2A0B054Au); /* orr w10, w10, w11, lsl #1 */
+    E(e, 0x2A0C094Au); /* orr w10, w10, w12, lsl #2 */
+    E(e, 0x531E754Au); /* lsl w10, w10, #2 */
+    movw(e, W11, 0x30000682u); /* NZCV por índice, de a 4 bits */
+    E(e, 0x1ACA256Bu); /* lsr w11, w11, w10 */
+    E(e, 0x53040D6Bu); /* lsl w11, w11, #28 */
+    E(e, 0xD51B420Bu); /* msr nzcv, x11 */
+}
+
+static void xc_sites(Em *e, uint32_t *const *sites, unsigned n)
+{
+    for (unsigned k = 0; k < n; k++) {
+        if (sites[k] && e->xw_first && sites[k] > e->xw_first) {
+            e->xc_bad = true; /* el lento repetiría la instrucción con el xmm ya cambiado */
+        }
+    }
+}
+
 static void slow_cold(Em *e, const Block *b, unsigned i, const Vm *vm, uint32_t *const *sites, unsigned n)
 {
+    xc_sites(e, sites, n);
     unsigned k0 = e->npool;
     if (e->ncold < sizeof(e->cold) / sizeof(e->cold[0]) && e->npool + n <= sizeof(e->pool) / sizeof(e->pool[0])) {
         for (unsigned k = 0; k < n; k++) {
@@ -523,6 +773,9 @@ static void slow_cold(Em *e, const Block *b, unsigned i, const Vm *vm, uint32_t 
         e->cold[e->ncold].first = (uint16_t)k0;
         e->cold[e->ncold].n = (uint16_t)(e->npool - k0);
         e->cold[e->ncold].i = (uint16_t)i;
+        e->cold[e->ncold].xd = e->xd_before;
+        e->cold[e->ncold].xl = e->xl;
+        e->cold[e->ncold].fz = e->fz;
         e->ncold++;
         return;
     }
@@ -530,9 +783,14 @@ static void slow_cold(Em *e, const Block *b, unsigned i, const Vm *vm, uint32_t 
     for (unsigned k = 0; k < n; k++) {
         patch(e, sites[k]);
     }
+    e->xc_cd = e->xd_before;
+    e->xc_cl = e->xl;
     e->fallback = true;
     emit_call(e, b, i, vm);
     e->fallback = false;
+    if (e->fz) {
+        fz_rebuild(e);
+    }
     patch(e, done);
 }
 
@@ -544,9 +802,14 @@ static void emit_colds(Em *e, const Block *b, const Vm *vm)
         for (unsigned k = 0; k < e->cold[c].n; k++) {
             patch(e, e->pool[e->cold[c].first + k]);
         }
+        e->xc_cd = e->cold[c].xd;
+        e->xc_cl = e->cold[c].xl;
         e->fallback = true;
         emit_call(e, b, e->cold[c].i, vm);
         e->fallback = false;
+        if (e->cold[c].fz) {
+            fz_rebuild(e);
+        }
         E(e, 0x14000000u | ((uint32_t)(e->cold[c].back - e->p) & 0x3FFFFFFu)); /* b de vuelta */
     }
     e->ncold = e->npool = 0;
@@ -599,26 +862,175 @@ static void emit_store_or_call(Em *e, const Block *b, unsigned i, const Vm *vm) 
 
 #define MMOFF(n) (OFF(fp.mm) + 8u * (uint32_t)(n))
 
-static void ldrd(Em *e, int vt, int rn, uint32_t off) { E(e, 0xFD400000u | ((off / 8) << 10) | (uint32_t)rn << 5 | (uint32_t)vt); }
-static void strd(Em *e, int vt, int rn, uint32_t off) { E(e, 0xFD000000u | ((off / 8) << 10) | (uint32_t)rn << 5 | (uint32_t)vt); }
+/* ---- v0.18.80: los xmm en registros (v16 + k) mientras corre el bloque ----
+ * Las lecturas y escrituras de c->fp.xmm que piden los emisores (x19 +
+ * XO + ...) se vuelven movimientos entre registros de NEON. Se guardan los
+ * cambiados antes de cada llamada a C y al salir; tras C se vuelven a leer. */
+#define XO OFF(fp.xmm)
+#define XV(k) (16 + (k))
+static void raw_ldrq(Em *e, int vt, int rn, uint32_t off) { E(e, 0x3DC00000u | ((off / 16) << 10) | (uint32_t)rn << 5 | (uint32_t)vt); }
+static void raw_strq(Em *e, int vt, int rn, uint32_t off) { E(e, 0x3D800000u | ((off / 16) << 10) | (uint32_t)rn << 5 | (uint32_t)vt); }
+static void vmov16(Em *e, int d, int n) { E(e, 0x4EA01C00u | (uint32_t)n << 16 | (uint32_t)n << 5 | (uint32_t)d); } /* orr vd.16b, vn, vn */
+static void xc_store(Em *e, unsigned m)
+{
+    for (unsigned k = 0; k < 8; k++) {
+        if (m >> k & 1) {
+            raw_strq(e, XV(k), 19, XO + 16u * k);
+        }
+    }
+}
+static void xc_load(Em *e, unsigned m)
+{
+    for (unsigned k = 0; k < 8; k++) {
+        if (m >> k & 1) {
+            raw_ldrq(e, XV(k), 19, XO + 16u * k);
+        }
+    }
+}
+/* guardar los cambiados (siguen cargados) */
+static void xc_flush(Em *e)
+{
+    xc_store(e, e->xd);
+    e->xd = 0;
+}
+/* tras C: lo de c->fp.xmm puede ser otro */
+static void xc_drop(Em *e)
+{
+    xc_flush(e);
+    e->xl = 0;
+}
+static void xc_need(Em *e, unsigned k)
+{
+    if (!(e->xl >> k & 1)) {
+        if (e->xc_locked) {
+            e->xc_bad = true; /* una carga a mitad de la instrucción: sin caché */
+        }
+        raw_ldrq(e, XV(k), 19, XO + 16u * k);
+        e->xl |= (uint8_t)(1u << k);
+    }
+}
+static void xc_wrote(Em *e, unsigned k)
+{
+    e->xl |= (uint8_t)(1u << k);
+    e->xd |= (uint8_t)(1u << k);
+    if (!e->xw_first) {
+        e->xw_first = e->p - 1;
+    }
+}
+static bool xc_at(const Em *e, int rn, uint32_t off, unsigned *k, unsigned *sub)
+{
+    if (!e->xc_on || rn != 19 || off < XO || off >= XO + 128u) {
+        return false;
+    }
+    *k = (off - XO) / 16u;
+    *sub = (off - XO) % 16u;
+    return true;
+}
+/* blr x9 a C dentro del código de una instrucción: los cambiados a memoria
+ * antes y todos los cargados de vuelta después (en los dos caminos queda igual) */
+static void xc_blr(Em *e)
+{
+    xc_store(e, e->xd);
+    E(e, 0xD63F0000u | 9u << 5); /* blr x9 */
+    xc_load(e, e->xl);
+}
+static void ldrq_i(Em *e, int vt, int rn, uint32_t off)
+{
+    unsigned k, sub;
+    if (xc_at(e, rn, off, &k, &sub)) {
+        xc_need(e, k);
+        vmov16(e, vt, XV(k));
+        return;
+    }
+    raw_ldrq(e, vt, rn, off);
+}
+static void strq_i(Em *e, int vt, int rn, uint32_t off)
+{
+    unsigned k, sub;
+    if (xc_at(e, rn, off, &k, &sub)) {
+        vmov16(e, XV(k), vt);
+        xc_wrote(e, k);
+        return;
+    }
+    raw_strq(e, vt, rn, off);
+}
+static void ldrs_i(Em *e, int vt, int rn, uint32_t off)
+{
+    unsigned k, sub;
+    if (xc_at(e, rn, off, &k, &sub)) {
+        xc_need(e, k);
+        if (sub == 0) {
+            E(e, 0x1E204000u | (uint32_t)XV(k) << 5 | (uint32_t)vt); /* fmov st, sk */
+        } else {
+            E(e, 0x5E000400u | ((sub / 4u) << 3 | 4u) << 16 | (uint32_t)XV(k) << 5 | (uint32_t)vt); /* mov st, vk.s[i] */
+        }
+        return;
+    }
+    E(e, 0xBD400000u | ((off / 4) << 10) | (uint32_t)rn << 5 | (uint32_t)vt);
+}
+static void strs_i(Em *e, int vt, int rn, uint32_t off)
+{
+    unsigned k, sub;
+    if (xc_at(e, rn, off, &k, &sub)) {
+        xc_need(e, k);
+        E(e, 0x6E000400u | ((sub / 4u) << 3 | 4u) << 16 | (uint32_t)vt << 5 | (uint32_t)XV(k)); /* mov vk.s[i], vt.s[0] */
+        xc_wrote(e, k);
+        return;
+    }
+    E(e, 0xBD000000u | ((off / 4) << 10) | (uint32_t)rn << 5 | (uint32_t)vt);
+}
+static void ldrd(Em *e, int vt, int rn, uint32_t off)
+{
+    unsigned k, sub;
+    if (xc_at(e, rn, off, &k, &sub) && (sub & 7) == 0) {
+        xc_need(e, k);
+        if (sub == 0) {
+            E(e, 0x1E604000u | (uint32_t)XV(k) << 5 | (uint32_t)vt); /* fmov dt, dk */
+        } else {
+            E(e, 0x5E000400u | 0x18u << 16 | (uint32_t)XV(k) << 5 | (uint32_t)vt); /* mov dt, vk.d[1] */
+        }
+        return;
+    }
+    if (xc_at(e, rn, off, &k, &sub)) {
+        e->xc_bad = true;
+    }
+    E(e, 0xFD400000u | ((off / 8) << 10) | (uint32_t)rn << 5 | (uint32_t)vt);
+}
+static void strd(Em *e, int vt, int rn, uint32_t off)
+{
+    unsigned k, sub;
+    if (xc_at(e, rn, off, &k, &sub) && (sub & 7) == 0) {
+        xc_need(e, k);
+        E(e, 0x6E000400u | ((sub / 8u) << 4 | 8u) << 16 | (uint32_t)vt << 5 | (uint32_t)XV(k)); /* mov vk.d[i], vt.d[0] */
+        xc_wrote(e, k);
+        return;
+    }
+    if (xc_at(e, rn, off, &k, &sub)) {
+        e->xc_bad = true;
+    }
+    E(e, 0xFD000000u | ((off / 8) << 10) | (uint32_t)rn << 5 | (uint32_t)vt);
+}
 static void ldrd_r(Em *e, int vt, int rn, int rm) { E(e, 0xFC606800u | (uint32_t)rm << 16 | (uint32_t)rn << 5 | (uint32_t)vt); }
 static void strd_r(Em *e, int vt, int rn, int rm) { E(e, 0xFC206800u | (uint32_t)rm << 16 | (uint32_t)rn << 5 | (uint32_t)vt); }
 
 /* Como emit_page, para 8 bytes. */
 static void emit_page8(Em *e, bool write, uint32_t **slow1, uint32_t **slow2, uint32_t **slow3)
 {
+    bool est;
+    uint32_t *hit = pc_pre(e, write, 8, &est);
     lsrw(e, W10, W9, 12);
     ldrw_lsl2(e, W10, XPT, W10);
     ubfx12(e, W11, W9);
     cmpwi(e, W11, 0xFF8);
     *slow2 = fwd_bcond(e, COND_HI);
-    *slow1 = fwd_cb(e, J_CBZ, W10); /* x10 = página + 1: x20 y x22 ya restan 1 */
+    *slow1 = page_miss(e); /* x10 = página + 1: x20 y x22 ya restan 1 */
     *slow3 = NULL;
     if (write) {
         ldrb_r(e, W13, XCODE, W10);
         *slow3 = fwd_cb(e, J_CBNZ, W13);
     }
     addx_lsl(e, W10, XRAM, W10, 12);
+    pc_post(e, hit, est, write);
 }
 
 /* La operación NEON de 64 bits sobre v0 (y v1); false si no la hay. */
@@ -857,6 +1269,8 @@ static void strh_r(Em *e, int rt, int rn, int rm) { E(e, 0x78206800u | (uint32_t
 /* Como emit_page, para un acceso de n bytes. */
 static void emit_page_n(Em *e, bool write, unsigned n, uint32_t **slow1, uint32_t **slow2, uint32_t **slow3)
 {
+    bool est;
+    uint32_t *hit = pc_pre(e, write, n, &est);
     lsrw(e, W10, W9, 12);
     ldrw_lsl2(e, W10, XPT, W10);
     ubfx12(e, W11, W9);
@@ -865,13 +1279,14 @@ static void emit_page_n(Em *e, bool write, unsigned n, uint32_t **slow1, uint32_
         cmpwi(e, W11, 0x1000 - n);
         *slow2 = fwd_bcond(e, COND_HI);
     }
-    *slow1 = fwd_cb(e, J_CBZ, W10); /* x10 = página + 1: x20 y x22 ya restan 1 */
+    *slow1 = page_miss(e); /* x10 = página + 1: x20 y x22 ya restan 1 */
     *slow3 = NULL;
     if (write) {
         ldrb_r(e, W13, XCODE, W10);
         *slow3 = fwd_cb(e, J_CBNZ, W13);
     }
     addx_lsl(e, W10, XRAM, W10, 12);
+    pc_post(e, hit, est, write);
 }
 
 /* Dónde está un registro de 8 bits (AL..BH) dentro de c->r. */
@@ -886,14 +1301,21 @@ static void fallback_tail(Em *e, const Block *b, unsigned i, const Vm *vm, uint3
         slow_cold(e, b, i, vm, sites, 3);
         return;
     }
+    uint32_t *sites[3] = {s1, s2, s3};
+    xc_sites(e, sites, 3);
     patch(e, s1);
     patch(e, s2);
     if (s3) {
         patch(e, s3);
     }
+    e->xc_cd = e->xd_before;
+    e->xc_cl = e->xl;
     e->fallback = true;
     emit_call(e, b, i, vm);
     e->fallback = false;
+    if (e->fz) {
+        fz_rebuild(e);
+    }
     patch(e, done);
 }
 
@@ -916,6 +1338,38 @@ static bool emit_more(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned 
     const Insn *in = &b->in[i];
     InsnFn f = in->fn;
     uint32_t *s1, *s2, *s3;
+    if (f == x_jcc && prev_kind == LFK_FCMP && e->nzcv_prev == LFK_FCMP) {
+        /* v0.18.80: jcc tras comiss/ucomiss: NZCV de fcmp. OF = SF = 0 */
+        static const int8_t fc[16] = {16, 14, 11, 10, -1, -1, 13, 12, 16, 14, 6, 7, 16, 14, -1, -1};
+        int cc = fc[in->aop & 15];
+        if (cc < 0) {
+            return false;
+        }
+        if (i + 1 < b->n && in->imm == in->next) {
+            e->jcc_none = true;
+            return true;
+        }
+        if (i + 1 == b->n && g_link_on && cc != 14 && cc != 16) {
+            e->fj = true;
+            e->fj_cc = cc;
+            e->fj_taken = in->imm;
+            e->fj_next = in->next;
+            return true;
+        }
+        if (i + 1 < b->n && cc != 14 && cc != 16) {
+            e->jcc_site = fwd_bcond(e, cc);
+            return true;
+        }
+        movw(e, W12, in->next);
+        if (cc == 14) {
+            movw(e, W12, in->imm);
+        } else if (cc != 16) {
+            movw(e, W13, in->imm);
+            E(e, 0x1A800000u | (uint32_t)W12 << 16 | (uint32_t)cc << 12 | (uint32_t)W13 << 5 | (uint32_t)W12); /* csel */
+        }
+        strw(e, W12, XC, OFF(eip));
+        return true;
+    }
     if (f == x_jcc && (prev_kind == LF_SUB || prev_kind == LF_LOGIC)) {
         int cc = arm_cond(prev_kind, in->aop);
         if (cc < 0) {
@@ -1070,13 +1524,39 @@ static bool emit_more(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned 
 
 /* Una instrucción; true si puede quedar en código nativo (EIP sin poner;
  * su camino lento pone el mismo next). false: la función, que pone el EIP. */
+/* v0.18.80: SSE/MMX (0F) y x87 que ni leen ni escriben EFLAGS: antes
+ * cortaban la búsqueda y los flags de la instrucción de antes se guardaban
+ * aunque nadie los leyera (en el código de Halo 2, mucho entre cuentas). */
+static bool fp_flag_neutral(const Insn *in)
+{
+    if (in->fn != x_interp || !(in->sz & INTERP_MARK)) {
+        return false;
+    }
+    unsigned op = in->aop;
+    if (in->sz & INTERP_0F) {
+        return (op >= 0x10 && op <= 0x17) || (op >= 0x28 && op <= 0x2D) || (op >= 0x50 && op <= 0x7F) ||
+               op == 0xC2 || op == 0xC6 || (op >= 0xD0 && op <= 0xFE);
+    }
+    if (op < 0xD8 || op > 0xDF) {
+        return false;
+    }
+    if (in->is_reg && (op == 0xDB || op == 0xDF) && (in->reg == 5 || in->reg == 6)) {
+        return false; /* fcomi / fucomi (y con pop) */
+    }
+    if (in->is_reg && (op == 0xDA || op == 0xDB) && in->reg < 4) {
+        return false; /* fcmov */
+    }
+    return true;
+}
+
 /* v0.18.61: no leen ni escriben los flags (ni en su camino lento) */
 static bool lf_neutral(const Insn *in)
 {
     InsnFn f = in->fn;
     return f == x_nop || f == x_lea || f == x_mov_ge || f == x_mov_eg || f == x_mov_ei || f == x_movx ||
            f == x_push_r || f == x_push_i || f == x_pop_r || is_mmx_op(f) || f == x_movq_load || f == x_movq_store ||
-           f == x_movd_load || f == x_movd_store || f == x_mmx_shift_i || f == x_cdq || f == x_emms;
+           f == x_movd_load || f == x_movd_store || f == x_mmx_shift_i || f == x_cdq || f == x_emms ||
+           fp_flag_neutral(in);
 }
 
 /* pisa todos los flags sin leerlos (alu sin adc/sbb, test; de cualquier
@@ -1087,8 +1567,21 @@ static bool lf_writer_all(const Insn *in)
     if (f == x_alu_eg || f == x_alu_ge || f == x_alu_ei) {
         return in->aop != OP_ADC && in->aop != OP_SBB;
     }
+    /* v0.18.80: imul (mul_flags) y shl/shr/sar con cuenta fija no nula */
+    if (f == x_imul) {
+        return true;
+    }
+    if (f == x_shift) {
+        return in->aop >= 4 && in->imm != 0xFF && (in->imm & 31) != 0;
+    }
+    if (f == x_interp && (in->sz & (INTERP_MARK | INTERP_0F)) == (INTERP_MARK | INTERP_0F) &&
+        (in->aop == 0x2E || in->aop == 0x2F) && !(in->sz & (INTERP_PF3 | INTERP_PF2))) {
+        return true; /* v0.18.80: (u)comiss / (u)comisd: ZF PF CF y el resto a cero */
+    }
     return f == x_test_eg || f == x_test_ei;
 }
+
+
 
 /* Los flags de la instrucción i no hacen falta si después, en el mismo
  * bloque y antes de que nadie los lea, otra los pisa todos (v0.18.61: no
@@ -1096,11 +1589,12 @@ static bool lf_writer_all(const Insn *in)
 static bool lf_dead_at(const Block *b, unsigned i)
 {
     const Insn *a = &b->in[i];
-    bool src = lf_writer_all(a) || (a->fn == x_incdec && a->is_reg) || is_rot_reg(a);
+    bool src = lf_writer_all(a) || (a->fn == x_incdec && a->is_reg) || is_rot_reg(a) ||
+               (a->fn == x_shift && a->is_reg && a->aop >= 4); /* v0.18.80: también por CL (si es 0 no cambian) */
     if (!src) {
         return false;
     }
-    for (unsigned j = i + 1; j < b->n && j < i + 12; j++) {
+    for (unsigned j = i + 1; j < b->n && j < i + 32; j++) {
         if (lf_writer_all(&b->in[j])) {
             return true;
         }
@@ -1368,6 +1862,8 @@ static void emit_links(Em *e)
  * código de siempre de cada uno. Devuelve cuántas instrucciones tomó (0:
  * ninguna, no es una racha). */
 static int g_jit_no_runs = -1;
+static int g_jit_xc = -1; /* v0.18.80: CPU_SIN_XMM=1 deja los xmm siempre en memoria */
+static int g_jit_pc = -1; /* v0.18.80: CPU_SIN_PAGINA=1 apaga la página del operando anterior */
 static bool is_push32(const Insn *in)
 {
     return in->sz == 4 && ((in->fn == x_push_r && in->reg != R_ESP) || in->fn == x_push_i);
@@ -1446,11 +1942,12 @@ static bool jit_compile(Cpu *c, Block *b)
         /* la entrada: x19 = c, x20 = ram, x21 = tabla de páginas, x22 = code[],
          * x23 = presupuesto que queda, x24 = instrucciones de los bloques encadenados */
         g_jit.enter_rx = em_rx(&s0);
-        E(&s0, 0xA9BB7BFDu); /* stp x29, x30, [sp, #-80]! */
+        E(&s0, 0xA9BA7BFDu); /* stp x29, x30, [sp, #-96]! */
         E(&s0, 0xA90153F3u); /* stp x19, x20, [sp, #16] */
         E(&s0, 0xA9025BF5u); /* stp x21, x22, [sp, #32] */
         E(&s0, 0xA90363F7u); /* stp x23, x24, [sp, #48] */
         E(&s0, 0xA9046BF9u); /* stp x25, x26, [sp, #64] */
+        E(&s0, 0xA90573FBu); /* stp x27, x28, [sp, #80] (v0.18.80) */
         E(&s0, 0xAA0203EAu); /* mov x10, x2 (w2 es eax) */
         movx_r(&s0, XC, X0);
         movx_r(&s0, 23, X1);
@@ -1470,11 +1967,12 @@ static bool jit_compile(Cpu *c, Block *b)
         regs_spill(&s0);
         strw(&s0, XZR, XC, OFF(jit_cur)); /* fuera del JIT */
         E(&s0, 0x0B180000u); /* add w0, w0, w24 */
+        E(&s0, 0xA94573FBu); /* ldp x27, x28, [sp, #80] */
         E(&s0, 0xA9446BF9u); /* ldp x25, x26, [sp, #64] */
         E(&s0, 0xA94363F7u); /* ldp x23, x24, [sp, #48] */
         E(&s0, 0xA9425BF5u); /* ldp x21, x22, [sp, #32] */
         E(&s0, 0xA94153F3u); /* ldp x19, x20, [sp, #16] */
-        E(&s0, 0xA8C57BFDu); /* ldp x29, x30, [sp], #80 */
+        E(&s0, 0xA8C67BFDu); /* ldp x29, x30, [sp], #96 */
         E(&s0, 0xD65F03C0u); /* ret */
         /* v0.18.61, el resolvedor: w9 = EIP (ya puesto en c->eip), x14 = la
          * casilla (vista ejecutable; 0: ninguna) */
@@ -1554,6 +2052,14 @@ static bool jit_compile(Cpu *c, Block *b)
         g_jit.base = (len + 63) & ~(size_t)63;
         g_jit.used = g_jit.base;
     }
+    bool xc_off = false;
+    if (g_jit_lento < 0) {
+        const char *l = getenv("CPU_JIT_LENTO");
+        g_jit_lento = l ? atoi(l) : 0;
+    }
+    if (g_jit_xc < 0) {
+        g_jit_xc = getenv("CPU_SIN_XMM") == NULL;
+    }
     for (int attempt = 0; attempt < 2; attempt++) {
         b->slow = 0;
         b->helper = 0;
@@ -1588,6 +2094,11 @@ static bool jit_compile(Cpu *c, Block *b)
         e.fj = false;
         e.nlink = 0;
         e.ic_ldr_eip = NULL;
+        e.pc_live = e.pc_cand = false;
+        e.xc_on = g_jit_xc && !xc_off;
+        e.xl = e.xd = 0;
+        e.ea_mark = NULL;
+        memset(e.pc_est, 0, sizeof(e.pc_est));
         uint32_t *start = e.p;
         Slow bx = {{0}, 0}; /* no se puede entrar: vuelve a run_blocks */
         /* entrada desde otro bloque */
@@ -1646,6 +2157,38 @@ static bool jit_compile(Cpu *c, Block *b)
                 g_jit_no_runs = getenv("CPU_SIN_RACHAS") != NULL;
             }
             e.lf_dead = !g_jit_no_dead && lf_dead_at(b, i);
+            e.cur_b = b;
+            e.cur_in = &b->in[i];
+            e.cur_i = i;
+            e.ea_mark = NULL;
+            e.pc_cand = false;
+            /* v0.18.80: los xmm en registros */
+            if (e.xc_on) {
+                const Insn *xi = &b->in[i];
+                if (xi->fn == x_kcall) {
+                    xc_drop(&e);
+                } else if (xi->fn == x_jcc || i + 1 == b->n) {
+                    xc_flush(&e); /* puede salir del bloque */
+                }
+                e.xc_locked = false;
+                if (xi->fn == x_interp && (xi->sz & (INTERP_MARK | INTERP_0F)) == (INTERP_MARK | INTERP_0F) &&
+                    !(xi->sz & (INTERP_P66 | INTERP_PF2))) {
+                    unsigned xop = xi->aop;
+                    bool full = (xop == 0x10 || xop == 0x28) && (!xi->is_reg || !(xi->sz & INTERP_PF3));
+                    if (!full) {
+                        xc_need(&e, xi->reg & 7u);
+                    }
+                    if (xi->is_reg) {
+                        xc_need(&e, xi->rm & 7u);
+                    }
+                }
+                e.xc_locked = true;
+            }
+            e.xd_before = e.xd;
+            e.xc_cd = e.xd;
+            e.xc_cl = e.xl;
+            e.xw_first = NULL;
+            e.fz = false;
             e.jcc_site = NULL;
             e.jcc_none = false;
             e.exit_eip = 0;
@@ -1655,10 +2198,21 @@ static bool jit_compile(Cpu *c, Block *b)
                 i += run - 1;
                 stale = true;
                 e.lf_dead = false;
+                e.pc_live = false;
                 continue;
             }
+            if (g_jit_pc < 0) {
+                g_jit_pc = getenv("CPU_SIN_PAGINA") == NULL;
+            }
+            e.pc_cand = g_jit_pc && pc_cand_insn(&b->in[i]);
             stale = emit_insn(&e, b, i, c->vm);
+            e.pc_cand = false;
             e.lf_dead = false;
+            if (e.pc_live && (!stale ||
+                              (e.pc_base != NOREG && pc_writes(&b->in[i], e.pc_base)) ||
+                              (e.pc_index != NOREG && pc_writes(&b->in[i], e.pc_index)))) {
+                e.pc_live = false;
+            }
             if (b->in[i].fn == x_jcc && i + 1 < b->n && !e.jcc_none) {
                 if (e.jcc_site) { /* b.cond directo: la salida pone el EIP del destino */
                     side_at[nside] = e.jcc_site;
@@ -1672,6 +2226,13 @@ static bool jit_compile(Cpu *c, Block *b)
                 }
                 side_k[nside++] = i + 1;
             }
+        }
+        e.xc_locked = false;
+        xc_flush(&e); /* v0.18.80: los xmm cambiados, a memoria antes de salir */
+        if (e.xc_bad) { /* no se pudo con los xmm en registros: otra vez sin eso */
+            xc_off = true;
+            attempt--;
+            continue;
         }
         /* terminó: el siguiente (v0.18.61: si es fijo, por su casilla) */
         uint32_t fixed = stale ? b->in[b->n - 1].next : e.exit_eip;

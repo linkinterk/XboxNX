@@ -24,13 +24,9 @@ static void ldrs_r(Em *e, int vt, int rn, int rm) { E(e, 0xBC606800u | (uint32_t
 static void strs_r(Em *e, int vt, int rn, int rm) { E(e, 0xBC206800u | (uint32_t)rm << 16 | (uint32_t)rn << 5 | (uint32_t)vt); }
 static void ldrq_r(Em *e, int vt, int rn, int rm) { E(e, 0x3CE06800u | (uint32_t)rm << 16 | (uint32_t)rn << 5 | (uint32_t)vt); }
 static void strq_r(Em *e, int vt, int rn, int rm) { E(e, 0x3CA06800u | (uint32_t)rm << 16 | (uint32_t)rn << 5 | (uint32_t)vt); }
-static void ldrs_i(Em *e, int vt, int rn, uint32_t off) { E(e, 0xBD400000u | ((off / 4) << 10) | (uint32_t)rn << 5 | (uint32_t)vt); }
-static void strs_i(Em *e, int vt, int rn, uint32_t off) { E(e, 0xBD000000u | ((off / 4) << 10) | (uint32_t)rn << 5 | (uint32_t)vt); }
-static void ldrq_i(Em *e, int vt, int rn, uint32_t off) { E(e, 0x3DC00000u | ((off / 16) << 10) | (uint32_t)rn << 5 | (uint32_t)vt); }
-static void strq_i(Em *e, int vt, int rn, uint32_t off) { E(e, 0x3D800000u | ((off / 16) << 10) | (uint32_t)rn << 5 | (uint32_t)vt); }
 static void ldrx_r(Em *e, int rt, int rn, int rm) { E(e, 0xF8606800u | (uint32_t)rm << 16 | (uint32_t)rn << 5 | (uint32_t)rt); }
 static void strx_r(Em *e, int rt, int rn, int rm) { E(e, 0xF8206800u | (uint32_t)rm << 16 | (uint32_t)rn << 5 | (uint32_t)rt); }
-static void addxi(Em *e, int rd, int rn, uint32_t imm) { E(e, 0x91000000u | imm << 10 | (uint32_t)rn << 5 | (uint32_t)rd); }
+static __attribute__((unused)) void addxi(Em *e, int rd, int rn, uint32_t imm) { E(e, 0x91000000u | imm << 10 | (uint32_t)rn << 5 | (uint32_t)rd); }
 static void andw7(Em *e, int rd, int rn) { E(e, 0x12000800u | (uint32_t)rn << 5 | (uint32_t)rd); }
 static void cset(Em *e, int rd, int cond) { E(e, 0x1A9F07E0u | (uint32_t)(cond ^ 1) << 12 | (uint32_t)rd); }
 static void lslvw(Em *e, int rd, int rn, int rm) { E(e, 0x1AC02000u | (uint32_t)rm << 16 | (uint32_t)rn << 5 | (uint32_t)rd); }
@@ -578,8 +574,26 @@ static bool emit_x87(Em *e, const Block *b, unsigned i, const Vm *vm)
 
 /* ---------------------------------------------------------- SSE */
 
-/* x14 = &xmm[0] */
-static void xmm_base(Em *e) { addxi(e, W14, XC, OFF(fp.xmm)); }
+/* v0.18.80: los xmm con su desplazamiento desde x19 (antes add x14 en cada
+ * instrucción); caben en el inmediato de ldr/str q, d y s */
+_Static_assert(offsetof(Cpu, fp.xmm) % 16 == 0 && offsetof(Cpu, fp.xmm) + 128 < 4096, "xmm desde x19");
+static void xmm_base(Em *e) { (void)e; }
+
+/* v0.18.80: el registro de NEON con el xmm k: el de la caché (v16 + k) o,
+ * sin ella, tmp cargado de memoria (entero, o solo el carril 0 si scalar) */
+static int xreg(Em *e, int tmp, unsigned k, bool scalar)
+{
+    if (e->xc_on) {
+        xc_need(e, k);
+        return XV(k);
+    }
+    if (scalar) {
+        ldrs_i(e, tmp, XC, XO + 16u * k);
+    } else {
+        ldrq_i(e, tmp, XC, XO + 16u * k);
+    }
+    return tmp;
+}
 
 /* NaN en algún carril de v<v>.4s (o en s<v> si scalar): al lento */
 static void nan_check(Em *e, int v, bool scalar, Slow *s)
@@ -620,11 +634,11 @@ static bool emit_sse(Em *e, const Block *b, unsigned i, const Vm *vm)
         xmm_base(e);
         if (in->is_reg) {
             if (ss) {
-                ldrs_i(e, 0, W14, 16u * in->rm);
-                strs_i(e, 0, W14, xo);
+                ldrs_i(e, 0, XC, XO + 16u * in->rm);
+                strs_i(e, 0, XC, XO + xo);
             } else {
-                ldrq_i(e, 0, W14, 16u * in->rm);
-                strq_i(e, 0, W14, xo);
+                ldrq_i(e, 0, XC, XO + 16u * in->rm);
+                strq_i(e, 0, XC, XO + xo);
             }
             return true;
         }
@@ -635,7 +649,7 @@ static bool emit_sse(Em *e, const Block *b, unsigned i, const Vm *vm)
             ldrq_r(e, 0, W10, W11);
         }
         xmm_base(e);
-        strq_i(e, 0, W14, xo);
+        strq_i(e, 0, XC, XO + xo);
         break;
     case 0x11:
     case 0x29:
@@ -649,21 +663,21 @@ static bool emit_sse(Em *e, const Block *b, unsigned i, const Vm *vm)
             }
             xmm_base(e);
             if (ss) {
-                ldrs_i(e, 0, W14, xo);
-                strs_i(e, 0, W14, 16u * in->rm);
+                ldrs_i(e, 0, XC, XO + xo);
+                strs_i(e, 0, XC, XO + 16u * in->rm);
             } else {
-                ldrq_i(e, 0, W14, xo);
-                strq_i(e, 0, W14, 16u * in->rm);
+                ldrq_i(e, 0, XC, XO + xo);
+                strq_i(e, 0, XC, XO + 16u * in->rm);
             }
             return true;
         }
         mem_at(e, in, ss ? 4 : 16, true, &s);
         xmm_base(e);
         if (ss) {
-            ldrs_i(e, 0, W14, xo);
+            ldrs_i(e, 0, XC, XO + xo);
             strs_r(e, 0, W10, W11);
         } else {
-            ldrq_i(e, 0, W14, xo);
+            ldrq_i(e, 0, XC, XO + xo);
             strq_r(e, 0, W10, W11);
         }
         break;
@@ -679,31 +693,27 @@ static bool emit_sse(Em *e, const Block *b, unsigned i, const Vm *vm)
             }
             mem_at(e, in, 8, true, &s);
             xmm_base(e);
-            ldrd(e, 0, W14, half);
+            ldrd(e, 0, XC, XO + half);
             strd_r(e, 0, W10, W11);
             break;
         }
         if (in->is_reg) {
             xmm_base(e);
-            ldrd(e, 0, W14, 16u * in->rm + (high ? 0u : 8u));
-            strd(e, 0, W14, half);
+            ldrd(e, 0, XC, XO + 16u * in->rm + (high ? 0u : 8u));
+            strd(e, 0, XC, XO + half);
             return true;
         }
         mem_at(e, in, 8, false, &s);
         ldrd_r(e, 0, W10, W11);
         xmm_base(e);
-        strd(e, 0, W14, half);
+        strd(e, 0, XC, XO + half);
         break;
     }
     case 0x58: case 0x59: case 0x5C: case 0x5E: case 0x5D: case 0x5F: {
-        /* v0 = a (destino), v1 = b */
+        /* va = a (destino), vb = b (v0.18.80: directo de la caché de xmm) */
+        int va, vb = 1;
         if (in->is_reg) {
-            xmm_base(e);
-            if (ss) {
-                ldrs_i(e, 1, W14, 16u * in->rm);
-            } else {
-                ldrq_i(e, 1, W14, 16u * in->rm);
-            }
+            vb = xreg(e, 1, in->rm, ss);
         } else {
             mem_at(e, in, ss ? 4 : 16, false, &s);
             if (ss) {
@@ -711,44 +721,43 @@ static bool emit_sse(Em *e, const Block *b, unsigned i, const Vm *vm)
             } else {
                 ldrq_r(e, 1, W10, W11);
             }
-            xmm_base(e);
         }
+        va = xreg(e, 0, x, ss);
         if (ss) {
-            ldrs_i(e, 0, W14, xo);
             switch (op) {
-            case 0x58: fop(e, FADDS, 2, 0, 1); break;
-            case 0x59: fop(e, FMULS, 2, 0, 1); break;
-            case 0x5C: fop(e, FSUBS, 2, 0, 1); break;
-            case 0x5E: fop(e, FDIVS, 2, 0, 1); break;
+            case 0x58: fop(e, FADDS, 2, va, vb); break;
+            case 0x59: fop(e, FMULS, 2, va, vb); break;
+            case 0x5C: fop(e, FSUBS, 2, va, vb); break;
+            case 0x5E: fop(e, FDIVS, 2, va, vb); break;
             default:
-                fcmps(e, 0, 1);
-                E(e, 0x1E200C00u | 1u << 16 | (uint32_t)(op == 0x5D ? COND_MI : COND_GT) << 12 | 0u << 5 | 2u); /* fcsel s2, s0, s1 */
+                fcmps(e, va, vb);
+                E(e, 0x1E200C00u | (uint32_t)vb << 16 | (uint32_t)(op == 0x5D ? COND_MI : COND_GT) << 12 |
+                         (uint32_t)va << 5 | 2u); /* fcsel s2, sa, sb */
                 break;
             }
             if (op != 0x5D && op != 0x5F) {
                 nan_check(e, 2, true, &s);
             }
-            strs_i(e, 2, W14, xo);
+            strs_i(e, 2, XC, XO + xo);
         } else {
-            ldrq_i(e, 0, W14, xo);
             switch (op) {
-            case 0x58: fop(e, VFADD, 2, 0, 1); break;
-            case 0x59: fop(e, VFMUL, 2, 0, 1); break;
-            case 0x5C: fop(e, VFSUB, 2, 0, 1); break;
-            case 0x5E: fop(e, VFDIV, 2, 0, 1); break;
+            case 0x58: fop(e, VFADD, 2, va, vb); break;
+            case 0x59: fop(e, VFMUL, 2, va, vb); break;
+            case 0x5C: fop(e, VFSUB, 2, va, vb); break;
+            case 0x5E: fop(e, VFDIV, 2, va, vb); break;
             case 0x5D: /* a < b ? a : b */
-                fop(e, VFCMGT, 2, 1, 0);
-                fop(e, VBSL, 2, 0, 1);
+                fop(e, VFCMGT, 2, vb, va);
+                fop(e, VBSL, 2, va, vb);
                 break;
             default: /* a > b ? a : b */
-                fop(e, VFCMGT, 2, 0, 1);
-                fop(e, VBSL, 2, 0, 1);
+                fop(e, VFCMGT, 2, va, vb);
+                fop(e, VBSL, 2, va, vb);
                 break;
             }
             if (op != 0x5D && op != 0x5F) {
                 nan_check(e, 2, false, &s);
             }
-            strq_i(e, 2, W14, xo);
+            strq_i(e, 2, XC, XO + xo);
         }
         break;
     }
@@ -756,32 +765,36 @@ static bool emit_sse(Em *e, const Block *b, unsigned i, const Vm *vm)
         if (ss) {
             return false;
         }
+        int va, vb = 1;
         if (in->is_reg) {
-            xmm_base(e);
-            ldrq_i(e, 1, W14, 16u * in->rm);
+            vb = xreg(e, 1, in->rm, false);
         } else {
             mem_at(e, in, 16, false, &s);
             ldrq_r(e, 1, W10, W11);
-            xmm_base(e);
         }
-        ldrq_i(e, 0, W14, xo);
+        va = xreg(e, 0, x, false);
         switch (op) {
-        case 0x54: fop(e, VAND, 2, 0, 1); break;
-        case 0x55: fop(e, VBIC, 2, 1, 0); break; /* ~a & b */
-        case 0x56: fop(e, VORR, 2, 0, 1); break;
-        case 0x57: fop(e, VEOR, 2, 0, 1); break;
-        case 0x14: fop(e, VZIP1S, 2, 0, 1); break;
-        case 0x15: fop(e, VZIP2S, 2, 0, 1); break;
+        case 0x54: fop(e, VAND, 2, va, vb); break;
+        case 0x55: fop(e, VBIC, 2, vb, va); break; /* ~a & b */
+        case 0x56: fop(e, VORR, 2, va, vb); break;
+        case 0x57: fop(e, VEOR, 2, va, vb); break;
+        case 0x14: fop(e, VZIP1S, 2, va, vb); break;
+        case 0x15: fop(e, VZIP2S, 2, va, vb); break;
         default: { /* shufps */
             unsigned imm = in->imm & 0xFF;
-            ins_s(e, 2, 0, 0, imm & 3);
-            ins_s(e, 2, 1, 0, (imm >> 2) & 3);
-            ins_s(e, 2, 2, 1, (imm >> 4) & 3);
-            ins_s(e, 2, 3, 1, (imm >> 6) & 3);
+            if (va == vb && (imm == 0x00 || imm == 0x55 || imm == 0xAA || imm == 0xFF)) {
+                /* v0.18.80: el mismo carril en los cuatro: dup */
+                E(e, 0x4E000400u | (((imm & 3u) << 3) | 4u) << 16 | (uint32_t)va << 5 | 2u); /* dup v2.4s, va.s[i] */
+                break;
+            }
+            ins_s(e, 2, 0, va, imm & 3);
+            ins_s(e, 2, 1, va, (imm >> 2) & 3);
+            ins_s(e, 2, 2, vb, (imm >> 4) & 3);
+            ins_s(e, 2, 3, vb, (imm >> 6) & 3);
             break;
         }
         }
-        strq_i(e, 2, W14, xo);
+        strq_i(e, 2, XC, XO + xo);
         break;
     }
     case 0x2E:
@@ -791,14 +804,14 @@ static bool emit_sse(Em *e, const Block *b, unsigned i, const Vm *vm)
         }
         xmm_base(e);
         if (in->is_reg) {
-            ldrs_i(e, 1, W14, 16u * in->rm);
+            ldrs_i(e, 1, XC, XO + 16u * in->rm);
         } else {
             mem_at(e, in, 4, false, &s);
             ldrs_r(e, 1, W10, W11);
             xmm_base(e);
         }
-        ldrs_i(e, 0, W14, xo);
-        fcmps(e, 0, 1);
+        int va = xreg(e, 0, x, true);
+        fcmps(e, va, 1);
         /* sin orden: ZF PF CF; menor: CF; igual: ZF */
         cset(e, W10, COND_VS);
         cset(e, W11, COND_EQ);
@@ -815,7 +828,13 @@ static bool emit_sse(Em *e, const Block *b, unsigned i, const Vm *vm)
         rrr(e, ORRW, W11, W11, W10);
         strw(e, W11, XC, OFF(flags));
         strb(e, XZR, XC, OFF(lf_op));
-        break;
+        /* v0.18.80: NZCV sigue siendo el de fcmp: un jcc detrás lo usa (y el
+         * camino lento lo rehace de c->flags) */
+        e->fz = true;
+        slow_tail(e, b, i, vm, &s);
+        e->lf_kind = LFK_FCMP;
+        e->nzcv = LFK_FCMP;
+        return true;
     }
     case 0x2C: { /* cvttss2si r32, xmm/m32 */
         if (!ss) {
@@ -823,7 +842,7 @@ static bool emit_sse(Em *e, const Block *b, unsigned i, const Vm *vm)
         }
         if (in->is_reg) {
             xmm_base(e);
-            ldrs_i(e, 0, W14, 16u * in->rm);
+            ldrs_i(e, 0, XC, XO + 16u * in->rm);
         } else {
             mem_at(e, in, 4, false, &s);
             ldrs_r(e, 0, W10, W11);
@@ -876,7 +895,7 @@ static void emit_cf(Em *e, unsigned prev)
         movx_r(e, X0, XC);
         movx(e, W9, (uint64_t)(uintptr_t)jit_lazy_cf);
         regs_spill(e);
-        E(e, 0xD63F0000u | 9u << 5); /* blr x9 */
+        xc_blr(e); /* blr x9 (v0.18.80: con los xmm a salvo) */
         regs_load(e);
         movw_r(e, W12, X0);
         return;
@@ -1142,6 +1161,13 @@ static bool emit_imul(Em *e, const Block *b, unsigned i, const Vm *vm)
     } else {
         ldrw(e, W10, XC, ROFF(in->reg));
     }
+    if (e->lf_dead) { /* v0.18.80: nadie lee los flags: solo el producto */
+        E(e, 0x1B007C00u | (uint32_t)W10 << 16 | (uint32_t)W9 << 5 | W11); /* mul w11, w9, w10 */
+        strw(e, W11, XC, ROFF(in->reg));
+        slow_tail(e, b, i, vm, &sl);
+        e->lf_kind = 0;
+        return true;
+    }
     E(e, 0x9B207C00u | (uint32_t)W10 << 16 | (uint32_t)W9 << 5 | W11); /* smull x11, w9, w10 */
     E(e, 0x93407C00u | (uint32_t)W11 << 5 | W12);                     /* sxtw x12, w11 */
     E(e, 0xEB00001Fu | (uint32_t)W11 << 16 | (uint32_t)W12 << 5);     /* cmp x12, x11 */
@@ -1282,7 +1308,7 @@ static void emit_cond_c(Em *e, unsigned n)
     movw(e, X1, n);
     movx(e, W9, (uint64_t)(uintptr_t)jit_cond);
     regs_spill(e);
-    E(e, 0xD63F0000u | 9u << 5); /* blr x9 */
+    xc_blr(e); /* blr x9 (v0.18.80: con los xmm a salvo) */
     regs_load(e);
 }
 
@@ -1621,7 +1647,7 @@ static void call_c(Em *e, uintptr_t fn, int x1_insn, bool a2_w9)
         adr_insn(e, (unsigned)x1_insn);
     }
     movx(e, W9, (uint64_t)fn);
-    E(e, 0xD63F0000u | 9u << 5); /* blr x9 */
+    xc_blr(e); /* blr x9 (v0.18.80: con los xmm a salvo) */
     regs_load(e);
 }
 
@@ -1722,7 +1748,7 @@ static void emit_kcall(Em *e, const Block *b, unsigned i, const Vm *vm)
     adr_insn(e, i);
     E(e, 0x91000000u | (i & 0xFFFu) << 10 | 24u << 5 | 2u); /* add x2, x24, #i */
     movx(e, W9, (uint64_t)(uintptr_t)jit_kfast);
-    E(e, 0xD63F0000u | 9u << 5); /* blr x9 */
+    xc_blr(e); /* blr x9 (v0.18.80: con los xmm a salvo) */
     regs_load(e);
     uint32_t *done = fwd_cb(e, J_CBZ, X0);
     e->fallback = true;
@@ -1758,14 +1784,14 @@ static bool emit_sse2(Em *e, const Block *b, unsigned i, const Vm *vm)
         }
         E(e, 0x1E220000u | (uint32_t)W12 << 5 | 0u); /* scvtf s0, w12 */
         xmm_base(e);
-        strs_i(e, 0, W14, xo);
+        strs_i(e, 0, XC, XO + xo);
         break;
     case 0x50: { /* movmskps r32, xmm */
         if (ss || !in->is_reg) {
             return false;
         }
         xmm_base(e);
-        ldrq_i(e, 0, W14, 16u * in->rm);
+        ldrq_i(e, 0, XC, XO + 16u * in->rm);
         E(e, 0x6F210400u);             /* ushr v0.4s, v0.4s, #31 */
         E(e, 0x0E043C00u | (uint32_t)W12);           /* umov w12, v0.s[0] */
         E(e, 0x0E0C3C00u | (uint32_t)W13);           /* umov w13, v0.s[1] */
@@ -1781,9 +1807,9 @@ static bool emit_sse2(Em *e, const Block *b, unsigned i, const Vm *vm)
         if (in->is_reg) {
             xmm_base(e);
             if (ss) {
-                ldrs_i(e, 1, W14, 16u * in->rm);
+                ldrs_i(e, 1, XC, XO + 16u * in->rm);
             } else {
-                ldrq_i(e, 1, W14, 16u * in->rm);
+                ldrq_i(e, 1, XC, XO + 16u * in->rm);
             }
         } else {
             mem_at(e, in, ss ? 4 : 16, false, &s);
@@ -1806,7 +1832,7 @@ static bool emit_sse2(Em *e, const Block *b, unsigned i, const Vm *vm)
                 }
             }
             nan_check(e, 2, true, &s);
-            strs_i(e, 2, W14, xo);
+            strs_i(e, 2, XC, XO + xo);
         } else {
             if (op == 0x53) {
                 E(e, 0x4F03F603u);                 /* fmov v3.4s, #1.0 */
@@ -1819,7 +1845,7 @@ static bool emit_sse2(Em *e, const Block *b, unsigned i, const Vm *vm)
                 }
             }
             nan_check(e, 2, false, &s);
-            strq_i(e, 2, W14, xo);
+            strq_i(e, 2, XC, XO + xo);
         }
         break;
     }
@@ -1827,9 +1853,9 @@ static bool emit_sse2(Em *e, const Block *b, unsigned i, const Vm *vm)
         if (in->is_reg) {
             xmm_base(e);
             if (ss) {
-                ldrs_i(e, 1, W14, 16u * in->rm);
+                ldrs_i(e, 1, XC, XO + 16u * in->rm);
             } else {
-                ldrq_i(e, 1, W14, 16u * in->rm);
+                ldrq_i(e, 1, XC, XO + 16u * in->rm);
             }
         } else {
             mem_at(e, in, ss ? 4 : 16, false, &s);
@@ -1841,9 +1867,9 @@ static bool emit_sse2(Em *e, const Block *b, unsigned i, const Vm *vm)
             xmm_base(e);
         }
         if (ss) {
-            ldrs_i(e, 0, W14, xo);
+            ldrs_i(e, 0, XC, XO + xo);
         } else {
-            ldrq_i(e, 0, W14, xo);
+            ldrq_i(e, 0, XC, XO + xo);
         }
         unsigned pred = in->imm & 7;
         bool inv = pred >= 4;
@@ -1862,9 +1888,9 @@ static bool emit_sse2(Em *e, const Block *b, unsigned i, const Vm *vm)
             E(e, 0x6E205800u | 2u << 5 | 2u); /* mvn v2.16b, v2.16b */
         }
         if (ss) {
-            strs_i(e, 2, W14, xo);
+            strs_i(e, 2, XC, XO + xo);
         } else {
-            strq_i(e, 2, W14, xo);
+            strq_i(e, 2, XC, XO + xo);
         }
         break;
     }

@@ -40,9 +40,26 @@ def cmp_jcc():
     return prod + bytes([0x70 | rnd.randrange(16), 0x01, 0x46])
 
 
+def comiss_jcc():
+    """v0.18.80: movss de la memoria, (u)comiss y un jcc (el JIT usa el NZCV
+    de fcmp, y su camino lento lo rehace de los flags)."""
+    a, b = rnd.randrange(8), rnd.randrange(8)
+    code = bytes([0xF3, 0x0F, 0x10, 0x46 | a << 3, 4 * rnd.randrange(16)])
+    if rnd.random() < 0.5:
+        code += bytes([0xF3, 0x0F, 0x10, 0x46 | b << 3, 4 * rnd.randrange(16)])
+    op = rnd.choice([0x2E, 0x2F])
+    if rnd.random() < 0.5:
+        code += bytes([0x0F, op, 0xC0 | a << 3 | b])
+    else:
+        code += bytes([0x0F, op, 0x46 | a << 3, 4 * rnd.randrange(16)])
+    return code + bytes([0x70 | rnd.randrange(16), 0x01, 0x46])
+
+
 def piece():
     if rnd.random() < 0.15:
         return cmp_jcc()
+    if rnd.random() < 0.1:
+        return comiss_jcc()
     if rnd.random() < 0.3:
         code, _ = rnd.choice([fp_diff.gen_sse, fp_diff.gen_x87, fp_diff.gen_mmx, fp_diff.gen_mmx])()
         return code
@@ -55,8 +72,9 @@ def piece():
 def main():
     exe = sys.argv[1]
     cases = int(sys.argv[2]) if len(sys.argv) > 2 else 3000
-    env_b = dict(os.environ, CPU_BLOQUES="1", CPU_BLOQUES_N="100000")
+    env_b = dict(os.environ, CPU_BLOQUES="1", CPU_BLOQUES_N="100000", CPU_DIFF_XMM="1")
     env_i = {k: v for k, v in os.environ.items() if not k.startswith("CPU_BLOQUES")}
+    env_i["CPU_DIFF_XMM"] = "1"
     pb = subprocess.Popen([exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env_b)
     pi = subprocess.Popen([exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env_i)
     fails = 0
@@ -72,6 +90,8 @@ def main():
         regs[3], regs[4], regs[5], regs[6], regs[7] = 0x100040, 0x200000, 0x1000F0, 0x100000, 0x100080
         flags = 0x2 | (rnd.getrandbits(12) & 0x8D5)
         mem = fp_diff.mem_floats()
+        if rnd.random() < 0.5:
+            code += b"\xeb\x00"  # v0.18.80: jmp a la siguiente (el bloque sale por su salida fija)
         code += b"\xf4"  # hlt: las dos formas paran ahí
         line = "%s %s %x %s %s m\n" % (code.hex(), " ".join("%x" % r for r in regs), flags, mem.hex(), "00" * 32)
         outs = []

@@ -103,6 +103,17 @@ int main(void)
         for (unsigned i = 0; i < sizeof(stk); i++) {
             printf("%02x", stk[i]);
         }
+        if (getenv("CPU_DIFF_XMM")) { /* v0.18.80: también los xmm y mm (block_seq) */
+            const uint8_t *x = (const uint8_t *)&c.fp.xmm, *m = (const uint8_t *)&c.fp.mm;
+            printf(" ");
+            for (unsigned i = 0; i < sizeof(c.fp.xmm); i++) {
+                printf("%02x", x[i]);
+            }
+            printf(" ");
+            for (unsigned i = 0; i < sizeof(c.fp.mm); i++) {
+                printf("%02x", m[i]);
+            }
+        }
         printf("\n");
         fflush(stdout);
     }

@@ -35,7 +35,7 @@
 #include "apu/apu.h"
 #include <time.h>
 
-#define APP_VER   "0.18.79"
+#define APP_VER   "0.18.80"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -617,6 +617,15 @@ int main(int argc, char **argv)
     bool forzar = (padGetButtons(&pad0) & HidNpadButton_ZR) != 0;
     mkdir("sdmc:/switch", 0777);
     mkdir("sdmc:/switch/XboxNX", 0777);
+    {
+        /* v0.18.80: el JIT sin los xmm en registros ni la página del operando
+         * anterior (como la v0.18.79), por si algo falla: crear jit_simple.txt */
+        struct stat sj;
+        if (stat("sdmc:/switch/XboxNX/jit_simple.txt", &sj) == 0) {
+            setenv("CPU_SIN_XMM", "1", 1);
+            setenv("CPU_SIN_PAGINA", "1", 1);
+        }
+    }
     bool probar = gpu_check_previous(forzar);
     if (probar) {
         g_gpu_log = fopen(GPU_LOG, "w");
