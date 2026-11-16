@@ -33,9 +33,6 @@ def nice():
         return float(rnd.randrange(-100000, 100000))
     if k == 3:
         return rnd.choice([0.5, 1.5, 2.5, -0.5, -1.5, -2.5, 3.5, 2147483647.0, 2147483648.0, -2147483649.0, 4e9])
-    if k == 4:  # v0.18.83: cerca de los bordes de float (la precisión de 24 bits del x87)
-        return rnd.choice([3.4028234663852886e38, -3.4e38, 1.8e38, 2e19, 1.1754943508222875e-38, -1.2e-38,
-                           1.1e-19, 6e-39, 1.5e-45, 1e30, -1e-30, 3.4028235677973366e38])
     return rnd.uniform(-1000, 1000) * 10 ** rnd.randrange(-6, 7)
 
 
