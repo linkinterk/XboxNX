@@ -2850,6 +2850,8 @@ void cpu_profile_name(uint32_t key, char *out, size_t n)
 
 #if defined(CPU_TEST_API) && defined(HAVE_JIT)
 /* Pruebas (tests/jit_size.c): traduce el bloque de eip y dice cuánto ocupa. */
+static const void *g_test_code;
+const void *cpu_test_jit_code(void) { return g_test_code; }
 size_t cpu_test_jit(Cpu *c, uint32_t eip, unsigned *ninsn, size_t *code_bytes)
 {
     Block *b = get_block(c, eip);
@@ -2862,6 +2864,7 @@ size_t cpu_test_jit(Cpu *c, uint32_t eip, unsigned *ninsn, size_t *code_bytes)
     }
     *ninsn = b->n;
     *code_bytes = (g_jit.used - before) - sizeof(JHdr) - (((size_t)b->n * sizeof(Insn) + 15) & ~(size_t)15);
+    g_test_code = b->jit;
     const char *dump = getenv("JIT_DUMP");
     if (dump) {
         FILE *f = fopen(dump, "ab");

@@ -55,6 +55,64 @@ def comiss_jcc():
     return code + bytes([0x70 | rnd.randrange(16), 0x01, 0x46])
 
 
+def jcc_mix():
+    """v0.18.86: test/cmp de 8 y 16 bits, inc/dec, add y alu con inmediatos
+    lógicos antes de un jcc; a veces un mov en medio y una alu después (los
+    flags ya no se leen tras el jcc: el JIT los deja solo en NZCV)."""
+    k = rnd.randrange(8)
+    if k >= 6:  # con memoria: [esi + d] (32 bits)
+        d = 4 * rnd.randrange(16)
+        c = rnd.randrange(4)
+        if c == 0:
+            prod = bytes([rnd.choice([0x39, 0x01, 0x29, 0x09, 0x21, 0x31, 0x85]), 0x46 | rnd.randrange(4) << 3, d])
+        elif c == 1:
+            prod = bytes([0x83, 0x46 | rnd.choice([0, 1, 4, 5, 6, 7]) << 3, d, rnd.getrandbits(8)])
+        elif c == 2:
+            prod = bytes([0x81, 0x46 | rnd.choice([0, 1, 4, 5, 6, 7]) << 3, d]) + \
+                rnd.choice([1, 0xFF, 0xFFFF0000, rnd.getrandbits(32)]).to_bytes(4, "little")
+        else:
+            prod = bytes([0xF7, 0x46, d]) + rnd.getrandbits(32).to_bytes(4, "little")  # test [esi+d], imm
+    elif k == 0:
+        r = rnd.randrange(8)
+        if rnd.random() < 0.5:
+            prod = bytes([0xF6, 0xC0 | r, rnd.choice([1, 0x10, 0x80, 0xFF, 0x05, rnd.getrandbits(8)])])
+        else:
+            prod = bytes([0x80, 0xF8 | r, rnd.choice([0, 1, 0x7F, 0x80, 0xFF, rnd.getrandbits(8)])])
+    elif k == 1:
+        prod = bytes([rnd.choice([0x84, 0x38, 0x3A]), 0xC0 | rnd.randrange(64)])
+    elif k == 2:
+        c = rnd.randrange(3)
+        if c == 0:
+            prod = bytes([0x66, rnd.choice([0x85, 0x39, 0x3B]), 0xC0 | rnd.randrange(64)])
+        elif c == 1:
+            prod = bytes([0x66, 0x81, 0xF8 | rnd.randrange(8)]) + rnd.choice(
+                [0, 1, 0x7FFF, 0x8000, 0xFFFF, rnd.getrandbits(16)]).to_bytes(2, "little")
+        else:
+            prod = bytes([0x66, 0xF7, 0xC0 | rnd.randrange(8)]) + rnd.getrandbits(16).to_bytes(2, "little")
+    elif k == 3:
+        prod = bytes([rnd.choice([0x40, 0x48]) + rnd.choice([0, 1, 2, 3, 5, 7])])
+    elif k == 4:
+        imm = rnd.choice([1, 0xFF, 0xFFFF, 0xFF00FF00, 0x0F0F0F0F, 0xFFFFFFF0, 0x7FFFFFFF, 0x80000000,
+                          0xFFFFF001, 0x00FFF000, 0xFFF, 0xFFFFFF01, rnd.getrandbits(32)])
+        prod = bytes([0x81, 0xC0 | rnd.choice([0, 1, 4, 5, 6, 7]) << 3 | rnd.choice([0, 1, 2, 3])]) + \
+            imm.to_bytes(4, "little")
+    else:
+        prod = bytes([rnd.choice([0x01, 0x29, 0x39]), 0xC0 | rnd.randrange(4) << 3 | rnd.randrange(4)])
+    code = prod
+    if rnd.random() < 0.3:
+        code += bytes([0x89, 0xC0 | rnd.randrange(4) << 3 | rnd.randrange(4)])  # mov: NZCV sigue
+    u = rnd.random()
+    if u < 0.2:  # setcc r8
+        code += bytes([0x0F, 0x90 | rnd.randrange(16), 0xC0 | rnd.randrange(8)])
+    elif u < 0.35:  # cmovcc r32, r32
+        code += bytes([0x0F, 0x40 | rnd.randrange(16), 0xC0 | rnd.randrange(4) << 3 | rnd.randrange(4)])
+    else:
+        code += bytes([0x70 | rnd.randrange(16), 0x01, 0x46])
+    if rnd.random() < 0.7:
+        code += bytes([0x83, 0xC7, 0x00])  # add edi, 0: pisa todos
+    return code
+
+
 def shift_lahf():
     """v0.18.81: shl/shr/sar de 8 o 32 bits (cuenta fija o CL) y lahf: AH de
     los flags perezosos del desplazamiento sin llamar a C."""
@@ -77,6 +135,8 @@ def piece():
         return shift_lahf()
     if rnd.random() < 0.15:
         return cmp_jcc()
+    if rnd.random() < 0.15:
+        return jcc_mix()
     if rnd.random() < 0.1:
         return comiss_jcc()
     if rnd.random() < 0.3:
@@ -125,8 +185,9 @@ def main():
         if outs[0] != outs[1]:
             fails += 1
             if fails <= 20:
-                print("FALLO %s\n  bloques   %s\n  intérprete %s" % (code.hex(), " ".join(outs[0][:11]),
-                                                                   " ".join(outs[1][:11])))
+                k = None if os.environ.get("BLOCK_SEQ_TODO") else 11
+                print("FALLO %s\n  bloques   %s\n  intérprete %s" % (code.hex(), " ".join(outs[0][:k]),
+                                                                   " ".join(outs[1][:k])))
                 if os.environ.get("BLOCK_SEQ_LINEA"):
                     print("  entrada: " + line.strip())
     for p in (pb, pi):

@@ -644,6 +644,15 @@ static bool emit_sse(Em *e, const Block *b, unsigned i, const Vm *vm)
             return true;
         }
         mem_at(e, in, ss ? 4 : 16, false, &s);
+        if (e->xc_on) { /* v0.18.86: directo al registro de la caché */
+            if (ss) {
+                ldrs_r(e, XV(x & 7u), W10, W11); /* el resto a cero */
+            } else {
+                ldrq_r(e, XV(x & 7u), W10, W11);
+            }
+            xc_wrote(e, x & 7u);
+            break;
+        }
         if (ss) {
             ldrs_r(e, 0, W10, W11); /* el resto a cero */
         } else {
@@ -784,7 +793,13 @@ static bool emit_sse(Em *e, const Block *b, unsigned i, const Vm *vm)
         default: { /* shufps */
             unsigned imm = in->imm & 0xFF;
             if (va == vb && (imm == 0x00 || imm == 0x55 || imm == 0xAA || imm == 0xFF)) {
-                /* v0.18.80: el mismo carril en los cuatro: dup */
+                /* v0.18.80: el mismo carril en los cuatro: dup (v0.18.86: en el
+                 * mismo registro de la caché si es ese) */
+                if (e->xc_on && va == (int)XV(x & 7u)) {
+                    E(e, 0x4E000400u | (((imm & 3u) << 3) | 4u) << 16 | (uint32_t)va << 5 | (uint32_t)va);
+                    xc_wrote(e, x & 7u);
+                    goto shuf_done;
+                }
                 E(e, 0x4E000400u | (((imm & 3u) << 3) | 4u) << 16 | (uint32_t)va << 5 | 2u); /* dup v2.4s, va.s[i] */
                 break;
             }
@@ -796,6 +811,8 @@ static bool emit_sse(Em *e, const Block *b, unsigned i, const Vm *vm)
         }
         }
         strq_i(e, 2, XC, XO + xo);
+        break;
+    shuf_done:
         break;
     }
     case 0x2E:
@@ -813,6 +830,15 @@ static bool emit_sse(Em *e, const Block *b, unsigned i, const Vm *vm)
         }
         int va = xreg(e, 0, x, true);
         fcmps(e, va, 1);
+        if (e->nzcv_only || e->lf_dead) {
+            /* v0.18.86: solo los lee el jcc que sigue (o nadie): NZCV de fcmp y
+             * nada en c->flags (el lento los calcula y los rehace) */
+            e->fz = true;
+            slow_tail(e, b, i, vm, &s);
+            e->lf_kind = LFK_FCMP;
+            e->nzcv = LFK_FCMP;
+            return true;
+        }
         /* sin orden: ZF PF CF; menor: CF; igual: ZF */
         cset(e, W10, COND_VS);
         cset(e, W11, COND_EQ);
@@ -900,6 +926,17 @@ static void emit_cf(Em *e, unsigned prev)
         regs_load(e);
         movw_r(e, W12, X0);
         return;
+    }
+}
+
+/* v0.18.86: el CF de antes para inc/dec (que lo dejan igual), solo si
+ * después alguien lo lee; si no, 0 (w12) */
+static void emit_cf_live(Em *e, unsigned prev)
+{
+    if (e->cf_dead) {
+        movw(e, W12, 0);
+    } else {
+        emit_cf(e, prev);
     }
 }
 
@@ -1050,6 +1087,44 @@ static bool emit_alu_any(Em *e, const Block *b, unsigned i, const Vm *vm, unsign
     bool mem = !in->is_reg;
     uint32_t m = sz == 1 ? 0xFFu : sz == 2 ? 0xFFFFu : 0xFFFFFFFFu;
     Slow sl = {{0}, 0};
+    if (e->nzcv_only && !mem && (sz == 1 || sz == 2) && (test_f || aop == OP_CMP)) {
+        /* v0.18.86: test / cmp de 8 o 16 bits que solo lee el jcc que sigue:
+         * los dos extendidos (con signo si el jcc es jl/jge/jle/jg) y un tst / cmp */
+        bool sx = !test_f && (e->nzcv_cc & 15u) >= 12;
+        unsigned ra = ge ? in->reg : in->rm, rb = ge ? in->rm : in->reg;
+        bool imm = f == x_alu_ei || f == x_test_ei;
+        opnd_ld(e, W9, false, ra, sz);
+        if (sx) {
+            E(e, (sz == 1 ? 0x13001C00u : 0x13003C00u) | (uint32_t)W9 << 5 | (uint32_t)W9); /* sxtb / sxth */
+        }
+        uint32_t iv = in->imm & m, enc;
+        if (imm && sx) {
+            iv = sz == 1 ? (uint32_t)(int32_t)(int8_t)iv : (uint32_t)(int32_t)(int16_t)iv;
+        }
+        if (test_f && imm && logimm32(iv, &enc)) {
+            E(e, LOGI_ANDS | enc | (uint32_t)W9 << 5 | 31u); /* tst w9, #imm */
+        } else if (!test_f && imm && iv < 4096) {
+            cmpwi(e, W9, iv);
+        } else if (!test_f && imm && (uint32_t)-iv < 4096) {
+            E(e, 0x3100001Fu | ((uint32_t)-iv) << 10 | (uint32_t)W9 << 5); /* cmn w9, #-imm */
+        } else {
+            if (imm) {
+                movw(e, W10, iv);
+            } else {
+                opnd_ld(e, W10, false, rb, sz);
+                if (sx) {
+                    E(e, (sz == 1 ? 0x13001C00u : 0x13003C00u) | (uint32_t)W10 << 5 | (uint32_t)W10);
+                }
+            }
+            if (test_f) {
+                E(e, 0x6A00001Fu | (uint32_t)W10 << 16 | (uint32_t)W9 << 5); /* tst w9, w10 */
+            } else {
+                cmpw(e, W9, W10);
+            }
+        }
+        e->lf_kind = e->nzcv = test_f ? LFK_TZ : LFK_CMPN;
+        return true;
+    }
     if (sz == 4 && !mem && !cin) {
         /* v0.18.61: de registros (o registro e inmediato) con los registros
          * del x86 directo; sin flags si nadie los lee */
@@ -1060,6 +1135,48 @@ static bool emit_alu_any(Em *e, const Block *b, unsigned i, const Vm *vm, unsign
         static const uint32_t opc[8] = {ADDW, ORRW, 0, 0, ANDW, SUBW, EORW, SUBW};
         static const uint32_t opcs[8] = {ADDW, ORRW, 0, 0, 0x6A000000u, 0x6B000000u, EORW, 0x6B000000u}; /* ands / subs */
         e->lf_kind = kind;
+        uint32_t lenc;
+        static const uint32_t logi[8] = {0, LOGI_ORR, 0, 0, LOGI_AND, 0, LOGI_EOR, 0};
+        bool limm = imm && (aop == OP_AND || aop == OP_OR || aop == OP_XOR) && logimm32(iv, &lenc);
+        bool aimm = imm && (aop == OP_ADD || aop == OP_SUB || aop == OP_CMP) && (iv < 4096 || (uint32_t)-iv < 4096);
+        if (e->nzcv_only && (limm || aimm)) {
+            /* v0.18.86: con el inmediato en la instrucción */
+            int out = wr ? d : 31;
+            if (limm) {
+                if (aop == OP_AND) {
+                    E(e, LOGI_ANDS | lenc | (uint32_t)d << 5 | (uint32_t)out); /* ands / tst */
+                } else {
+                    E(e, logi[aop] | lenc | (uint32_t)d << 5 | (uint32_t)d);
+                    E(e, 0x6A00001Fu | (uint32_t)d << 16 | (uint32_t)d << 5); /* tst d, d */
+                }
+            } else {
+                bool add = (aop == OP_ADD) == (iv < 4096);
+                uint32_t k = iv < 4096 ? iv : (uint32_t)-iv;
+                E(e, (add ? 0x31000000u : 0x71000000u) | k << 10 | (uint32_t)d << 5 | (uint32_t)out); /* adds / subs */
+            }
+            e->nzcv = kind;
+            return true;
+        }
+        if (e->nzcv_only) {
+            /* v0.18.86: solo los lee el jcc que sigue: NZCV y nada en memoria */
+            if (imm) {
+                movw(e, W10, iv);
+                src = W10;
+            } else {
+                src = k_rmap[ge ? in->rm : in->reg];
+            }
+            int out = wr ? d : W11;
+            if (aop == OP_ADD) {
+                rrr(e, 0x2B000000u, out, d, src); /* adds */
+            } else if (aop == OP_OR || aop == OP_XOR) {
+                rrr(e, opc[aop], out, d, src);
+                E(e, 0x6A00001Fu | (uint32_t)out << 16 | (uint32_t)out << 5); /* tst out, out */
+            } else {
+                rrr(e, opcs[aop], out, d, src);
+            }
+            e->nzcv = kind;
+            return true;
+        }
         if (e->lf_dead) {
             if (!wr) {
                 return true; /* cmp / test sin nadie que lea los flags */
@@ -1068,6 +1185,10 @@ static bool emit_alu_any(Em *e, const Block *b, unsigned i, const Vm *vm, unsign
                 bool add = (aop == OP_ADD) == (iv < 4096);
                 uint32_t k = iv < 4096 ? iv : (uint32_t)-iv;
                 E(e, (add ? 0x11000000u : 0x51000000u) | k << 10 | (uint32_t)d << 5 | (uint32_t)d);
+                return true;
+            }
+            if (limm) { /* v0.18.86: and / or / xor con el inmediato lógico */
+                E(e, logi[aop] | lenc | (uint32_t)d << 5 | (uint32_t)d);
                 return true;
             }
             if (imm) {
@@ -1079,23 +1200,25 @@ static bool emit_alu_any(Em *e, const Block *b, unsigned i, const Vm *vm, unsign
             rrr(e, opc[aop], d, d, src);
             return true;
         }
-        if (imm) {
-            movw(e, W10, iv);
-            src = W10;
-        } else {
-            src = k_rmap[ge ? in->rm : in->reg];
-        }
         movw(e, W12, kind | 4u << 8);
         strw(e, W12, XC, OFF(lf_op));
-        if (kind != LF_LOGIC) {
-            strw(e, d, XC, OFF(lf_a));
-            strw(e, src, XC, OFF(lf_b));
+        int out = wr ? d : W11; /* v0.18.86: directo al registro */
+        if (limm) { /* v0.18.86: las lógicas solo guardan el resultado: el inmediato en la instrucción */
+            E(e, (aop == OP_AND ? LOGI_ANDS : logi[aop]) | lenc | (uint32_t)d << 5 | (uint32_t)out);
+        } else {
+            if (imm) {
+                movw(e, W10, iv);
+                src = W10;
+            } else {
+                src = k_rmap[ge ? in->rm : in->reg];
+            }
+            if (kind != LF_LOGIC) {
+                strw(e, d, XC, OFF(lf_a));
+                strw(e, src, XC, OFF(lf_b));
+            }
+            rrr(e, opcs[aop], out, d, src);
         }
-        rrr(e, opcs[aop], W11, d, src);
-        strw(e, W11, XC, OFF(lf_res));
-        if (wr) {
-            mov_w(e, d, W11);
-        }
+        strw(e, out, XC, OFF(lf_res));
         e->nzcv = (aop == OP_SUB || aop == OP_CMP || aop == OP_AND) ? kind : 0;
         return true;
     }
@@ -1402,6 +1525,7 @@ static bool emit_int(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned p
         bool test = f == x_test_ei || f == x_test_eg;
         unsigned aop = test ? OP_AND : in->aop;
         bool wr = !test && aop != OP_CMP;
+        unsigned kind = aop == OP_ADD ? LF_ADD : (aop == OP_SUB || aop == OP_CMP) ? LF_SUB : LF_LOGIC;
         mem_addr4(e, in, wr, &s1, &s2, &s3);
         if (f == x_alu_eg || f == x_test_eg) {
             ldrw(e, W10, XC, ROFF(in->reg));
@@ -1409,16 +1533,39 @@ static bool emit_int(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned p
             movw(e, W10, in->imm);
         }
         ldrw(e, W9, W13, 0);
-        emit_alu_op(e, aop);
-        if (wr) {
-            strw(e, W11, W13, 0);
+        if (e->lf_dead) { /* v0.18.86: nadie lee los flags: solo el resultado (cmp/test: la lectura) */
+            static const uint32_t opc[8] = {ADDW, ORRW, 0, 0, ANDW, SUBW, EORW, SUBW};
+            if (wr) {
+                rrr(e, opc[aop], W11, W9, W10);
+                strw(e, W11, W13, 0);
+            }
+            e->lf_kind = kind;
+        } else if (e->nzcv_only) { /* v0.18.86: solo NZCV para el jcc / setcc que sigue */
+            if (aop == OP_ADD) {
+                rrr(e, 0x2B000000u, W11, W9, W10); /* adds */
+            } else if (aop == OP_OR || aop == OP_XOR) {
+                rrr(e, aop == OP_OR ? ORRW : EORW, W11, W9, W10);
+                E(e, 0x6A0B017Fu); /* tst w11, w11 */
+            } else {
+                rrr(e, aop == OP_AND ? 0x6A000000u : 0x6B000000u, W11, W9, W10); /* ands / subs */
+            }
+            if (wr) {
+                strw(e, W11, W13, 0);
+            }
+            e->lf_kind = e->nzcv = kind;
+            e->nzk = (uint8_t)kind; /* su lento (C) deja lf_*: NZCV de ahí */
+        } else {
+            emit_alu_op(e, aop);
+            if (wr) {
+                strw(e, W11, W13, 0);
+            }
         }
         uint32_t *done = fwd_b(e);
         fallback_tail(e, b, i, vm, done, s1, s2, s3);
         return true;
     }
     if (f == x_incdec && in->sz == 4 && !in->is_reg) {
-        emit_cf(e, prev);
+        emit_cf_live(e, prev);
         mem_addr4(e, in, true, &s1, &s2, &s3);
         ldrw(e, W9, W13, 0);
         if (in->aop) {
@@ -1438,7 +1585,7 @@ static bool emit_int(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned p
         bool mem = !in->is_reg;
         Slow sl = {{0}, 0};
         if (!e->lf_dead) {
-            emit_cf(e, prev);
+            emit_cf_live(e, prev);
             movw_r(e, W15, W12);
         }
         if (mem) {
@@ -1476,6 +1623,27 @@ static bool emit_int(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned p
         strw(e, W12, XC, OFF(eip));
         *ret = false;
         return true;
+    }
+    if ((f == x_setcc && in->is_reg) || (f == x_cmov && in->sz == 4 && in->is_reg)) {
+        /* v0.18.86: con los flags de ARM (de la anterior o rehechos de lf_*) */
+        int cc = (prev == LF_SUB || prev == LF_LOGIC || prev == LF_INC || prev == LF_DEC || prev == LF_ADD ||
+                  ((prev == LFK_TZ || prev == LFK_CMPN) && e->nzcv_prev == prev))
+                     ? arm_cond(prev, in->aop)
+                     : -1;
+        if (cc >= 0 && cc != 14 && cc != 16) {
+            if (e->nzcv_prev != prev) {
+                nzcv_of(e, prev);
+            }
+            if (f == x_setcc) {
+                cset(e, X0, cc);
+                strb(e, X0, XC, r8off(in->rm));
+            } else {
+                int d = k_rmap[in->reg], sr = k_rmap[in->rm];
+                E(e, 0x1A800000u | (uint32_t)d << 16 | (uint32_t)cc << 12 | (uint32_t)sr << 5 | (uint32_t)d); /* csel d, sr, d, cc */
+            }
+            e->nzcv = prev; /* NZCV sigue siendo de la anterior */
+            return true;
+        }
     }
     if (f == x_setcc && in->is_reg) {
         emit_cond_call(e, in->aop);
@@ -1529,6 +1697,11 @@ static bool emit_int(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned p
     }
     if (f == x_incdec && in->sz == 4 && in->is_reg) {
         int d = k_rmap[in->rm];
+        if (e->nzcv_only) { /* v0.18.86: solo para el jcc que sigue */
+            E(e, (in->aop ? 0x71000400u : 0x31000400u) | (uint32_t)d << 5 | (uint32_t)d); /* subs / adds d, d, #1 */
+            e->lf_kind = e->nzcv = in->aop ? LF_DEC : LF_INC;
+            return true;
+        }
         if (e->lf_dead) { /* v0.18.61: nadie lee sus flags: solo el registro */
             if (in->aop) {
                 subwi(e, d, d, 1);
@@ -1538,16 +1711,14 @@ static bool emit_int(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned p
             e->lf_kind = in->aop ? LF_DEC : LF_INC;
             return true;
         }
-        emit_cf(e, prev);
+        emit_cf_live(e, prev);
         mov_w(e, W9, d);
         movw(e, W10, 1);
-        if (in->aop) {
-            subwi(e, W11, W9, 1);
-        } else {
-            addwi(e, W11, W9, 1);
-        }
+        /* v0.18.86: subs / adds: NZCV sirve para un jcc que no mire CF */
+        E(e, (in->aop ? 0x71000400u : 0x31000400u) | (uint32_t)W9 << 5 | (uint32_t)W11);
         mov_w(e, d, W11);
         emit_lf_cin(e, in->aop ? LF_DEC : LF_INC);
+        e->nzcv = in->aop ? LF_DEC : LF_INC;
         return true;
     }
     if (f == x_shift && in->sz == 4 && in->is_reg && in->imm != 0xFF && (in->aop == 4 || in->aop == 5 ||
@@ -1582,6 +1753,7 @@ static bool emit_int(Em *e, const Block *b, unsigned i, const Vm *vm, unsigned p
     }
     if (f == x_call || (f == x_ret && in->imm < 4092)) {
         ldrw(e, W9, XC, ROFF(R_ESP));
+        e->pc_stack = true; /* v0.18.86: con la página guardada de la pila */
         if (f == x_call) {
             subwi(e, W9, W9, 4);
             emit_page(e, true, &s1, &s2, &s3);

@@ -68,10 +68,27 @@ int main(int argc, char **argv)
     if (!vm_init(&vm)) {
         return 1;
     }
-    /* todo el código del juego (como en la RAM capturada) */
-    for (uint32_t a = 0x10000; a + 0x1000 <= rn && a < 0x01000000u; a += 0x1000) {
-        vm_alloc_at(&vm, a, 0x1000);
-        vm_write(&vm, a, g_ram + a, 0x1000);
+    /* todo el código del juego (como en la RAM capturada); con PAGINAS=paginas.bin
+     * (del mismo volcado) cada página virtual va a su página física de verdad */
+    const char *pg = getenv("PAGINAS");
+    if (pg) {
+        static uint32_t pt[1u << 20];
+        FILE *pf = fopen(pg, "rb");
+        if (!pf || fread(pt, 4, 1u << 20, pf) != (1u << 20)) {
+            return 1;
+        }
+        fclose(pf);
+        for (uint32_t v = 0x10; v < 0x80000; v++) {
+            if (pt[v] && (size_t)pt[v] * 0x1000 <= rn) {
+                vm_alloc_at(&vm, v << 12, 0x1000);
+                vm_write(&vm, v << 12, g_ram + (size_t)(pt[v] - 1) * 0x1000, 0x1000);
+            }
+        }
+    } else {
+        for (uint32_t a = 0x10000; a + 0x1000 <= rn && a < 0x01000000u; a += 0x1000) {
+            vm_alloc_at(&vm, a, 0x1000);
+            vm_write(&vm, a, g_ram + a, 0x1000);
+        }
     }
     Cpu c;
     cpu_init(&c, &vm);

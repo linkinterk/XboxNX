@@ -35,7 +35,7 @@
 #include "apu/apu.h"
 #include <time.h>
 
-#define APP_VER   "0.18.85"
+#define APP_VER   "0.18.86"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -648,6 +648,7 @@ int main(int argc, char **argv)
         if (stat("sdmc:/switch/XboxNX/jit_simple.txt", &sj) == 0) {
             setenv("CPU_SIN_XMM", "1", 1);
             setenv("CPU_SIN_PAGINA", "1", 1);
+            setenv("CPU_SIN_VECINOS", "1", 1); /* v0.18.86: sin mirar el código que sigue al bloque */
         }
     }
     bool probar = gpu_check_previous(forzar);
