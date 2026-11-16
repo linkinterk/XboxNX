@@ -52,6 +52,7 @@ typedef struct HwStats {
     uint64_t pb_words;      /* palabras del push buffer recorridas */
     unsigned pb_stall;      /* 0 corre, 1 FLIP_STALL, 2 trampa, 3 FIFO cerrada, 4 error */
     unsigned traps, flips, sem_releases;
+    unsigned patt; /* v0.18.82: NV044_SET_MONOCHROME_COLOR0 (PATT_COLOR0: el progreso de la GPU para D3D) */
     unsigned frames_skipped; /* v0.18.74: cuadros que no se dibujaron (saltar cuadros) */
     unsigned flip_other; /* v0.18.74: cuadros terminados con otro destino puesto (se mostró el último lineal) */
     unsigned frames;        /* cambios de PCRTC_START: cuadros mostrados */

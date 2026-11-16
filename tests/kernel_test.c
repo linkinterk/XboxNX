@@ -1222,6 +1222,34 @@ static void hw_tests(void)
         CHECK(dw->draws == 2 && dw->vertices == 10 && dw->prims == ((1u << 5) | (1u << 6)));
         CHECK(fb[1 * 64 + 2] == 0xFF336699u && fb[31 * 64 + 63] == 0xFF336699u);
         CHECK(fb[0] == 0 && fb[1 * 64 + 1] == 0);
+        /* v0.18.82: el objeto de patrón (clase 0x44): SET_MONOCHROME_COLOR0
+         * queda en PGRAPH_PATT_COLOR0 (el D3D de Halo 2 lo lee para saber
+         * hasta dónde llegó la GPU) */
+        {
+            const uint32_t H_PATT = 0xBEEF0003u;
+            uint32_t hash = 0;
+            for (uint32_t h = H_PATT; h; h >>= 11) {
+                hash ^= h & 0x7FF;
+            }
+            uint32_t e = 0x10000 + 8 * (hash & 511);
+            v = H_PATT;
+            hw_mmio(&k, NV + 0x700000u + e, 4, true, &v);
+            v = 0x80000000u | (0x2200u >> 4);
+            hw_mmio(&k, NV + 0x700000u + e + 4, 4, true, &v);
+            v = 0x44;
+            hw_mmio(&k, NV + 0x700000u + 0x2200, 4, true, &v);
+            static const uint32_t pbp[] = {
+                (1u << 18) | (2u << 13) | 0x0000, H_PATT,      /* subcanal 2: el patrón */
+                (1u << 18) | (2u << 13) | 0x0310, 0x7A3C0064u, /* SET_MONOCHROME_COLOR0 */
+            };
+            memcpy(vm.ram + PB + 0x800, pbp, sizeof(pbp));
+            v = PB + 0x800;
+            hw_mmio(&k, NV + 0x800044u, 4, true, &v);
+            v = PB + 0x800 + (uint32_t)sizeof(pbp);
+            hw_mmio(&k, NV + 0x800040u, 4, true, &v);
+            CHECK(hw_mmio(&k, NV + 0x400B10u, 4, false, &v) && v == 0x7A3C0064u);
+            CHECK(hw_stats()->patt == 1);
+        }
         /* un dibujo: vertex program MOV oPos, v0; MOV oD0, v3 y un abanico
          * de vértices inmediatos rojo, de (8, 4) a (24, 12) */
         {

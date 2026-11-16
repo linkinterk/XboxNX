@@ -60,6 +60,7 @@
 #define NV_PGRAPH_SURFACE      0x400710u
 #define NV_PGRAPH_INCREMENT    0x40071Cu
 #define NV_PGRAPH_FIFO         0x400720u
+#define NV_PGRAPH_PATT_COLOR0  0x400B10u /* v0.18.82 */
 #define NV_PCRTC_INTR_0        0x600100u
 #define NV_PCRTC_INTR_EN_0     0x600140u
 #define NV_PCRTC_START         0x600800u
@@ -888,6 +889,16 @@ static int pb_method(Kernel *k, unsigned subch, uint32_t m, uint32_t v)
         g_hw.st.traps++;
         __atomic_store_n(&k->irq_kick, 1, __ATOMIC_RELEASE); /* que el ISR de D3D la atienda ya, no al final del turno */
         return PB_TRAP;
+    }
+    if (g_hw.obj_class[subch] == 0x44 && m == 0x0310) {
+        /* v0.18.82: NV044_SET_MONOCHROME_COLOR0 (como xemu): va a PGRAPH_PATT_COLOR0.
+         * El D3D de Halo 2 lo usa para saber hasta dónde llegó la GPU (la
+         * dirección del push buffer << 5 y un contador en los bits 2-6) y la
+         * espera en 003FA910 lo lee en un bucle; antes quedaba siempre en 0:
+         * el juego se trababa (cinemáticas, la pantalla quieta) o esperaba de más */
+        nv_st(NV_PGRAPH_PATT_COLOR0, v);
+        g_hw.st.patt++;
+        return PB_GO;
     }
     if (g_hw.obj_class[subch] != 0x97) {
         /* el informe de visibilidad no es de ninguna otra clase: si llega por

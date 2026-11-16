@@ -1089,6 +1089,7 @@ void ui_resumen_exit(Runner *r)
             (unsigned long long)gpu_stats()->swz_direct);
     fprintf(f, "superficies de otro ancho en la misma dirección (ya sin leer) %llu · ", (unsigned long long)gs->surf_alias);
     fprintf(f, "cuadros terminados con otro destino puesto %u (se mostró la última pantalla) · ", hw_stats()->flip_other);
+    fprintf(f, "avisos de progreso de la GPU (PATT_COLOR0) %u · ", hw_stats()->patt);
     fprintf(f, "órdenes rotas en la cola de la GPU %u, dibujos perdidos %u · ", gs->q_bad, gs->mt_lost);
     fprintf(f, "texturas con mipmaps %llu · anisotropía del driver %ux · dibujos de puntos o líneas %llu · ",
             (unsigned long long)gs->mipmaps, gs->aniso_max, (unsigned long long)gs->points_lines);
