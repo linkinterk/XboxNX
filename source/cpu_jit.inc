@@ -728,10 +728,47 @@ static void pc_post(Em *e, uint32_t *hit, int est, bool write)
 /* lea: al registro del x86 (sin segmento) */
 static void emit_ea_to(Em *e, const Insn *in, int dst) { emit_ea_at(e, in, false, dst); }
 
+/* v0.18.87: el operando es una dirección fija (mov eax, [0x404FE0]: las
+ * variables globales): la página y el offset se saben al traducir; queda
+ * leer la tabla, ver que esté (y que no tenga código si se escribe). */
+static int g_jit_pc = -1;
+static bool page_const(Em *e, bool write, unsigned n, uint32_t **slow1, uint32_t **slow2, uint32_t **slow3)
+{
+    const Insn *in = e->cur_in;
+    if (!g_jit_pc || !in || e->pc_stack || e->ea_mark != e->p || e->ea_in != in || in->base != NOREG ||
+        in->index != NOREG || in->fs) {
+        return false;
+    }
+    uint32_t a = in->disp, off = a & 0xFFFu, pg = a >> 12;
+    if (off > 0x1000u - n) {
+        return false;
+    }
+    e->pc_cand = false;
+    if (pg < 4096) {
+        E(e, 0xB9400000u | pg << 10 | (uint32_t)XPT << 5 | (uint32_t)W10); /* ldr w10, [x21, #pg * 4] */
+    } else {
+        movw(e, W10, pg);
+        ldrw_lsl2(e, W10, XPT, W10);
+    }
+    *slow2 = NULL;
+    *slow1 = page_miss(e);
+    *slow3 = NULL;
+    if (write) {
+        ldrb_r(e, W13, XCODE, W10);
+        *slow3 = fwd_cb(e, J_CBNZ, W13);
+    }
+    addx_lsl(e, W10, XRAM, W10, 12);
+    movw(e, W11, off);
+    return true;
+}
+
 /* Página de w9 (4 bytes enteros dentro): x10 = memoria del host, x11 = offset.
  * Si no está (o es de código y se va a escribir) salta al camino lento. */
 static void emit_page(Em *e, bool write, uint32_t **slow1, uint32_t **slow2, uint32_t **slow3)
 {
+    if (page_const(e, write, 4, slow1, slow2, slow3)) {
+        return;
+    }
     int est;
     uint32_t *hit = pc_pre(e, write, 4, &est);
     lsrw(e, W10, W9, 12);
@@ -1175,6 +1212,9 @@ static void strd_r(Em *e, int vt, int rn, int rm) { E(e, 0xFC206800u | (uint32_t
 /* Como emit_page, para 8 bytes. */
 static void emit_page8(Em *e, bool write, uint32_t **slow1, uint32_t **slow2, uint32_t **slow3)
 {
+    if (page_const(e, write, 8, slow1, slow2, slow3)) {
+        return;
+    }
     int est;
     uint32_t *hit = pc_pre(e, write, 8, &est);
     lsrw(e, W10, W9, 12);
@@ -1428,6 +1468,9 @@ static void strh_r(Em *e, int rt, int rn, int rm) { E(e, 0x78206800u | (uint32_t
 /* Como emit_page, para un acceso de n bytes. */
 static void emit_page_n(Em *e, bool write, unsigned n, uint32_t **slow1, uint32_t **slow2, uint32_t **slow3)
 {
+    if (page_const(e, write, n, slow1, slow2, slow3)) {
+        return;
+    }
     int est;
     uint32_t *hit = pc_pre(e, write, n, &est);
     lsrw(e, W10, W9, 12);
@@ -1931,9 +1974,6 @@ static unsigned nzcv_kind(const Insn *in)
     if (f == x_test_eg || f == x_test_ei) {
         return LF_LOGIC;
     }
-    if (f == x_alu_ge && !in->is_reg) {
-        return 0; /* reg op= [m]: va por emit_load_or_call */
-    }
     if (f == x_incdec) {
         return in->aop ? LF_DEC : LF_INC;
     }
@@ -2300,7 +2340,6 @@ static void emit_links(Em *e)
  * ninguna, no es una racha). */
 static int g_jit_no_runs = -1;
 static int g_jit_xc = -1; /* v0.18.80: CPU_SIN_XMM=1 deja los xmm siempre en memoria */
-static int g_jit_pc = -1; /* v0.18.80: CPU_SIN_PAGINA=1 apaga la página del operando anterior */
 static bool is_push32(const Insn *in)
 {
     return in->sz == 4 && ((in->fn == x_push_r && in->reg != R_ESP) || in->fn == x_push_i);

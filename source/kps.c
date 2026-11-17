@@ -1547,6 +1547,88 @@ static uint64_t KeSetTimerEx(KCall *c)
 /* KeCancelTimer(Timer) -> estaba puesto */
 static uint64_t KeCancelTimer(KCall *c) { return timer_cancel(c->k, c->a[0]); }
 
+/* v0.18.87: los temporizadores con handle (NtCreateTimer en kob.c) */
+static uint32_t timer_of_handle(Kernel *k, uint32_t h)
+{
+    ObType t;
+    uint32_t o = kob_lookup(k, h, &t);
+    return o && t == OB_TIMER ? o : 0;
+}
+/* NtSetTimerEx(Handle, *DueTime, ApcRoutine, ApcMode, ApcContext, Resume, Period, *PreviousState).
+ * Sin la rutina APC (quien espera el handle sí despierta). */
+static uint64_t NtSetTimerEx(KCall *c)
+{
+    uint32_t t = timer_of_handle(c->k, c->a[0]);
+    if (!t) {
+        return ST_INVALID_HANDLE;
+    }
+    if ((int32_t)c->a[6] < 0) {
+        return ST_INVALID_PARAMETER;
+    }
+    uint64_t due = rd(c->k, c->a[1]) | (uint64_t)rd(c->k, c->a[1] + 4) << 32;
+    uint64_t was = set_timer(c, t, due, c->a[6], 0);
+    if (c->a[7]) {
+        wr8(c->k, c->a[7], (uint8_t)was);
+    }
+    return ST_SUCCESS;
+}
+/* NtCancelTimer(Handle, *CurrentState) */
+static uint64_t NtCancelTimer(KCall *c)
+{
+    uint32_t t = timer_of_handle(c->k, c->a[0]);
+    if (!t) {
+        return ST_INVALID_HANDLE;
+    }
+    bool was = timer_cancel(c->k, t);
+    wr8(c->k, t + DH_INSERTED, 0);
+    if (c->a[1]) {
+        wr8(c->k, c->a[1], (uint8_t)!was); /* TRUE si ya no estaba puesto */
+    }
+    return ST_SUCCESS;
+}
+/* NtQueryTimer(Handle, *{ RemainingTime (64), TimerState }) */
+static uint64_t NtQueryTimer(KCall *c)
+{
+    uint32_t t = timer_of_handle(c->k, c->a[0]);
+    if (!t) {
+        return ST_INVALID_HANDLE;
+    }
+    int i = timer_find(c->k, t);
+    int64_t left = i >= 0 && c->k->timers[i].due_ns > c->k->now_ns
+                       ? (int64_t)((c->k->timers[i].due_ns - c->k->now_ns) / 100u)
+                       : 0;
+    wr(c->k, c->a[1], (uint32_t)left);
+    wr(c->k, c->a[1] + 4, (uint32_t)((uint64_t)left >> 32));
+    wr(c->k, c->a[1] + 8, (int32_t)rd(c->k, t + DH_SIGNAL) > 0);
+    return ST_SUCCESS;
+}
+
+/* v0.18.87: KeSuspendThread / KeResumeThread(Thread) -> la cuenta de antes */
+static uint64_t KeSuspendThread(KCall *c)
+{
+    int ti = thread_of(c->k, c->a[0]);
+    if (ti < 0) {
+        return 0;
+    }
+    uint32_t prev = c->k->threads[ti].suspend++;
+    if (ti == c->k->cur) {
+        c->resched = true;
+    }
+    return prev;
+}
+static uint64_t KeResumeThread(KCall *c)
+{
+    int ti = thread_of(c->k, c->a[0]);
+    if (ti < 0) {
+        return 0;
+    }
+    uint32_t prev = c->k->threads[ti].suspend;
+    if (prev) {
+        c->k->threads[ti].suspend--;
+    }
+    return prev;
+}
+
 /* KeInsertQueueDpc(Dpc, SystemArgument1, SystemArgument2) -> BOOLEAN */
 static uint64_t KeInsertQueueDpc(KCall *c) { return dpc_queue(c->k, c->a[0], c->a[1], c->a[2]); }
 
@@ -1594,6 +1676,14 @@ void kps_register(Kernel *k)
     kernel_impl(k, "PsTerminateSystemThread", PsTerminateSystemThread);
     kernel_impl(k, "NtResumeThread", NtResumeThread);
     kernel_impl(k, "NtSuspendThread", NtSuspendThread);
+    kernel_impl(k, "NtSetTimerEx", NtSetTimerEx);
+    kernel_impl(k, "NtCancelTimer", NtCancelTimer);
+    kernel_impl(k, "NtQueryTimer", NtQueryTimer);
+    kernel_impl(k, "KeSuspendThread", KeSuspendThread);
+    kernel_impl(k, "KeResumeThread", KeResumeThread);
+    /* v0.18.87: las "AndRegion" además apagan los APC del kernel (aquí no hay) */
+    kernel_impl(k, "RtlEnterCriticalSectionAndRegion", RtlEnterCriticalSection);
+    kernel_impl(k, "RtlLeaveCriticalSectionAndRegion", RtlLeaveCriticalSection);
     kernel_impl(k, "KeSetBasePriorityThread", KeSetBasePriorityThread);
     kernel_impl(k, "KeSetPriorityThread", KeSetPriorityThread);
     kernel_impl(k, "KeQueryBasePriorityThread", KeQueryBasePriorityThread);

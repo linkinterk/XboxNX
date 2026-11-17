@@ -35,7 +35,7 @@
 #include "apu/apu.h"
 #include <time.h>
 
-#define APP_VER   "0.18.86"
+#define APP_VER   "0.18.87"
 #define GAMES_DIR "sdmc:/xbox"
 #define MAX_GAMES 128
 
@@ -531,7 +531,7 @@ static void scan_games(void)
     if (dir) {
         struct dirent *de;
         while ((de = readdir(dir)) && n < MAX_GAMES) {
-            if (has_ext(de->d_name)) {
+            if (has_ext(de->d_name) && !xdisc_is_tail_part(de->d_name)) { /* v0.18.87: los trozos .2... van con el .1 */
                 snprintf(names[n++], sizeof(names[0]), "%s", de->d_name);
             }
         }
@@ -1044,6 +1044,8 @@ int main(int argc, char **argv)
      * hacía por su cuenta al terminar el programa, ya sin la RAM) */
     crash_step("cerrar la GPU");
     gpu_exit();
+    static char g_end_copy[160]; /* v0.18.87: por qué terminó el juego, para la caja negra */
+    snprintf(g_end_copy, sizeof(g_end_copy), "%s", g_run.end);
     crash_step("resumen al salir");
     if (g_run.k) {
         ui_resumen_exit(&g_run);
@@ -1061,7 +1063,7 @@ int main(int argc, char **argv)
     crash_step("cerrar la pantalla");
     framebufferClose(&g_fb);
     plExit();
-    sampler_mark_clean(); /* la caja negra: esta vez salió bien (la SD sigue montada hasta después de main) */
+    sampler_mark_clean(g_end_copy); /* la caja negra: esta vez salió bien (la SD sigue montada hasta después de main) */
     crash_step("después de main (libnx/Mesa al terminar)");
     return 0;
 }

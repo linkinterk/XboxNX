@@ -125,6 +125,91 @@ static unsigned count_calls(const char *name)
     return n;
 }
 
+/* v0.18.87: funciones del kernel que usan otros juegos (kextra.inc y las de
+ * temporizadores con handle), llamadas desde código x86 como hace un juego. */
+static void mov_ecx(uint32_t v) { b1(0xB9); d4(v); }
+static void mov_edx(uint32_t v) { b1(0xBA); d4(v); }
+static void add_esp(uint8_t n) { b1(0x83); b1(0xC4); b1(n); }
+static void extra_tests(void)
+{
+    const uint32_t S = SCRATCH;
+    g_pc = 0;
+    uint32_t main_va = here();
+    /* RtlSprintf(S+0x100, fmt, -42, "ab", 0x1F, L"wz") (cdecl) */
+    push(S + 0x60); push(0x1F); push(S + 0x50); push((uint32_t)-42); push(S + 0x20); push(S + 0x100);
+    kcall("RtlSprintf");
+    add_esp(24);
+    store_eax(S + 0x300);
+    /* RtlSnprintf(S+0x180, 4, "%d", 123456) -> -1 */
+    push(123456); push(S + 0x70); push(4); push(S + 0x180);
+    kcall("RtlSnprintf");
+    add_esp(16);
+    store_eax(S + 0x304);
+    /* SList: push a, push b, pop -> b */
+    mov_ecx(S + 0x200); mov_edx(S + 0x210);
+    kcall("InterlockedPushEntrySList");
+    mov_ecx(S + 0x200); mov_edx(S + 0x220);
+    kcall("InterlockedPushEntrySList");
+    mov_ecx(S + 0x200);
+    kcall("InterlockedPopEntrySList");
+    store_eax(S + 0x308);
+    mov_ecx(0x11223344);
+    kcall("RtlUlongByteSwap");
+    store_eax(S + 0x30C);
+    /* la lista doble: cabeza S+0x240 (vacía), insertar al final dos y sacar la primera */
+    mov_ecx(S + 0x240); mov_edx(S + 0x250);
+    kcall("ExfInterlockedInsertTailList");
+    mov_ecx(S + 0x240); mov_edx(S + 0x260);
+    kcall("ExfInterlockedInsertTailList");
+    mov_ecx(S + 0x240);
+    kcall("ExfInterlockedRemoveHeadList");
+    store_eax(S + 0x310);
+    /* RtlExtendedLargeIntegerDivide(0x1_00000007, 16, &rem) */
+    push(S + 0x318); push(16); push(1); push(7);
+    kcall("RtlExtendedLargeIntegerDivide");
+    store_eax(S + 0x314);
+    /* un temporizador con handle: 2 ms y esperarlo */
+    push(0); push(0); push(S + 0x280);
+    kcall("NtCreateTimer");
+    store_eax(S + 0x320);
+    push(0); push(0); push(0); push(0); push(0); push(0); push(S + 0x288); push_mem(S + 0x280);
+    kcall("NtSetTimerEx");
+    store_eax(S + 0x324);
+    push(0); push(0); push_mem(S + 0x280);
+    kcall("NtWaitForSingleObject");
+    store_eax(S + 0x328);
+    push(S + 0x2A0);
+    kcall("KeQuerySystemTime");
+    push(9);
+    kcall("HalReturnToFirmware");
+    boot(main_va);
+    static const char fmt1[] = "%d|%s|%04X|%ws|";
+    CHECK(vm_write(&vm, S + 0x20, fmt1, sizeof(fmt1)));
+    CHECK(vm_write(&vm, S + 0x50, "ab", 3));
+    CHECK(vm_write(&vm, S + 0x60, "w\0z\0\0", 6));
+    CHECK(vm_write(&vm, S + 0x70, "%d", 3));
+    wr(S + 0x240, S + 0x240);
+    wr(S + 0x244, S + 0x240);
+    wr(S + 0x288, (uint32_t)-20000);
+    wr(S + 0x28C, 0xFFFFFFFFu); /* 2 ms relativos */
+    uint64_t t0 = k.now_ns;
+    uint32_t esp0 = g_run.cpu.r[4];
+    CHECK(runner_slice(&g_run, 5000000) == RUN_SYSTEM_STOP);
+    char out[64] = "";
+    vm_read(&vm, S + 0x100, out, sizeof(out) - 1);
+    CHECK(!strcmp(out, "-42|ab|001F|wz|") && rd(S + 0x300) == 15);
+    CHECK(rd(S + 0x304) == 0xFFFFFFFFu);
+    CHECK(rd(S + 0x308) == S + 0x220 && rd(S + 0x200) == S + 0x210);
+    CHECK(rd(S + 0x30C) == 0x44332211u);
+    CHECK(rd(S + 0x310) == S + 0x250 && rd(S + 0x240) == S + 0x260 && rd(S + 0x264) == S + 0x240);
+    CHECK(rd(S + 0x314) == 0x10000000u && rd(S + 0x318) == 7);
+    CHECK(rd(S + 0x320) == 0 && rd(S + 0x324) == 0 && rd(S + 0x328) == 0);
+    CHECK(k.now_ns - t0 >= 2000000u);
+    CHECK(g_run.cpu.r[4] == esp0 - 4 || g_run.cpu.r[4] == esp0 - 8 || g_run.cpu.r[4] == esp0);
+    CHECK(g_run.simulated == 0);
+    printf("6 kernel para otros juegos: \"%s\", temporizador %llu ns\n", out, (unsigned long long)(k.now_ns - t0));
+}
+
 static void thread_tests(void)
 {
     /* 1) dos hilos: el principal crea otro, que duerme 1 ms, escribe su
@@ -1486,6 +1571,7 @@ int main(int argc, char **argv)
     CHECK(st >= 0xD0000000u && vm_phys(&vm, st) != VM_NO_PHYS && vm_phys(&vm, st - 1) == VM_NO_PHYS);
 
     thread_tests();
+    extra_tests();
     hw_tests();
     if (argc > 1) {
         io_tests(argv[1]);

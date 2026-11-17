@@ -1234,9 +1234,12 @@ static uint64_t XcVerifyPKCS1Signature(KCall *c)
     return fwd || rev;
 }
 
+#include "kextra.inc"
+
 void ksys_register(Kernel *k)
 {
     g_eeprom_ready = false;
+    kextra_register(k);
     kernel_impl(k, "RtlInitAnsiString", RtlInitAnsiString);
     kernel_impl(k, "RtlInitUnicodeString", RtlInitUnicodeString);
     kernel_impl(k, "RtlCompareString", RtlCompareString);

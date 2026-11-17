@@ -369,9 +369,10 @@ static void kernel_call(Runner *r)
                vm_rd32(c->vm, esp + 4));
         return;
     }
-    if (ord == 95) { /* KeBugCheck */
+    if (ord == 95 || ord == 96) { /* KeBugCheck / v0.18.87: KeBugCheckEx */
         rec->real = true;
-        finish(r, RUN_SYSTEM_STOP, "Error fatal del juego (KeBugCheck%s 0x%X)", "", vm_rd32(c->vm, esp + 4));
+        finish(r, RUN_SYSTEM_STOP, "Error fatal del juego (KeBugCheck%s 0x%X)", ord == 96 ? "Ex" : "",
+               vm_rd32(c->vm, esp + 4));
         return;
     }
     /* la implementación real, o un 0 simulado */

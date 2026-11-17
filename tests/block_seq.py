@@ -113,6 +113,40 @@ def jcc_mix():
     return code
 
 
+def abs_mem():
+    """v0.18.87: operandos de dirección fija ([0x100000 + d]): el JIT sabe la
+    página y el offset al traducir. También al borde de la página (lento)."""
+    d = rnd.choice([0, 4, 8, 0x40, 0x7C, 0x100, 0xFF8, 0xFFC, 0xFFD, 0xFFF, 4 * rnd.randrange(64)])
+    a = (0x100000 + d).to_bytes(4, "little")
+    r = rnd.randrange(4)
+    k = rnd.randrange(12)
+    if k == 0:
+        return bytes([0xA1]) + a  # mov eax, [a]
+    if k == 1:
+        return bytes([0xA3]) + a  # mov [a], eax
+    if k == 2:
+        return bytes([0x8B, 0x05 | r << 3]) + a
+    if k == 3:
+        return bytes([0x89, 0x05 | r << 3]) + a
+    if k == 4:  # cmp / add / sub / and / or / xor reg, [a] y un jcc
+        return bytes([rnd.choice([0x3B, 0x03, 0x2B, 0x23, 0x0B, 0x33]), 0x05 | r << 3]) + a + \
+            bytes([0x70 | rnd.randrange(16), 0x01, 0x46])
+    if k == 5:  # op [a], reg y un jcc
+        return bytes([rnd.choice([0x39, 0x01, 0x29, 0x21, 0x09, 0x31, 0x85]), 0x05 | r << 3]) + a + \
+            bytes([0x70 | rnd.randrange(16), 0x01, 0x46])
+    if k == 6:
+        return bytes([0x83, 0x05 | rnd.choice([0, 1, 4, 5, 6, 7]) << 3]) + a + bytes([rnd.getrandbits(8)])
+    if k == 7:
+        return bytes([0x0F, rnd.choice([0xB6, 0xB7, 0xBE, 0xBF]), 0x05 | r << 3]) + a
+    if k == 8:
+        return bytes([rnd.choice([0x8A, 0x88]), 0x05 | r << 3]) + a
+    if k == 9:
+        return bytes([0xFF, 0x05 | rnd.choice([0, 1]) << 3]) + a  # inc / dec dword [a]
+    if k == 10:
+        return bytes([0xC7, 0x05]) + a + rnd.getrandbits(32).to_bytes(4, "little")
+    return bytes([0x66, rnd.choice([0x8B, 0x89]), 0x05 | r << 3]) + a
+
+
 def shift_lahf():
     """v0.18.81: shl/shr/sar de 8 o 32 bits (cuenta fija o CL) y lahf: AH de
     los flags perezosos del desplazamiento sin llamar a C."""
@@ -137,6 +171,8 @@ def piece():
         return cmp_jcc()
     if rnd.random() < 0.15:
         return jcc_mix()
+    if rnd.random() < 0.12:
+        return abs_mem()
     if rnd.random() < 0.1:
         return comiss_jcc()
     if rnd.random() < 0.3:

@@ -17,6 +17,7 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -42,15 +43,9 @@ static uint32_t rd32(const uint8_t *p)
  * sin mapear"). */
 static pthread_mutex_t g_read_mx = PTHREAD_MUTEX_INITIALIZER;
 
-static bool read_at(const XDisc *d, void *buf, size_t len, uint64_t off)
+static bool read_fd(int fd, uint8_t *p, size_t len, uint64_t off)
 {
-    int fd = d->f ? d->fd : -1;
-    if (fd < 0) {
-        return false;
-    }
-    pthread_mutex_lock(&g_read_mx);
     bool ok = lseek(fd, (off_t)off, SEEK_SET) != (off_t)-1;
-    uint8_t *p = buf;
     while (ok && len) {
         ssize_t r = read(fd, p, len);
         if (r <= 0) {
@@ -60,8 +55,58 @@ static bool read_at(const XDisc *d, void *buf, size_t len, uint64_t off)
         p += r;
         len -= (size_t)r;
     }
+    return ok;
+}
+
+static bool read_at(const XDisc *d, void *buf, size_t len, uint64_t off)
+{
+    int fd = d->f ? d->fd : -1;
+    if (fd < 0) {
+        return false;
+    }
+    pthread_mutex_lock(&g_read_mx);
+    bool ok = true;
+    if (!d->nmore) {
+        ok = read_fd(fd, buf, len, off);
+    } else { /* v0.18.87: partida: cada trozo lo suyo */
+        uint8_t *p = buf;
+        for (int i = 0; ok && len && i <= d->nmore; i++) {
+            if (off >= d->size[i]) {
+                off -= d->size[i];
+                continue;
+            }
+            size_t n = d->size[i] - off < len ? (size_t)(d->size[i] - off) : len;
+            ok = read_fd(i ? fileno(d->more[i - 1]) : fd, p, n, off);
+            p += n;
+            len -= n;
+            off = 0;
+        }
+        ok = ok && !len;
+    }
     pthread_mutex_unlock(&g_read_mx);
     return ok;
+}
+
+/* v0.18.87: "nombre.N.iso" / "nombre.N.xiso": dónde está la N (NULL: no es) */
+static const char *part_digit(const char *name)
+{
+    const char *dot = strrchr(name, '.');
+    if (!dot || dot - name < 3 || (strcasecmp(dot, ".iso") && strcasecmp(dot, ".xiso"))) {
+        return NULL;
+    }
+    return dot[-2] == '.' && dot[-1] >= '1' && dot[-1] <= '8' ? dot - 1 : NULL;
+}
+
+bool xdisc_is_tail_part(const char *name)
+{
+    const char *n = part_digit(name);
+    return n && *n >= '2';
+}
+
+static uint64_t file_size(FILE *f)
+{
+    struct stat st;
+    return fstat(fileno(f), &st) == 0 && st.st_size > 0 ? (uint64_t)st.st_size : 0;
 }
 
 bool xdisc_open(XDisc *d, const char *path)
@@ -74,6 +119,22 @@ bool xdisc_open(XDisc *d, const char *path)
     }
     setvbuf(d->f, NULL, _IONBF, 0); /* solo se lee por el descriptor */
     d->fd = fileno(d->f);
+    const char *pn = part_digit(path);
+    if (pn && *pn == '1') { /* v0.18.87: los demás trozos */
+        d->size[0] = file_size(d->f);
+        char next[1024];
+        for (int i = 2; i <= 8 && strlen(path) < sizeof(next); i++) {
+            strcpy(next, path);
+            next[pn - path] = (char)('0' + i);
+            FILE *f = fopen(next, "rb");
+            if (!f) {
+                break;
+            }
+            setvbuf(f, NULL, _IONBF, 0);
+            d->more[d->nmore++] = f;
+            d->size[d->nmore] = file_size(f);
+        }
+    }
     for (size_t i = 0; i < sizeof(k_part_offsets) / sizeof(k_part_offsets[0]); i++) {
         uint8_t vd[XDISC_SECTOR];
         uint64_t off = k_part_offsets[i];
@@ -87,9 +148,7 @@ bool xdisc_open(XDisc *d, const char *path)
             return true;
         }
     }
-    fclose(d->f);
-    d->f = NULL;
-    d->fd = -1;
+    xdisc_close(d);
     return false;
 }
 
@@ -98,6 +157,10 @@ void xdisc_close(XDisc *d)
     if (d->f) {
         fclose(d->f);
     }
+    for (int i = 0; i < d->nmore; i++) {
+        fclose(d->more[i]);
+    }
+    d->nmore = 0;
     d->f = NULL;
     d->fd = -1;
 }
@@ -215,8 +278,14 @@ bool xdisc_read_abs(const XDisc *d, uint64_t abs, void *buf, size_t len) { retur
 
 uint64_t xdisc_image_size(const XDisc *d)
 {
-    struct stat st;
-    return d->f && fstat(d->fd, &st) == 0 && st.st_size > 0 ? (uint64_t)st.st_size : 0;
+    if (!d->f) {
+        return 0;
+    }
+    uint64_t t = file_size(d->f);
+    for (int i = 0; i < d->nmore; i++) {
+        t += d->size[i + 1];
+    }
+    return t;
 }
 
 static int walk(const uint8_t *dir, uint32_t size, uint32_t off, unsigned depth,

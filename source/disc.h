@@ -18,6 +18,11 @@
 typedef struct XDisc {
     FILE *f;
     int fd;                /* el de f: se lee directo, sin stdio */
+    /* v0.18.87: imágenes partidas (juego.1.iso + juego.2.iso..., para tarjetas
+     * FAT32, que no admiten archivos de más de 4 GB): los trozos, uno tras otro */
+    FILE *more[7];
+    int nmore;
+    uint64_t size[8];      /* de cada trozo (0: el de f) */
     uint64_t part_off;     /* donde empieza la partición del juego */
     uint32_t root_sector;
     uint32_t root_size;
@@ -29,7 +34,10 @@ typedef struct XDiscFile {
     uint8_t attr;          /* 0x10: carpeta */
 } XDiscFile;
 
-/* Abre una XISO o un volcado completo (offsets XGD1/XGD2/XGD3). */
+/* Abre una XISO o un volcado completo (offsets XGD1/XGD2/XGD3); si el nombre
+ * termina en .1.iso / .1.xiso, también sus trozos .2, .3... */
+/* ¿Es el trozo 2 o posterior de una imagen partida? (no va en la biblioteca) */
+bool xdisc_is_tail_part(const char *name);
 bool xdisc_open(XDisc *d, const char *path);
 void xdisc_close(XDisc *d);
 

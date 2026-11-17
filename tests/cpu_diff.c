@@ -56,6 +56,10 @@ int main(void)
         memset(fill, 0x90, sizeof(fill));
         vm_write(&vm, CODE_VA, fill, sizeof(fill));
         vm_write(&vm, CODE_VA, code, n);
+        /* v0.18.87: la página entera igual en cada caso (los operandos de
+         * dirección fija leen fuera de MEM_LEN: antes quedaba lo del caso anterior) */
+        static uint8_t page[0x1000]; /* ceros, como la de Unicorn */
+        vm_write(&vm, MEM_VA, page, sizeof(page));
         vm_write(&vm, MEM_VA, mem, MEM_LEN);
         static uint8_t zero[0x2000];
         vm_write(&vm, STACK_VA - 0x1000, zero, sizeof(zero));

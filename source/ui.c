@@ -1058,6 +1058,25 @@ void ui_resumen_exit(Runner *r)
     fprintf(f, "Al salir · decodificados %llu bloques, %.1f us c/u, el más lento %.2f ms\n", (unsigned long long)js.decodes,
             js.decodes ? (double)js.dec_ticks / (double)(js.ticks_per_s ? js.ticks_per_s : 1) * 1e6 / (double)js.decodes : 0.0,
             (double)js.dec_max / (double)(js.ticks_per_s ? js.ticks_per_s : 1) * 1e3);
+    /* v0.18.87: cómo terminó y las funciones del kernel que el juego llamó
+     * y no están hechas (devuelven 0): lo primero que mirar si otro juego falla */
+    if (r->end[0]) {
+        fprintf(f, "Al salir · el juego terminó: %s\n", r->end);
+    }
+    if (r->k) {
+        unsigned nm = 0;
+        for (unsigned ord = 1; ord < K_ORDINAL_MAX; ord++) {
+            const KExport *ke = kernel_export(ord);
+            if (!ke || ke->kind == KX_DATA || r->k->impl[ord] || !r->counts[ord]) {
+                continue;
+            }
+            fprintf(f, "%s %s×%llu", nm++ ? " ·" : "Al salir · funciones del kernel sin hacer que el juego llamó:", ke->name,
+                    (unsigned long long)r->counts[ord]);
+        }
+        if (nm) {
+            fprintf(f, "\n");
+        }
+    }
     fprintf(f, "Al salir · la hora sin salir de la CPU %llu veces; quién la pide:", (unsigned long long)r->kfast);
     for (unsigned j = 0; j < 8; j++) {
         if (r->kf_n[j]) {

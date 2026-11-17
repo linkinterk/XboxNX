@@ -279,6 +279,58 @@ static uint64_t KeInitializeTimerEx(KCall *c)
     return 0;
 }
 
+/* v0.18.87: NtCreateTimer(*Handle, ObjectAttributes, TimerType): un KTIMER con handle
+ * (los ponen NtSetTimerEx / NtCancelTimer de kps.c) */
+static uint64_t NtCreateTimer(KCall *c)
+{
+    uint32_t o;
+    uint64_t st = create_with_handle(c, OB_TIMER, 0x28, &o);
+    if (st == ST_SUCCESS) {
+        dispatcher_init(c->vm, o, (uint8_t)(8 + (c->a[2] & 1)), 0x28 / 4, 0);
+    }
+    return st;
+}
+
+/* v0.18.87: NtQueryEvent / NtQuerySemaphore / NtQueryMutant(Handle, *Information) */
+static uint64_t query_object(KCall *c, ObType want)
+{
+    ObType t;
+    uint32_t o = kob_lookup(c->k, c->a[0], &t);
+    if (!o) {
+        return ST_INVALID_HANDLE;
+    }
+    if (t != want) {
+        return ST_OBJECT_TYPE_MISMATCH;
+    }
+    uint32_t sig = vm_rd32(c->vm, o + DH_SIGNAL);
+    if (want == OB_EVENT) { /* { EventType, EventState } */
+        vm_wr32(c->vm, c->a[1], *vm_host(c->vm, o + DH_TYPE) == EVENT_SYNCHRONIZATION ? 1 : 0);
+        vm_wr32(c->vm, c->a[1] + 4, sig);
+    } else if (want == OB_SEMAPHORE) { /* { CurrentCount, MaximumCount } */
+        vm_wr32(c->vm, c->a[1], sig);
+        vm_wr32(c->vm, c->a[1] + 4, vm_rd32(c->vm, o + SEM_LIMIT));
+    } else { /* { CurrentCount, OwnedByCaller, AbandonedState } */
+        vm_wr32(c->vm, c->a[1], sig);
+        uint8_t z[2] = {(uint8_t)(vm_rd32(c->vm, o + 0x18) == c->k->current_thread), 0};
+        vm_write(c->vm, c->a[1] + 4, z, 2);
+    }
+    return ST_SUCCESS;
+}
+static uint64_t NtQueryEvent(KCall *c) { return query_object(c, OB_EVENT); }
+static uint64_t NtQuerySemaphore(KCall *c) { return query_object(c, OB_SEMAPHORE); }
+static uint64_t NtQueryMutant(KCall *c) { return query_object(c, OB_MUTANT); }
+
+/* v0.18.87: ObReferenceObjectByPointer(Object, ObjectType) */
+static uint64_t ObReferenceObjectByPointer(KCall *c)
+{
+    uint32_t hdr = c->a[0] - OB_HEADER;
+    if (c->a[1] && vm_rd32(c->vm, hdr + 0x8) != c->a[1]) {
+        return ST_OBJECT_TYPE_MISMATCH;
+    }
+    vm_wr32(c->vm, hdr, vm_rd32(c->vm, hdr) + 1);
+    return ST_SUCCESS;
+}
+
 /* ---- semáforos ---- */
 
 /* NtCreateSemaphore(*Handle, ObjectAttributes, InitialCount, MaximumCount) */
@@ -380,6 +432,11 @@ void kob_register(Kernel *k)
     kernel_impl(k, "KeInitializeDpc", KeInitializeDpc);
     kernel_impl(k, "KeInitializeTimerEx", KeInitializeTimerEx);
     kernel_impl(k, "NtCreateSemaphore", NtCreateSemaphore);
+    kernel_impl(k, "NtCreateTimer", NtCreateTimer);
+    kernel_impl(k, "NtQueryEvent", NtQueryEvent);
+    kernel_impl(k, "NtQuerySemaphore", NtQuerySemaphore);
+    kernel_impl(k, "NtQueryMutant", NtQueryMutant);
+    kernel_impl(k, "ObReferenceObjectByPointer", ObReferenceObjectByPointer);
     kernel_impl(k, "NtReleaseSemaphore", NtReleaseSemaphore);
     kernel_impl(k, "NtCreateMutant", NtCreateMutant);
     kernel_impl(k, "NtReleaseMutant", NtReleaseMutant);

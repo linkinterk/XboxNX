@@ -180,12 +180,19 @@ static void cn_tick(void)
     cn_write(NULL);
 }
 
-void sampler_mark_clean(void)
+void sampler_mark_clean(const char *end)
 {
     if (g_on || !g_cn_n) {
         return; /* primero sampler_stop; sin juego no hubo caja negra */
     }
-    cn_write("fin: salida normal");
+    /* v0.18.87: si el juego se detuvo solo, por qué (la app sí salió bien) */
+    char last[256];
+    if (end && end[0]) {
+        snprintf(last, sizeof(last), "el juego terminó: %s\nfin: salida normal", end);
+    } else {
+        snprintf(last, sizeof(last), "fin: salida normal");
+    }
+    cn_write(last);
     if (g_cnf) {
         fclose(g_cnf);
         g_cnf = NULL;
@@ -332,7 +339,7 @@ void sampler_stop(void)
 #else
 void sampler_stop(void) {}
 void sampler_set_status(void (*fn)(char *out, unsigned n)) { (void)fn; }
-void sampler_mark_clean(void) {}
+void sampler_mark_clean(const char *end) { (void)end; }
 
 void sampler_start(const volatile uint32_t *cur, Vm *vm, const char *version)
 {

@@ -31,6 +31,11 @@ jobs:
             -o build-test/host_test tests/host_test.c source/disc.c source/xbe.c source/game.c source/xpr.c
           ./build-test/host_test build-test/t.iso XISO
           ./build-test/host_test build-test/full.iso "Disco completo XGD2"
+          # v0.18.87: imagen partida en trozos (.1.iso, .2.iso, .3.iso)
+          head -c 66001 build-test/t.iso > build-test/p.1.iso
+          tail -c +66002 build-test/t.iso | head -c 5000 > build-test/p.2.iso
+          tail -c +71002 build-test/t.iso > build-test/p.3.iso
+          ./build-test/host_test build-test/p.1.iso XISO
           gcc -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -g -DXBOXNX_NO_GL -Isource \
             -o build-test/load_test tests/load_test.c source/disc.c source/xbe.c source/game.c source/xpr.c \
             source/vm.c source/kernel.c source/kmm.c source/kob.c source/kps.c source/kio.c source/ksys.c source/xc_crypto.c source/hw.c source/nv2a_sw.c source/vsh_glsl.c source/gpu.c source/workers.c source/prof.c source/aci.c build-test/apu/*.o source/loader.c source/sha1.c \

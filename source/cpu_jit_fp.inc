@@ -1241,6 +1241,36 @@ static bool emit_alu_any(Em *e, const Block *b, unsigned i, const Vm *vm, unsign
         }
     }
     unsigned kind;
+    if (sz == 4 && !cin && (e->lf_dead || e->nzcv_only)) {
+        /* v0.18.87: (reg op= [m] y las demás con memoria) sin guardar los
+         * flags: nadie los lee, o solo el jcc / setcc que sigue (NZCV) */
+        kind = aop == OP_ADD ? LF_ADD : (aop == OP_SUB || aop == OP_CMP) ? LF_SUB : LF_LOGIC;
+        bool nz = !e->lf_dead;
+        if (nz || wr) {
+            static const uint32_t pl[8] = {ADDW, ORRW, 0, 0, ANDW, SUBW, EORW, SUBW};
+            static const uint32_t fl[8] = {0x2B000000u, ORRW, 0, 0, 0x6A000000u, 0x6B000000u, EORW, 0x6B000000u};
+            rrr(e, nz ? fl[aop] : pl[aop], W11, W9, W10);
+            if (nz && (aop == OP_OR || aop == OP_XOR)) {
+                E(e, 0x6A0B017Fu); /* tst w11, w11 */
+            }
+        }
+        if (wr) {
+            if (ge) {
+                opnd_st(e, W11, false, in->reg, sz);
+            } else {
+                opnd_st(e, W11, mem, in->rm, sz);
+            }
+        }
+        if (nz) {
+            e->nzk = (uint8_t)kind; /* su lento (C) deja lf_*: NZCV de ahí */
+        }
+        slow_tail(e, b, i, vm, &sl);
+        e->lf_kind = kind;
+        if (nz) {
+            e->nzcv = kind;
+        }
+        return true;
+    }
     switch (aop) {
     case OP_ADD: rrr(e, ADDW, W11, W9, W10); kind = LF_ADD; break;
     case OP_ADC: rrr(e, ADDW, W11, W9, W10); rrr(e, ADDW, W11, W11, W15); kind = LF_ADD; break;

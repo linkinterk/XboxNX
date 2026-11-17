@@ -19,7 +19,7 @@ void sampler_stop(void);
  * (sin cierre.txt), ahí queda lo que pasaba justo antes. */
 void sampler_set_status(void (*fn)(char *out, unsigned n));
 /* La salida fue normal: lo anota al final de la caja negra. */
-void sampler_mark_clean(void);
+void sampler_mark_clean(const char *end);
 /* Muestras desde el principio en el bloque del JIT que empieza en eip. */
 uint32_t sampler_hits(uint32_t eip);
 /* Los n bloques con más muestras (de mayor a menor); total: todas las de bloques. */
